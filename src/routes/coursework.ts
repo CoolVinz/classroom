@@ -5,7 +5,7 @@ import { basename, resolve } from "node:path";
 import { sql } from "../db/client";
 import { requireActor } from "../auth/session";
 import { HttpError } from "../http-error";
-import { checkRequestOrigin, cleanText } from "../security";
+import { checkRequestOrigin, cleanText, normalizeEmail } from "../security";
 import { maxStoredBytes, uploadRoot, validateUpload, type UploadKind } from "../file-storage";
 
 async function ownedClassroom(classroomId: string, ownerId: string, includeArchived = false) {
@@ -28,7 +28,7 @@ async function ownedAssignment(classroomId: string, assignmentId: string, ownerI
   if (!assignment) throw new HttpError(404, "ไม่พบงานนี้");
 }
 
-const importRow = t.Object({ studentCode: t.String({ minLength: 1, maxLength: 50 }), displayName: t.String({ minLength: 1, maxLength: 120 }) });
+const importRow = t.Object({ studentCode: t.String({ minLength: 1, maxLength: 50 }), displayName: t.String({ minLength: 1, maxLength: 120 }), email: t.Optional(t.String({ maxLength: 254 })) });
 
 export const courseworkRoutes = new Elysia({ prefix: "/api" })
   .get("/classrooms/:classroomId/assignments", async ({ params, request }) => {
@@ -77,7 +77,8 @@ export const courseworkRoutes = new Elysia({ prefix: "/api" })
     return sql`
       SELECT f.id, f.assignment_id AS "assignmentId", f.student_id AS "studentId",
         s.display_name AS "studentName", f.kind, f.original_name AS "originalName",
-        f.media_type AS "mediaType", f.size_bytes AS "sizeBytes", f.created_at AS "createdAt"
+        f.media_type AS "mediaType", f.size_bytes AS "sizeBytes", f.created_at AS "createdAt",
+        f.submitted_by_account_id IS NOT NULL AS "studentSubmission"
       FROM classroom.files f LEFT JOIN classroom.students s ON s.id = f.student_id
       WHERE f.classroom_id = ${params.classroomId} AND f.assignment_id = ${params.assignmentId}
       ORDER BY f.created_at DESC
@@ -174,12 +175,16 @@ export const courseworkRoutes = new Elysia({ prefix: "/api" })
     const actor = await requireActor(request);
     await ownedClassroom(params.classroomId, actor.id);
     const seen = new Set<string>();
+    const seenEmails = new Set<string>();
     const rows = body.students.map((row) => {
       const studentCode = cleanText(row.studentCode, 50);
       const displayName = cleanText(row.displayName, 120);
+      const email = normalizeEmail(row.email);
       if (seen.has(studentCode)) throw new HttpError(422, "ไฟล์มีรหัสนักเรียนซ้ำ");
       seen.add(studentCode);
-      return { studentCode, displayName };
+      if (email && seenEmails.has(email)) throw new HttpError(422, "อีเมลนักเรียนซ้ำในไฟล์");
+      if (email) seenEmails.add(email);
+      return { studentCode, displayName, email };
     });
     return sql.begin(async (tx) => {
       const [room] = await tx<{ id: string }[]>`SELECT id FROM classroom.classrooms WHERE id = ${params.classroomId} AND owner_id = ${actor.id} AND archived_at IS NULL FOR UPDATE`;
@@ -187,12 +192,17 @@ export const courseworkRoutes = new Elysia({ prefix: "/api" })
       let added = 0;
       for (const row of rows) {
         const inserted = await tx<{ id: string }[]>`
-          INSERT INTO classroom.students (classroom_id, student_code, display_name)
-          VALUES (${params.classroomId}, ${row.studentCode}, ${row.displayName})
+          INSERT INTO classroom.students (classroom_id, student_code, display_name, email)
+          VALUES (${params.classroomId}, ${row.studentCode}, ${row.displayName}, ${row.email})
           ON CONFLICT (classroom_id, student_code) DO NOTHING RETURNING id
         `;
         added += inserted.length;
       }
       return { added, skipped: rows.length - added };
+    }).catch((error) => {
+      if (error && typeof error === "object" && "code" in error && error.code === "23505") {
+        throw new HttpError(409, "มีอีเมลนี้อยู่ในห้องเรียนแล้ว");
+      }
+      throw error;
     });
   }, { body: t.Object({ students: t.Array(importRow, { minItems: 1, maxItems: 1000 }) }) });

@@ -36,6 +36,12 @@ UPLOAD_MAX_TOTAL_BYTES (defaults to 5 GiB)
 OWNER_USERNAME (first-owner setup only)
 OWNER_DISPLAY_NAME (first-owner setup only)
 OWNER_PASSWORD (first-owner setup only)
+SMTP_HOST
+SMTP_PORT (defaults to 587; port 465 uses TLS by default)
+SMTP_SECURE (optional; true for implicit TLS)
+SMTP_USER (optional if the relay does not require authentication)
+SMTP_PASSWORD (optional; keep as a Coolify secret)
+EMAIL_FROM
 ```
 
 `APP_URL` must be the public HTTPS origin. Initial owner variables create an owner only if none exists; remove them from Coolify after the first successful startup.
@@ -48,11 +54,12 @@ OWNER_PASSWORD (first-owner setup only)
 - Database backups are managed at the PostgreSQL service; the app container has no independent backup or migration rollback workflow.
 - The file quota is enforced from registered PostgreSQL file rows across classrooms. Keep actual free disk space above the configured quota; interrupted staging files are cleaned at startup.
 - Login throttling is process-local, so the documented initial target is a single application container.
-- No Coolify volume declaration, compose file, CI pipeline, external monitoring, mail delivery, object storage, or cache is configured in the repository. Configure the volume in Coolify directly.
+- Student invitations and password recovery use a configurable SMTP transport. No mail provider or credentials are provisioned by the repository; set the SMTP variables in Coolify before sending invitations.
+- No Coolify volume declaration, compose file, CI pipeline, external monitoring, object storage, or cache is configured in the repository. Configure the volume in Coolify directly.
 
 ## Deploy and initialize
 
-See [README deployment instructions](../README.md). After configuring the database role/schema and Coolify runtime values, the first app startup applies the migration. Supply the initial owner values for that first startup, then remove them. Verify `/health/ready` before inviting teachers.
+See [README deployment instructions](../README.md). After configuring the database role/schema and Coolify runtime values, the first app startup applies the migration. Supply the initial owner values for that first startup, then remove them. Verify `/health/ready` and SMTP delivery before inviting students.
 
 ## Open questions
 

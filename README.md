@@ -4,12 +4,12 @@ A Thai-language classroom manager for teachers. It runs on Bun + ElysiaJS, serve
 
 ## Included
 
-- Teacher sign-in; an owner can create, disable, and reset teacher accounts.
+- Teacher sign-in; an owner can create, disable, and reset teacher accounts. Students use email invitations and can join more than one classroom with the same account.
 - Teacher-owned classrooms and student rosters. Students can be archived and restored without deleting attendance history.
 - Daily attendance with present, absent, late, excused, and unmarked states.
 - Classroom summaries by student and date range.
-- XLSX/CSV roster import by student ID; existing and archived IDs are skipped.
-- Classroom assignments, worksheet uploads, and student-linked STL/OBJ models with browser previews.
+- XLSX/CSV roster import by student ID with optional email mapping; existing and archived IDs are skipped without changing their details.
+- Classroom assignments, teacher worksheets, and private student submissions in PDF, image, Word, STL, or OBJ formats. Students can preview their own STL/OBJ files; teachers see submission status and can preview or download class work.
 - Thai interface, Bangkok date boundaries, and layouts for desktop and mobile.
 
 ## Local development
@@ -75,9 +75,12 @@ Connect this Git repository as a Dockerfile application and use the repository-r
 - `UPLOAD_DIR`: persistent upload directory; production default `/app/uploads` (the local `.env.example` uses `./uploads`).
 - `UPLOAD_MAX_FILE_BYTES`: per-file limit; default 50 MiB.
 - `UPLOAD_MAX_TOTAL_BYTES`: total file limit across the app; default 5 GiB.
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASSWORD`, and `EMAIL_FROM`: configure mail delivery for student invitations and password recovery. Set SMTP credentials as Coolify secrets. The app starts without SMTP, but invitations and password recovery require it.
 - `OWNER_USERNAME`, `OWNER_DISPLAY_NAME`, and `OWNER_PASSWORD`: optional bootstrap values for the first deployment only. The app creates the initial owner only if no owner exists. Remove these values from Coolify after the first successful startup.
 
 Mount a persistent Coolify volume at `/app/uploads` and ensure it is writable by the `bun` user (UID 1000). Keep off-server backups of both PostgreSQL and that volume. A volume survives normal container replacement but is not a backup. Do not add a database URL to the image or commit a `.env` file. Use a dedicated database login instead of the PostgreSQL administrator account. Configure Coolify's health check to use `/health/ready`.
+
+Student invitation links are one-time links valid for 24 hours; password recovery links are one-time links valid for one hour. Set `APP_URL` to the public HTTPS origin and configure a working SMTP sender before inviting students. For local Vite development, use `http://localhost:5173`.
 
 ## Important operational details
 
@@ -86,4 +89,4 @@ Mount a persistent Coolify volume at `/app/uploads` and ensure it is writable by
 - Passwords are hashed with Argon2id. Sessions are stored as hashes in PostgreSQL and expire after 14 days.
 - Attendance is one record per student per class per date. Unmarked students stay unmarked; the summary counts only saved statuses.
 - Teacher accounts can access only classrooms they own. The owner manages teacher accounts but does not gain access to a teacher's classroom data.
-- Login throttling is in-memory per username and per application process; it is suitable for the initial single-container deployment.
+- Login throttling is in-memory per account identifier and per application process; it is suitable for the initial single-container deployment.

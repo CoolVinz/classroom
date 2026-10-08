@@ -37,4 +37,27 @@ describe("student roster import", () => {
     expect(previewRoster(rows, { code: 0, fullName: 1 }, new Set()).add).toHaveLength(1);
     expect(previewRoster(rows, { code: 0, fullName: 1 }, new Set(["0008"])).skipped[0]).toMatchObject({ studentCode: "0008", displayName: "นักเรียนไทย" });
   });
+
+  test("maps optional email for new students without changing existing IDs", () => {
+    const result = previewRoster([
+      ["ID", "Name", "Email"],
+      ["0009", "New Student", "NEW@SCHOOL.EDU"],
+      ["0010", "Existing Student", "changed@school.edu"],
+    ], { code: 0, fullName: 1, email: 2 }, new Set(["0010"]));
+    expect(result.add).toMatchObject([{ studentCode: "0009", email: "new@school.edu" }]);
+    expect(result.skipped).toMatchObject([{ studentCode: "0010" }]);
+    expect(result.skipped[0]).not.toHaveProperty("email");
+  });
+
+  test("rejects invalid and duplicate emails for new roster rows", () => {
+    const result = previewRoster([
+      ["ID", "Name", "Email"],
+      ["1", "Invalid", "not-an-email"],
+      ["2", "First", "same@school.edu"],
+      ["3", "Second", "SAME@school.edu"],
+      ["4", "Already in class", "used@school.edu"],
+    ], { code: 0, fullName: 1, email: 2 }, new Set(), new Set(["used@school.edu"]));
+    expect(result.add).toHaveLength(0);
+    expect(result.errors).toHaveLength(4);
+  });
 });

@@ -5,7 +5,7 @@ const ModelPreview = lazy(() => import("./ModelPreview"));
 type Classroom = { id: string };
 type Student = { id: string; displayName: string; studentCode: string | null; archived: boolean };
 type Assignment = { id: string; title: string; instructions: string; archived: boolean; fileCount: number };
-type ClassFile = { id: string; studentId: string | null; studentName: string | null; kind: "worksheet" | "model"; originalName: string; mediaType: string; sizeBytes: number | string };
+type ClassFile = { id: string; studentId: string | null; studentName: string | null; kind: "worksheet" | "model" | "submission"; originalName: string; mediaType: string; sizeBytes: number | string; createdAt: string; studentSubmission: boolean };
 
 export function ClassroomWork({ room, onError }: { room: Classroom; onError: (message: string) => void }) {
   const [assignments, setAssignments] = useState<Assignment[]>([]);
@@ -22,6 +22,8 @@ export function ClassroomWork({ room, onError }: { room: Classroom; onError: (me
   const [uploading, setUploading] = useState(false);
   const [preview, setPreview] = useState<ClassFile | null>(null);
   const selected = assignments.find((assignment) => assignment.id === selectedId) ?? null;
+  const activeStudents = students.filter((student) => !student.archived);
+  const submittedStudentIds = new Set(files.filter((file) => file.studentSubmission && file.studentId).map((file) => file.studentId!));
 
   const loadAssignments = useCallback(async () => {
     try {
@@ -108,7 +110,8 @@ export function ClassroomWork({ room, onError }: { room: Classroom; onError: (me
 
     {selected && <section className="panel"><header className="panel-heading"><div><p className="eyebrow">{room.id && "งานในห้องเรียน"}{selected.archived ? " · เก็บแล้ว" : ""}</p>{editing ? <form className="assignment-form" onSubmit={(event) => void saveAssignment(event)}><label>ชื่องาน<input maxLength={120} value={title} onChange={(event) => setTitle(event.target.value)} required/></label><label>คำชี้แจง<textarea maxLength={5000} rows={3} value={instructions} onChange={(event) => setInstructions(event.target.value)}/></label><div className="assignment-actions"><Button disabled={!title.trim()}>บันทึก</Button><Button type="button" tone="quiet" onClick={() => setEditing(false)}>ยกเลิก</Button></div></form> : <><h2>{selected.title}</h2>{selected.instructions && <p className="muted assignment-instructions">{selected.instructions}</p>}</>}</div><div className="assignment-actions">{!editing && !selected.archived && <button className="text-button" onClick={() => { setTitle(selected.title); setInstructions(selected.instructions); setEditing(true); }}>แก้ไข</button>}{!editing && <Button tone="quiet" onClick={() => void archiveAssignment(!selected.archived)}>{selected.archived ? "นำกลับมา" : "เก็บงาน"}</Button>}</div></header>
       {!selected.archived && !editing && <form className="work-upload" onSubmit={(event) => void uploadFiles(event)}><label>ประเภทไฟล์<select value={kind} onChange={(event) => setKind(event.target.value as "worksheet" | "model")}><option value="worksheet">ใบงาน / เอกสาร</option><option value="model">โมเดลของนักเรียน</option></select></label>{kind === "model" && <label>นักเรียน<select value={studentId} onChange={(event) => setStudentId(event.target.value)} required><option value="">เลือกนักเรียน</option>{students.filter((student) => !student.archived).map((student) => <option value={student.id} key={student.id}>{student.displayName}{student.studentCode ? " · " + student.studentCode : ""}</option>)}</select></label>}<label className="work-file-input">เลือกไฟล์<input name="uploadFiles" type="file" accept={accept} multiple required/></label><Button disabled={uploading || (kind === "model" && !studentId)}>{uploading ? "กำลังอัปโหลด…" : "อัปโหลดไฟล์"}</Button><small>ไม่เกิน 50 MB ต่อไฟล์</small></form>}
-      {files.length ? <div className="work-file-list">{files.map((file) => <article className="work-file" key={file.id}><span className={"file-kind " + file.kind}>{file.kind === "model" ? "3D" : "PDF"}</span><div className="work-file-copy"><strong>{file.originalName}</strong><small>{file.kind === "model" ? file.studentName ?? "ไม่พบชื่อนักเรียน" : "ใบงาน"} · {formatBytes(Number(file.sizeBytes))}</small></div><div className="work-file-actions">{file.kind === "model" ? <><button className="text-button" onClick={() => setPreview(file)}>แสดงตัวอย่าง</button><a className="text-button" href={"/api/files/" + file.id + "/content"} download>ดาวน์โหลด</a></> : <a className="text-button" href={"/api/files/" + file.id + "/content"} target="_blank" rel="noreferrer">เปิดไฟล์</a>}<button className="text-button subdued" onClick={() => void removeFile(file)}>ลบ</button></div></article>)}</div> : <p className="muted assignment-empty">ยังไม่มีไฟล์แนบในงานนี้</p>}
+      {selected && !selected.archived && activeStudents.length > 0 && <div className="submission-roster"><h3>สถานะการส่งงาน</h3><p className="muted">ส่งแล้ว {activeStudents.filter((student) => submittedStudentIds.has(student.id)).length} จาก {activeStudents.length} คน</p><div>{activeStudents.map((student) => <span key={student.id} className={submittedStudentIds.has(student.id) ? "submitted" : "not-submitted"}>{student.displayName}: {submittedStudentIds.has(student.id) ? "ส่งแล้ว" : "ยังไม่ส่ง"}</span>)}</div></div>}
+      {files.length ? <div className="work-file-list">{files.map((file) => <article className="work-file" key={file.id}><span className={"file-kind " + (file.kind === "model" ? "model" : "")}>{file.kind === "model" ? "3D" : file.kind === "worksheet" ? "PDF" : file.mediaType.includes("word") ? "DOC" : file.mediaType.startsWith("image/") ? "IMG" : "PDF"}</span><div className="work-file-copy"><strong>{file.originalName}</strong><small>{file.kind === "worksheet" ? "ใบงาน" : file.studentName ?? "ไม่พบชื่อนักเรียน"}{file.studentSubmission ? " · ส่งโดยนักเรียน" : ""} · {formatDate(file.createdAt)} · {formatBytes(Number(file.sizeBytes))}</small></div><div className="work-file-actions">{file.kind === "model" && <button className="text-button" onClick={() => setPreview(file)}>แสดงตัวอย่าง</button>}<a className="text-button" href={"/api/files/" + file.id + "/content"} target={file.kind !== "model" && (file.mediaType === "application/pdf" || file.mediaType.startsWith("image/")) ? "_blank" : undefined} rel="noreferrer" download={file.kind === "model" || (file.kind !== "worksheet" && !file.mediaType.startsWith("image/") && file.mediaType !== "application/pdf") ? true : undefined}>{file.kind === "model" ? "ดาวน์โหลด" : "เปิดไฟล์"}</a><button className="text-button subdued" onClick={() => void removeFile(file)}>ลบ</button></div></article>)}</div> : <p className="muted assignment-empty">ยังไม่มีไฟล์แนบในงานนี้</p>}
     </section>}
     {preview && <Suspense fallback={<div className="loading"><span className="spinner"/>กำลังเปิดตัวแสดงโมเดล…</div>}><ModelPreview file={preview} close={() => setPreview(null)}/></Suspense>}
   </>;
@@ -117,6 +120,10 @@ export function ClassroomWork({ room, onError }: { room: Classroom; onError: (me
 function formatBytes(bytes: number) {
   if (bytes < 1024 * 1024) return Math.max(1, Math.round(bytes / 1024)) + " KB";
   return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+function formatDate(value: string) {
+  return new Intl.DateTimeFormat("th-TH", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Bangkok" }).format(new Date(value));
 }
 
 function Button(props: React.ButtonHTMLAttributes<HTMLButtonElement> & { tone?: "primary" | "quiet" }) {

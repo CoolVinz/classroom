@@ -6,7 +6,7 @@
 
 **Description:** Teacher-facing classroom app for rosters, attendance, assignments, worksheets, and student 3D model submissions.
 
-**Status:** Classroom features are implemented in the working tree. These changes still need to be deployed to Coolify; production uploads require the persistent volume described in `docs/OPS-001-deployment.md`.
+**Status:** Student submissions are implemented in this revision. Production deployment is not verified; uploads require the persistent volume and student accounts require SMTP settings described in `docs/OPS-001-deployment.md`.
 
 **Documentation Status:** Retrofitted; see `PROJECT_INDEX.md` for selective retrieval.
 
@@ -29,7 +29,7 @@ Validation: Browser constraints and Elysia/TypeBox request validation
 Runtime: Bun (local checks used Bun 1.2.2; Docker runtime is pinned to Bun 1.4.2)
 Framework: Elysia 1.4
 API style: JSON HTTP routes under `/api`
-Authentication: Argon2id password hashes and PostgreSQL-backed, hashed 14-day session tokens in HttpOnly cookies
+Authentication: Argon2id teacher/student password hashes; separate PostgreSQL-backed, hashed 14-day sessions in HttpOnly cookies; one-time expiring student invitation and reset tokens
 Background jobs: None
 
 ## Database
@@ -47,7 +47,7 @@ Reverse proxy: Coolify domain/HTTPS proxy, configured outside this repository
 File storage: Local `./uploads` by default in development; Coolify persistent volume at `/app/uploads` in production. PostgreSQL stores file metadata and ownership.
 Cache: None
 Queue: None
-Email: None
+Email: Nodemailer SMTP for student invitations and password recovery; requires runtime SMTP configuration
 Monitoring: `/health/live` and database-aware `/health/ready`; no external monitoring integration
 
 ---
@@ -58,7 +58,7 @@ Runtime: Bun
 Package manager: Bun
 Lock file: `bun.lock`
 
-Important resolved dependencies include Elysia 1.4.30, React 19.3.0, Vite 8.3.3, Three.js 0.186.1, SheetJS CE 0.20.3, `@vitejs/plugin-react` 6.1.2, TypeScript 5.9.3, and Postgres.js 3.4.9.
+Important resolved dependencies include Elysia 1.4.30, React 19.3.0, Vite 8.3.3, Three.js 0.186.1, SheetJS CE 0.20.3, Nodemailer 10.0.16, `@vitejs/plugin-react` 6.1.2, TypeScript 5.9.3, and Postgres.js 3.4.9.
 
 ---
 
@@ -66,12 +66,15 @@ Important resolved dependencies include Elysia 1.4.30, React 19.3.0, Vite 8.3.3,
 
 ```text
 src/server.ts                 Elysia application, health routes, static files
-src/routes/                   Authentication, classroom, attendance, teacher, assignment/file APIs
+src/routes/                   Teacher/student authentication, classroom, attendance, teacher, assignment/file APIs
 src/auth/session.ts           Session cookies, lookup, and access checks
+src/student-mail.ts           SMTP delivery for student invitation and reset links
 src/db/                       PostgreSQL client, startup migration, owner setup
 src/db/migrations/            Ordered tracked PostgreSQL schema migrations
 src/file-storage.ts           Upload validation, size limits, and persistent volume
-web/src/ClassroomWork.tsx     Assignment and file workflows
+web/src/ClassroomWork.tsx     Teacher assignment and submission review workflows
+web/src/StudentPortal.tsx     Student assignment and submission workflow
+web/src/StudentAccess.tsx     Student invitation activation and password recovery
 web/src/roster-import.ts      XLSX/CSV parsing and roster preview
 web/src/ModelPreview.tsx      Three.js viewer
 web/src/model-preview.worker.ts STL/OBJ parser worker
@@ -93,19 +96,19 @@ docs/OPS-001-deployment.md    Docker, Coolify, and environment setup
 
 # Current Application Architecture
 
-React/Vite serves the single-page teacher interface. During development Vite forwards `/api` to the Bun/Elysia server. In production Elysia serves the built frontend and JSON API from the same container. Route handlers use a shared session guard and parameterized Postgres.js queries against the `classroom` schema. PostgreSQL stores records; uploaded file contents need a persistent Coolify mount. See [TEC-001](docs/TEC-001-architecture.md).
+React/Vite serves the teacher and student interfaces. During development Vite forwards `/api` to the Bun/Elysia server. In production Elysia serves the built frontend and JSON API from the same container. Route handlers use role-specific session guards and parameterized Postgres.js queries against the `classroom` schema. PostgreSQL stores records; uploaded file contents need a persistent Coolify mount. See [TEC-001](docs/TEC-001-architecture.md).
 
 ---
 
 # Important Entry Points
 
 Application: `src/server.ts`, `web/src/main.tsx`
-API / Backend: `src/routes/auth.ts`, `src/routes/classrooms.ts`, `src/routes/coursework.ts`, `src/routes/teachers.ts`
+API / Backend: `src/routes/auth.ts`, `src/routes/student-auth.ts`, `src/routes/student-coursework.ts`, `src/routes/classrooms.ts`, `src/routes/coursework.ts`, `src/routes/teachers.ts`
 Database: `src/db/client.ts`, `src/db/bootstrap.ts`, `src/db/migrations/`
 Files: `src/file-storage.ts`, `web/src/ClassroomWork.tsx`
 Authentication: `src/auth/session.ts`
 Shared Services: `src/security.ts`, `src/http-error.ts`
-Tests: `bun test` (file validation and roster parsing; no PostgreSQL/browser integration suite)
+Tests: `bun test` (file validation and roster parsing; optional PostgreSQL API integration via `CLASSROOM_TEST_DATABASE_URL`; no browser suite)
 
 ---
 
@@ -152,7 +155,7 @@ The initial owner can also be provisioned once with the `OWNER_USERNAME`, `OWNER
 
 ## Tests / Lint
 
-`bun test` runs the focused file validation and roster parsing tests. Type checking is not a replacement for PostgreSQL integration or browser tests.
+`bun test` runs file validation and roster parsing tests. `src/student-workflow.test.ts` also covers invitations, sessions, access boundaries, and uploads when `CLASSROOM_TEST_DATABASE_URL` points to an isolated migrated database. There is no browser suite or live SMTP test.
 
 ---
 
@@ -173,6 +176,12 @@ UPLOAD_MAX_TOTAL_BYTES
 OWNER_USERNAME
 OWNER_DISPLAY_NAME
 OWNER_PASSWORD
+SMTP_HOST
+SMTP_PORT
+SMTP_SECURE
+SMTP_USER
+SMTP_PASSWORD
+EMAIL_FROM
 ```
 
 `OWNER_*` values are for first-owner provisioning only and should be removed after the account is created.
@@ -185,11 +194,12 @@ OWNER_PASSWORD
 - Migrations stop if untracked objects exist in that schema; inspect existing objects before first deployment.
 - Production requires `APP_URL` with HTTPS. Database TLS is required unless explicitly disabled for a private development environment.
 - Each teacher can access only classrooms they own. The owner manages teacher accounts but does not gain access to other teachers' classroom data.
+- Student accounts use email invitations and may link to multiple active classroom roster rows. Students can access only active memberships, active assignments, worksheets, and their own submissions.
 - One daily attendance record is stored per student/date; valid statuses are present, absent, late, and excused. Unmarked students have no record.
 - A model file belongs to one classroom, assignment, and student; worksheets belong to a classroom assignment. File contents require persistent volume storage and off-server backup.
 - File uploads default to 50 MiB each and 5 GiB total. Model previews are limited to 500,000 triangles and 10 seconds of parsing.
 - Roster import requires student IDs, skips existing and archived IDs, and never changes attendance.
-- Login throttling and sessions are process/database based respectively; login throttling is in-memory per username per application process.
+- Login throttling and sessions are process/database based respectively; login throttling is in-memory per account identifier per application process.
 
 ---
 
@@ -204,11 +214,11 @@ OWNER_PASSWORD
 
 # Known Technical Debt
 
-- No PostgreSQL ownership/quota integration, upload endpoint integration, or browser graphics tests are present.
+- Student assignment, invitation token, session, ownership, quota, and upload API flows have an optional isolated PostgreSQL integration suite; teacher attendance ownership and browser graphics behavior lack integration tests.
 - Frontend screens and workflows currently live together in `web/src/App.tsx`.
 - API route handlers combine validation, authorization, and database queries; a distinct service layer does not exist.
-- Login throttling is per username in process memory; a single-process deployment is the documented starting point.
-- The new migrations, Coolify volume permissions, uploads, and redeployment persistence have not been exercised on the production VPS.
+- Login throttling is per account identifier in process memory; a single-process deployment is the documented starting point.
+- Live SMTP delivery, Coolify volume permissions, uploads, and redeployment persistence have not been exercised on the production VPS. SMTP must be configured before sending invitations or recovery links.
 
 ---
 
@@ -223,4 +233,4 @@ code
 # Last Verified
 
 Date: 2026-10-08
-Commit: `7bd3d4a8a3c6c4f61a71ba7a9bbbf5e8c350891a`
+Revision: current working tree

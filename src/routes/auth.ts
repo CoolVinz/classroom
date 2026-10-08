@@ -1,7 +1,7 @@
 import { Elysia, t } from "elysia";
 import { randomBytes } from "node:crypto";
 import { sql } from "../db/client";
-import { createSession, readActor, requireActor, sessionCookie } from "../auth/session";
+import { createSession, deleteSession, readActor, readSessionUser, requireActor, sessionCookie } from "../auth/session";
 import { checkRequestOrigin } from "../security";
 import { HttpError } from "../http-error";
 
@@ -10,7 +10,7 @@ const attempts = new Map<string, { count: number; resetAt: number }>();
 const dummyPasswordHash = await Bun.password.hash(randomBytes(32).toString("hex"), { algorithm: "argon2id" });
 
 export const authRoutes = new Elysia({ prefix: "/api/auth" })
-  .get("/me", async ({ request }) => ({ user: await readActor(request) }))
+  .get("/me", async ({ request }) => ({ user: await readSessionUser(request) }))
   .post("/login", async ({ body, request, set }) => {
     checkRequestOrigin(request);
     const username = body.username.trim().toLowerCase();
@@ -42,10 +42,7 @@ export const authRoutes = new Elysia({ prefix: "/api/auth" })
     const actor = await readActor(request);
     const cookie = request.headers.get("cookie")?.split(";").map((part) => part.trim()).find((part) => part.startsWith("classroom_session="));
     const token = cookie?.slice("classroom_session=".length);
-    if (token) {
-      const { createHash } = await import("node:crypto");
-      await sql`DELETE FROM classroom.sessions WHERE token_hash = ${createHash("sha256").update(token).digest("hex")}`;
-    }
+    if (token) await deleteSession(token);
     set.headers["Set-Cookie"] = sessionCookie("", true);
     return { ok: true, signedOut: Boolean(actor) };
   })

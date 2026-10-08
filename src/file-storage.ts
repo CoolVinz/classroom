@@ -70,6 +70,13 @@ export async function validateUpload(file: File, kind: UploadKind) {
   return { mediaType: type.mediaType, originalName: safeName };
 }
 
+export async function validateStudentUpload(file: File) {
+  const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+  const type = FILE_TYPES[extension];
+  if (!type) throw new HttpError(422, "ไม่รองรับชนิดไฟล์นี้");
+  return { ...(await validateUpload(file, type.kind)), kind: type.kind };
+}
+
 function isStl(header: Uint8Array, size: number) {
   const prefix = new TextDecoder().decode(header.slice(0, 5)).toLowerCase();
   if (prefix === "solid") return true;

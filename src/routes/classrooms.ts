@@ -2,7 +2,9 @@ import { Elysia, t } from "elysia";
 import { sql } from "../db/client";
 import { requireActor, type Actor } from "../auth/session";
 import { HttpError } from "../http-error";
-import { bangkokToday, checkRequestOrigin, cleanText, validCalendarDate } from "../security";
+import { randomBytes, createHash } from "node:crypto";
+import { bangkokToday, checkRequestOrigin, cleanText, normalizeEmail, validCalendarDate } from "../security";
+import { sendStudentAccessEmail } from "../student-mail";
 
 async function ownedClass(actor: Actor, classroomId: string, includeArchived = false) {
   const [room] = await sql<{ id: string; name: string; archived: boolean }[]>`
@@ -73,6 +75,10 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
     await ownedClass(actor, params.classroomId);
     return sql`
       SELECT id, student_code AS "studentCode", display_name AS "displayName",
+        email, account_id IS NOT NULL AS "hasAccount",
+        EXISTS (SELECT 1 FROM classroom.student_auth_tokens t
+          WHERE t.student_id = students.id AND t.token_kind = 'invite'
+            AND t.consumed_at IS NULL AND t.expires_at > NOW()) AS "invitePending",
         archived_at IS NOT NULL AS archived
       FROM classroom.students
       WHERE classroom_id = ${params.classroomId}
@@ -85,12 +91,13 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
     await ownedClass(actor, params.classroomId);
     const name = cleanText(body.displayName, 120);
     const code = body.studentCode?.trim() || null;
+    const email = normalizeEmail(body.email);
     if (code && code.length > 50) throw new HttpError(422, "รหัสนักเรียนยาวเกินไป");
     try {
       const [student] = await sql<{ id: string; studentCode: string | null; displayName: string }[]>`
-        INSERT INTO classroom.students (classroom_id, student_code, display_name)
-        VALUES (${params.classroomId}, ${code}, ${name})
-        RETURNING id, student_code AS "studentCode", display_name AS "displayName"
+        INSERT INTO classroom.students (classroom_id, student_code, display_name, email)
+        VALUES (${params.classroomId}, ${code}, ${name}, ${email})
+        RETURNING id, student_code AS "studentCode", display_name AS "displayName", email
       `;
       return student;
     } catch (error) {
@@ -99,7 +106,35 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
       }
       throw error;
     }
-  }, { body: t.Object({ displayName: t.String({ minLength: 1, maxLength: 120 }), studentCode: t.Optional(t.String({ maxLength: 50 })) }) })
+  }, { body: t.Object({ displayName: t.String({ minLength: 1, maxLength: 120 }), studentCode: t.Optional(t.String({ maxLength: 50 })), email: t.Optional(t.String({ maxLength: 254 })) }) })
+  .post("/classrooms/:classroomId/students/:studentId/invite", async ({ params, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireActor(request);
+    await ownedClass(actor, params.classroomId);
+    const [student] = await sql<{ email: string | null }[]>`
+      SELECT email FROM classroom.students
+      WHERE id = ${params.studentId} AND classroom_id = ${params.classroomId} AND archived_at IS NULL
+    `;
+    if (!student) throw new HttpError(404, "ไม่พบนักเรียนนี้");
+    if (!student.email) throw new HttpError(422, "เพิ่มอีเมลนักเรียนก่อนส่งคำเชิญ");
+    const token = randomBytes(32).toString("base64url");
+    const tokenHash = createHash("sha256").update(token).digest("hex");
+    await sql.begin(async (tx) => {
+      await tx`DELETE FROM classroom.student_auth_tokens WHERE student_id = ${params.studentId} AND token_kind = 'invite'`;
+      await tx`
+        INSERT INTO classroom.student_auth_tokens (token_hash, token_kind, email, student_id, expires_at)
+        VALUES (${tokenHash}, 'invite', ${student.email}, ${params.studentId}, NOW() + INTERVAL '24 hours')
+      `;
+    });
+    const url = new URL("/student/activate#token=" + token, process.env.APP_URL ?? "http://localhost:3000").toString();
+    try {
+      await sendStudentAccessEmail(student.email, url, "invite");
+    } catch {
+      await sql`DELETE FROM classroom.student_auth_tokens WHERE token_hash = ${tokenHash}`;
+      throw new HttpError(503, "ส่งอีเมลไม่ได้ กรุณาตรวจสอบการตั้งค่า SMTP");
+    }
+    return { ok: true };
+  })
   .patch("/classrooms/:classroomId/students/:studentId", async ({ params, body, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
@@ -119,17 +154,28 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
           WHERE id = ${params.studentId} AND classroom_id = ${params.classroomId}
         `;
       }
+      if (body.email !== undefined) {
+        const email = normalizeEmail(body.email);
+        await sql.begin(async (tx) => {
+          await tx`
+            UPDATE classroom.students
+            SET email = ${email}, account_id = CASE WHEN email IS DISTINCT FROM ${email} THEN NULL ELSE account_id END
+            WHERE id = ${params.studentId} AND classroom_id = ${params.classroomId}
+          `;
+          await tx`DELETE FROM classroom.student_auth_tokens WHERE student_id = ${params.studentId} AND token_kind = 'invite' AND consumed_at IS NULL`;
+        });
+      }
       if (body.archived !== undefined) {
         await sql`UPDATE classroom.students SET archived_at = ${body.archived ? sql`NOW()` : sql`NULL`} WHERE id = ${params.studentId}`;
       }
       return { ok: true };
     } catch (error) {
       if (error && typeof error === "object" && "code" in error && error.code === "23505") {
-        throw new HttpError(409, "รหัสนักเรียนนี้มีอยู่ในห้องแล้ว");
+        throw new HttpError(409, "รหัสหรืออีเมลนักเรียนนี้มีอยู่ในห้องแล้ว");
       }
       throw error;
     }
-  }, { body: t.Object({ displayName: t.Optional(t.String({ minLength: 1, maxLength: 120 })), studentCode: t.Optional(t.String({ maxLength: 50 })), archived: t.Optional(t.Boolean()) }) })
+  }, { body: t.Object({ displayName: t.Optional(t.String({ minLength: 1, maxLength: 120 })), studentCode: t.Optional(t.String({ maxLength: 50 })), email: t.Optional(t.String({ maxLength: 254 })), archived: t.Optional(t.Boolean()) }) })
   .get("/classrooms/:classroomId/attendance", async ({ params, query, request }) => {
     const actor = await requireActor(request);
     await ownedClass(actor, params.classroomId);

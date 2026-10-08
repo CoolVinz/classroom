@@ -10,6 +10,16 @@ export type Actor = {
   active: boolean;
 };
 
+export type StudentActor = {
+  id: string;
+  username: string;
+  displayName: string;
+  role: "student";
+  active: true;
+};
+
+export type SessionUser = Actor | StudentActor;
+
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
 }
@@ -25,6 +35,15 @@ export async function createSession(teacherId: string) {
   await sql`
     INSERT INTO classroom.sessions (token_hash, teacher_id, expires_at)
     VALUES (${hashToken(token)}, ${teacherId}, NOW() + INTERVAL '14 days')
+  `;
+  return token;
+}
+
+export async function createStudentSession(accountId: string) {
+  const token = randomBytes(32).toString("base64url");
+  await sql`
+    INSERT INTO classroom.student_sessions (token_hash, account_id, expires_at)
+    VALUES (${hashToken(token)}, ${accountId}, NOW() + INTERVAL '14 days')
   `;
   return token;
 }
@@ -47,8 +66,50 @@ export async function readActor(request: Request): Promise<Actor | null> {
   return row ?? null;
 }
 
+export async function readStudentActor(request: Request): Promise<StudentActor | null> {
+  const cookie = request.headers.get("cookie")?.split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith("classroom_session="));
+  const token = cookie?.slice("classroom_session=".length);
+  if (!token || token.length > 128) return null;
+
+  const [row] = await sql<StudentActor[]>`
+    SELECT a.id, a.email AS username,
+      COALESCE((SELECT s.display_name FROM classroom.students s
+        JOIN classroom.classrooms c ON c.id = s.classroom_id
+        WHERE s.account_id = a.id AND s.archived_at IS NULL AND c.archived_at IS NULL
+        ORDER BY s.created_at LIMIT 1), a.email) AS "displayName",
+      'student' AS role, TRUE AS active
+    FROM classroom.student_sessions ss
+    JOIN classroom.student_accounts a ON a.id = ss.account_id
+    WHERE ss.token_hash = ${hashToken(token)} AND ss.expires_at > NOW()
+      AND EXISTS (SELECT 1 FROM classroom.students s
+        JOIN classroom.classrooms c ON c.id = s.classroom_id
+        WHERE s.account_id = a.id AND s.archived_at IS NULL AND c.archived_at IS NULL)
+  `;
+  return row ?? null;
+}
+
+export async function readSessionUser(request: Request): Promise<SessionUser | null> {
+  return await readActor(request) ?? await readStudentActor(request);
+}
+
+export async function deleteSession(token: string) {
+  const hash = hashToken(token);
+  await sql.begin(async (tx) => {
+    await tx`DELETE FROM classroom.sessions WHERE token_hash = ${hash}`;
+    await tx`DELETE FROM classroom.student_sessions WHERE token_hash = ${hash}`;
+  });
+}
+
 export async function requireActor(request: Request): Promise<Actor> {
   const actor = await readActor(request);
+  if (!actor) throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
+  return actor;
+}
+
+export async function requireStudent(request: Request): Promise<StudentActor> {
+  const actor = await readStudentActor(request);
   if (!actor) throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
   return actor;
 }

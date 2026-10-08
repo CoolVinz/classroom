@@ -7,14 +7,16 @@ A Thai-language classroom management app for teachers. Teachers manage their own
 ## Capabilities
 
 - Sign-in for teachers and the owner.
+- Email-invited student sign-in; one student account can access linked roster entries across classrooms.
 - Teacher-owned classrooms and student rosters.
 - Daily student attendance with present, absent, late, excused, or unmarked status.
 - Per-class, per-student attendance counts over a selected date range.
 - Owner-managed teacher creation, account disable/enable, and password reset.
 - Classroom assignments, worksheet attachments, student model files, PDF/image previews, and STL/OBJ previews.
 - Excel/CSV roster import with ID mapping and duplicate review.
+- Student assignment access, worksheet viewing/download, private file submissions, and teacher submission status.
 
-No student account, parent, gradebook, gallery, public sharing, or announcement interface exists yet.
+Parent accounts, gradebook, gallery blocks/likes, public sharing, and announcements remain unimplemented.
 
 ## Main workflows
 
@@ -22,8 +24,10 @@ No student account, parent, gradebook, gallery, public sharing, or announcement 
 2. The owner creates a teacher account and gives its login details to the teacher.
 3. A teacher creates a classroom, adds students, and maintains the roster.
 4. A teacher creates assignments, attaches class materials, and uploads models for individual students.
-5. A teacher records attendance for a classroom date and saves the full roster atomically.
-6. A teacher views classroom/student attendance counts for a date range.
+5. A teacher imports or enters student email addresses and explicitly sends account invitations.
+6. Students sign in, view active assignments and worksheets for linked classrooms, and submit files; teachers see submission status and review files.
+7. A teacher records attendance for a classroom date and saves the full roster atomically.
+8. A teacher views classroom/student attendance counts for a date range.
 
 ## Major boundaries
 

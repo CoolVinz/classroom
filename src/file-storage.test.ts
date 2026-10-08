@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { validateUpload } from "./file-storage";
+import { validateStudentUpload, validateUpload } from "./file-storage";
 
 describe("file upload validation", () => {
   test("accepts a PDF worksheet by its content signature", async () => {
@@ -22,6 +22,14 @@ describe("file upload validation", () => {
     await expect(validateUpload(doc, "worksheet")).resolves.toMatchObject({ mediaType: "application/msword" });
     await expect(validateUpload(new File(["solid test\nendsolid test"], "model.stl"), "model")).resolves.toMatchObject({ mediaType: "model/stl" });
     await expect(validateUpload(new File(["v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3"], "model.obj"), "model")).resolves.toMatchObject({ mediaType: "model/obj" });
+  });
+
+  test("detects supported student submission types without a client-selected kind", async () => {
+    const pdf = await validateStudentUpload(new File(["%PDF-1.7"], "work.pdf"));
+    const model = await validateStudentUpload(new File(["solid test"], "work.stl"));
+    expect(pdf.kind).toBe("worksheet");
+    expect(model.kind).toBe("model");
+    await expect(validateStudentUpload(new File(["nope"], "run.exe"))).rejects.toThrow("ไม่รองรับ");
   });
 
   test("enforces an explicitly configured upload limit", async () => {

@@ -41,3 +41,12 @@ export function cleanText(value: string, maxLength: number) {
   }
   return normalized;
 }
+
+export function normalizeEmail(value: string | null | undefined) {
+  const email = value?.trim().toLowerCase() ?? "";
+  if (!email) return null;
+  if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new HttpError(422, "อีเมลไม่ถูกต้อง");
+  }
+  return email;
+}

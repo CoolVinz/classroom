@@ -7,7 +7,7 @@ type FileItem = { id: string; originalName: string };
 type Part = { positions: Float32Array; normals: Float32Array; indices?: Uint32Array };
 type WorkerReply = { parts?: Part[]; triangles?: number; error?: string };
 
-export default function ModelPreview({ file, close }: { file: FileItem; close: () => void }) {
+export default function ModelPreview({ file, contentPath, close }: { file: FileItem; contentPath?: string; close: () => void }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const materialsRef = useRef<THREE.MeshStandardMaterial[]>([]);
@@ -30,7 +30,7 @@ export default function ModelPreview({ file, close }: { file: FileItem; close: (
 
     async function load() {
       try {
-        const response = await fetch("/api/files/" + file.id + "/content", { credentials: "same-origin" });
+        const response = await fetch(contentPath ?? "/api/files/" + file.id + "/content", { credentials: "same-origin" });
         if (!response.ok) throw new Error("โมเดลนี้ไม่พร้อมแสดงตัวอย่าง");
         const extension = file.originalName.split(".").pop()?.toLowerCase();
         if (extension !== "stl" && extension !== "obj") throw new Error("รองรับไฟล์ STL และ OBJ เท่านั้น");
@@ -102,7 +102,7 @@ export default function ModelPreview({ file, close }: { file: FileItem; close: (
       geometries.forEach((geometry) => geometry.dispose()); materials.forEach((material) => material.dispose()); renderer?.dispose();
       controlsRef.current = null; materialsRef.current = [];
     };
-  }, [file.id, file.originalName]);
+  }, [file.id, file.originalName, contentPath]);
 
   useEffect(() => {
     materialsRef.current.forEach((material) => { material.wireframe = wireframe; material.needsUpdate = true; });
