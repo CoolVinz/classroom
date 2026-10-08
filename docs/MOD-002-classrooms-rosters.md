@@ -11,8 +11,9 @@ Let an authenticated teacher create and manage their own classrooms and student 
 ## Workflows
 
 - Create a named classroom, rename it, or archive it.
-- Add a student with a required name and optional classroom-specific code.
+- Add a student with a required name and optional classroom-specific code, or import a roster from XLSX/CSV.
 - Edit student name/code; archive or restore a student without deleting attendance history.
+- Preview roster imports by student ID; existing IDs, including archived students, are skipped without changing attendance or names.
 
 ## Business rules
 
@@ -24,22 +25,24 @@ Let an authenticated teacher create and manage their own classrooms and student 
 ## Dependencies and consumers
 
 **dependencies:** MOD-001, DAT-001
-**used_by:** MOD-003
+**used_by:** MOD-003, MOD-004
 
 **Code Map:**
 
 ```text
 UI: web/src/App.tsx (ClassList, ClassDetail, Roster)
 API and ownership: src/routes/classrooms.ts
+Import preview: web/src/StudentRosterImport.tsx, web/src/roster-import.ts
+Import API: src/routes/coursework.ts
 Auth and owner scope: src/auth/session.ts
-Database: src/db/migrations/001_initial.sql (classrooms, students)
-Tests: None found
+Database: src/db/migrations/001_initial.sql (classrooms, students), src/db/migrations/002_assignments_files.sql
+Tests: web/src/roster-import.test.ts
 ```
 
 ## Technical debt and warnings
 
 - API handlers perform authorization and SQL directly; there is no separate classroom service layer.
-- No automated ownership, uniqueness, roster-editing, or archive tests are present.
+- No PostgreSQL ownership or attendance-preservation integration tests are present.
 - Classroom archiving is not reversible in the current UI; it hides the room while retaining its records.
 
 ## Open questions

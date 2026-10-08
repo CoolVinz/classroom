@@ -14,6 +14,7 @@ COPY --from=dependencies --chown=bun:bun /app/node_modules ./node_modules
 COPY --from=build --chown=bun:bun /app/package.json ./package.json
 COPY --from=build --chown=bun:bun /app/src ./src
 COPY --from=build --chown=bun:bun /app/web/dist ./web/dist
+RUN mkdir -p /app/uploads && chown bun:bun /app/uploads
 USER bun
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD bun -e 'fetch("http://127.0.0.1:3000/health/ready").then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))'

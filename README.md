@@ -8,6 +8,8 @@ A Thai-language classroom manager for teachers. It runs on Bun + ElysiaJS, serve
 - Teacher-owned classrooms and student rosters. Students can be archived and restored without deleting attendance history.
 - Daily attendance with present, absent, late, excused, and unmarked states.
 - Classroom summaries by student and date range.
+- XLSX/CSV roster import by student ID; existing and archived IDs are skipped.
+- Classroom assignments, worksheet uploads, and student-linked STL/OBJ models with browser previews.
 - Thai interface, Bangkok date boundaries, and layouts for desktop and mobile.
 
 ## Local development
@@ -56,10 +58,11 @@ The initial password must be at least 12 characters. Subsequent teachers and pas
 ```sh
 bun run build
 bun run typecheck
+bun run test
 bun run start
 ```
 
-`bun run db:migrate` can apply the tracked initial migration separately. Normal server startup also applies pending migrations. The service listens on port `3000`; `/health/live` checks the process, and `/health/ready` checks the database.
+`bun run db:migrate` applies all pending tracked migrations. Normal server startup also applies pending migrations. The service listens on port `3000`; `/health/live` checks the process, and `/health/ready` checks the database.
 
 ## Coolify
 
@@ -69,9 +72,12 @@ Connect this Git repository as a Dockerfile application and use the repository-r
 - `APP_URL`: the app's public HTTPS origin, such as `https://classroom.example.com`.
 - `DATABASE_SSL`: `require` (default) when the database endpoint supports TLS.
 - `DATABASE_POOL_SIZE`: optional connection pool size; default `10`.
+- `UPLOAD_DIR`: persistent upload directory; production default `/app/uploads` (the local `.env.example` uses `./uploads`).
+- `UPLOAD_MAX_FILE_BYTES`: per-file limit; default 50 MiB.
+- `UPLOAD_MAX_TOTAL_BYTES`: total file limit across the app; default 5 GiB.
 - `OWNER_USERNAME`, `OWNER_DISPLAY_NAME`, and `OWNER_PASSWORD`: optional bootstrap values for the first deployment only. The app creates the initial owner only if no owner exists. Remove these values from Coolify after the first successful startup.
 
-Do not add a database URL to the image or commit a `.env` file. Use a dedicated database login instead of the PostgreSQL administrator account. Keep database backups in the PostgreSQL service; the app container has no local data volume. Configure Coolify's health check to use `/health/ready`.
+Mount a persistent Coolify volume at `/app/uploads` and ensure it is writable by the `bun` user (UID 1000). Keep off-server backups of both PostgreSQL and that volume. A volume survives normal container replacement but is not a backup. Do not add a database URL to the image or commit a `.env` file. Use a dedicated database login instead of the PostgreSQL administrator account. Configure Coolify's health check to use `/health/ready`.
 
 ## Important operational details
 

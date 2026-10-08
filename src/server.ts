@@ -7,6 +7,8 @@ import { authRoutes } from "./routes/auth";
 import { classroomRoutes } from "./routes/classrooms";
 import { teacherRoutes } from "./routes/teachers";
 import { HttpError } from "./http-error";
+import { ensureUploadRoot, maxUploadBytes } from "./file-storage";
+import { courseworkRoutes } from "./routes/coursework";
 
 const port = Number(process.env.PORT ?? 3000);
 const appUrl = process.env.APP_URL ?? "http://localhost:3000";
@@ -15,10 +17,11 @@ if (process.env.NODE_ENV === "production" && !appUrl.startsWith("https://")) {
 }
 
 await bootstrapDatabase();
+await ensureUploadRoot();
 const webRoot = resolve(import.meta.dir, "../web/dist");
 const indexFile = resolve(webRoot, "index.html");
 
-const app = new Elysia()
+const app = new Elysia({ serve: { maxRequestBodySize: maxUploadBytes() + 1024 * 1024 } })
   .get("/health/live", () => ({ ok: true }))
   .get("/health/ready", async () => {
     await sql.unsafe("SELECT 1");
@@ -26,10 +29,11 @@ const app = new Elysia()
   })
   .use(authRoutes)
   .use(classroomRoutes)
+  .use(courseworkRoutes)
   .use(teacherRoutes)
   .onError(({ error, set }) => {
     if (error instanceof HttpError) {
-      set.status = error.status as 400 | 401 | 403 | 404 | 409 | 422 | 429;
+      set.status = error.status;
       return { error: error.message };
     }
     console.error("Request failed:", error instanceof Error ? error.name : "UnknownError");

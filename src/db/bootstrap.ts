@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { sql } from "./client";
 
@@ -19,20 +19,25 @@ export async function bootstrapDatabase() {
     if (relations.count > 0) throw new Error("The classroom schema already contains objects; inspect it before initializing the app.");
     await sql.unsafe("CREATE TABLE classroom.schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
   }
-  const [applied] = await sql.unsafe("SELECT EXISTS (SELECT 1 FROM classroom.schema_migrations WHERE version = '001_initial') AS exists") as { exists: boolean }[];
-  if (applied.exists) {
-    await seedInitialOwner();
-    return;
+  const [initialApplied] = await sql.unsafe("SELECT EXISTS (SELECT 1 FROM classroom.schema_migrations WHERE version = '001_initial') AS exists") as { exists: boolean }[];
+  if (!initialApplied.exists) {
+    const [relations] = await sql.unsafe("SELECT COUNT(*)::int AS count FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'classroom' AND c.relkind IN ('r','p','v','m','S') AND c.relname <> 'schema_migrations'") as { count: number }[];
+    if (relations.count > 0) throw new Error("The classroom schema contains untracked objects; inspect it before initialization.");
   }
 
-  const [trackingOnly] = await sql.unsafe("SELECT COUNT(*)::int AS count FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'classroom' AND c.relkind IN ('r','p','v','m','S') AND c.relname <> 'schema_migrations'") as { count: number }[];
-  if (trackingOnly.count > 0) throw new Error("The classroom schema contains untracked objects; inspect it before initialization.");
-
-  const migration = await readFile(resolve(import.meta.dir, "migrations/001_initial.sql"), "utf8");
-  await sql.begin(async (tx) => {
-    await tx.unsafe(migration).simple();
-    await tx.unsafe("INSERT INTO classroom.schema_migrations (version) VALUES ('001_initial')");
-  });
+  const migrationFiles = (await readdir(resolve(import.meta.dir, "migrations")))
+    .filter((name) => /^\d{3}_[a-z0-9_-]+\.sql$/.test(name))
+    .sort();
+  for (const name of migrationFiles) {
+    const versionId = name.slice(0, -4);
+    const [applied] = await sql<{ exists: boolean }[]>`SELECT EXISTS (SELECT 1 FROM classroom.schema_migrations WHERE version = ${versionId}) AS exists`;
+    if (applied.exists) continue;
+    const migration = await readFile(resolve(import.meta.dir, "migrations", name), "utf8");
+    await sql.begin(async (tx) => {
+      await tx.unsafe(migration).simple();
+      await tx`INSERT INTO classroom.schema_migrations (version) VALUES (${versionId})`;
+    });
+  }
   await seedInitialOwner();
 }
 
