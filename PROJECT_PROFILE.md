@@ -6,7 +6,7 @@
 
 **Description:** Teacher-facing classroom app for rosters, attendance, assignments, worksheets, and student 3D model submissions.
 
-**Status:** Student submissions are implemented in this revision. Production deployment is not verified; uploads require the persistent volume and student accounts require SMTP settings described in `docs/OPS-001-deployment.md`.
+**Status:** Student submissions and Google-only student sign-in are implemented in this revision. Production deployment and live school sign-in are not verified; set up the Google OAuth client and Workspace approval described in `docs/OPS-001-deployment.md`.
 
 **Documentation Status:** Retrofitted; see `PROJECT_INDEX.md` for selective retrieval.
 
@@ -29,7 +29,7 @@ Validation: Browser constraints and Elysia/TypeBox request validation
 Runtime: Bun (local checks used Bun 1.2.2; Docker runtime is pinned to Bun 1.4.2)
 Framework: Elysia 1.4
 API style: JSON HTTP routes under `/api`
-Authentication: Argon2id teacher/student password hashes; separate PostgreSQL-backed, hashed 14-day sessions in HttpOnly cookies; one-time expiring student invitation and reset tokens
+Authentication: Argon2id teacher passwords; verified Google Workspace student identity; separate PostgreSQL-backed, hashed 14-day sessions in HttpOnly cookies
 Background jobs: None
 
 ## Database
@@ -47,7 +47,7 @@ Reverse proxy: Coolify domain/HTTPS proxy, configured outside this repository
 File storage: Local `./uploads` by default in development; Coolify persistent volume at `/app/uploads` in production. PostgreSQL stores file metadata and ownership.
 Cache: None
 Queue: None
-Email: Nodemailer SMTP for student invitations and password recovery; requires runtime SMTP configuration
+Student identity: Google Identity Services redirect flow; `google-auth-library` verifies the client ID token and Workspace domain
 Monitoring: `/health/live` and database-aware `/health/ready`; no external monitoring integration
 
 ---
@@ -58,7 +58,7 @@ Runtime: Bun
 Package manager: Bun
 Lock file: `bun.lock`
 
-Important resolved dependencies include Elysia 1.4.30, React 19.3.0, Vite 8.3.3, Three.js 0.186.1, SheetJS CE 0.20.3, Nodemailer 10.0.16, `@vitejs/plugin-react` 6.1.2, TypeScript 5.9.3, and Postgres.js 3.4.9.
+Important resolved dependencies include Elysia 1.4.30, Google Auth Library 11.3.1, React 19.3.0, Vite 8.3.3, Three.js 0.186.1, SheetJS CE 0.20.3, `@vitejs/plugin-react` 6.1.2, TypeScript 5.9.3, and Postgres.js 3.4.9.
 
 ---
 
@@ -68,13 +68,11 @@ Important resolved dependencies include Elysia 1.4.30, React 19.3.0, Vite 8.3.3,
 src/server.ts                 Elysia application, health routes, static files
 src/routes/                   Teacher/student authentication, classroom, attendance, teacher, assignment/file APIs
 src/auth/session.ts           Session cookies, lookup, and access checks
-src/student-mail.ts           SMTP delivery for student invitation and reset links
 src/db/                       PostgreSQL client, startup migration, owner setup
 src/db/migrations/            Ordered tracked PostgreSQL schema migrations
 src/file-storage.ts           Upload validation, size limits, and persistent volume
 web/src/ClassroomWork.tsx     Teacher assignment and submission review workflows
 web/src/StudentPortal.tsx     Student assignment and submission workflow
-web/src/StudentAccess.tsx     Student invitation activation and password recovery
 web/src/roster-import.ts      XLSX/CSV parsing and roster preview
 web/src/ModelPreview.tsx      Three.js viewer
 web/src/model-preview.worker.ts STL/OBJ parser worker
@@ -155,7 +153,7 @@ The initial owner can also be provisioned once with the `OWNER_USERNAME`, `OWNER
 
 ## Tests / Lint
 
-`bun test` runs file validation and roster parsing tests. `src/student-workflow.test.ts` also covers invitations, sessions, access boundaries, and uploads when `CLASSROOM_TEST_DATABASE_URL` points to an isolated migrated database. There is no browser suite or live SMTP test.
+`bun test` runs file validation and roster parsing tests. `src/student-workflow.test.ts` covers Google callback validation, account linking, retired password endpoints, sessions, access boundaries, and uploads when `CLASSROOM_TEST_DATABASE_URL` points to an isolated migrated PostgreSQL 18 database. Google token verification is mocked; there is no live school-account or browser suite.
 
 ---
 
@@ -176,12 +174,8 @@ UPLOAD_MAX_TOTAL_BYTES
 OWNER_USERNAME
 OWNER_DISPLAY_NAME
 OWNER_PASSWORD
-SMTP_HOST
-SMTP_PORT
-SMTP_SECURE
-SMTP_USER
-SMTP_PASSWORD
-EMAIL_FROM
+GOOGLE_CLIENT_ID
+GOOGLE_WORKSPACE_DOMAIN
 ```
 
 `OWNER_*` values are for first-owner provisioning only and should be removed after the account is created.
@@ -194,7 +188,7 @@ EMAIL_FROM
 - Migrations stop if untracked objects exist in that schema; inspect existing objects before first deployment.
 - Production requires `APP_URL` with HTTPS. Database TLS is required unless explicitly disabled for a private development environment.
 - Each teacher can access only classrooms they own. The owner manages teacher accounts but does not gain access to other teachers' classroom data.
-- Student accounts use email invitations and may link to multiple active classroom roster rows. Students can access only active memberships, active assignments, worksheets, and their own submissions.
+- Student accounts use verified Google identities and link to matching active classroom roster rows. Blank emails on numeric IDs are generated as `<id>@banjan.ac.th`, retaining leading zeroes. Students can access only active memberships, active assignments, worksheets, and their own submissions.
 - One daily attendance record is stored per student/date; valid statuses are present, absent, late, and excused. Unmarked students have no record.
 - A model file belongs to one classroom, assignment, and student; worksheets belong to a classroom assignment. File contents require persistent volume storage and off-server backup.
 - File uploads default to 50 MiB each and 5 GiB total. Model previews are limited to 500,000 triangles and 10 seconds of parsing.
@@ -214,11 +208,11 @@ EMAIL_FROM
 
 # Known Technical Debt
 
-- Student assignment, invitation token, session, ownership, quota, and upload API flows have an optional isolated PostgreSQL integration suite; teacher attendance ownership and browser graphics behavior lack integration tests.
+- Student Google identity, session, ownership, quota, and upload API flows have an optional isolated PostgreSQL integration suite; teacher attendance ownership and browser graphics behavior lack integration tests.
 - Frontend screens and workflows currently live together in `web/src/App.tsx`.
 - API route handlers combine validation, authorization, and database queries; a distinct service layer does not exist.
 - Login throttling is per account identifier in process memory; a single-process deployment is the documented starting point.
-- Live SMTP delivery, Coolify volume permissions, uploads, and redeployment persistence have not been exercised on the production VPS. SMTP must be configured before sending invitations or recovery links.
+- Live Google sign-in and Banjan School's Workspace policy approval have not been exercised. Coolify volume permissions, uploads, and redeployment persistence also remain unverified on the production VPS.
 
 ---
 
@@ -232,5 +226,5 @@ code
 
 # Last Verified
 
-Date: 2026-10-08
+Date: 2026-10-27
 Revision: current working tree

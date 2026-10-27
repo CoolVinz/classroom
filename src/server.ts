@@ -44,6 +44,7 @@ const app = new Elysia({ serve: { maxRequestBodySize: maxUploadBytes() + 1024 * 
     set.status = 500;
     return { error: "เกิดข้อผิดพลาดภายในระบบ กรุณาลองอีกครั้ง" };
   })
+  .get("/student/*", () => new Response(null, { status: 302, headers: { Location: "/?role=student" } }))
   .get("/", () => file(indexFile))
   .get("/assets/*", ({ request }) => {
     let pathname: string;

@@ -5,7 +5,7 @@ import { basename, resolve } from "node:path";
 import { sql } from "../db/client";
 import { requireActor } from "../auth/session";
 import { HttpError } from "../http-error";
-import { checkRequestOrigin, cleanText, normalizeEmail } from "../security";
+import { checkRequestOrigin, cleanText, normalizeEmail, studentEmailForCode } from "../security";
 import { maxStoredBytes, uploadRoot, validateUpload, type UploadKind } from "../file-storage";
 
 async function ownedClassroom(classroomId: string, ownerId: string, includeArchived = false) {
@@ -179,7 +179,7 @@ export const courseworkRoutes = new Elysia({ prefix: "/api" })
     const rows = body.students.map((row) => {
       const studentCode = cleanText(row.studentCode, 50);
       const displayName = cleanText(row.displayName, 120);
-      const email = normalizeEmail(row.email);
+      const email = normalizeEmail(row.email) ?? studentEmailForCode(studentCode);
       if (seen.has(studentCode)) throw new HttpError(422, "ไฟล์มีรหัสนักเรียนซ้ำ");
       seen.add(studentCode);
       if (email && seenEmails.has(email)) throw new HttpError(422, "อีเมลนักเรียนซ้ำในไฟล์");

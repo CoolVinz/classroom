@@ -2,9 +2,7 @@ import { Elysia, t } from "elysia";
 import { sql } from "../db/client";
 import { requireActor, type Actor } from "../auth/session";
 import { HttpError } from "../http-error";
-import { randomBytes, createHash } from "node:crypto";
-import { bangkokToday, checkRequestOrigin, cleanText, normalizeEmail, validCalendarDate } from "../security";
-import { sendStudentAccessEmail } from "../student-mail";
+import { bangkokToday, checkRequestOrigin, cleanText, normalizeEmail, studentEmailForCode, validCalendarDate } from "../security";
 
 async function ownedClass(actor: Actor, classroomId: string, includeArchived = false) {
   const [room] = await sql<{ id: string; name: string; archived: boolean }[]>`
@@ -75,10 +73,8 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
     await ownedClass(actor, params.classroomId);
     return sql`
       SELECT id, student_code AS "studentCode", display_name AS "displayName",
-        email, account_id IS NOT NULL AS "hasAccount",
-        EXISTS (SELECT 1 FROM classroom.student_auth_tokens t
-          WHERE t.student_id = students.id AND t.token_kind = 'invite'
-            AND t.consumed_at IS NULL AND t.expires_at > NOW()) AS "invitePending",
+        email, EXISTS (SELECT 1 FROM classroom.student_accounts a
+          WHERE a.id = students.account_id AND a.google_subject IS NOT NULL) AS "googleLinked",
         archived_at IS NOT NULL AS archived
       FROM classroom.students
       WHERE classroom_id = ${params.classroomId}
@@ -91,7 +87,7 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
     await ownedClass(actor, params.classroomId);
     const name = cleanText(body.displayName, 120);
     const code = body.studentCode?.trim() || null;
-    const email = normalizeEmail(body.email);
+    const email = normalizeEmail(body.email) ?? studentEmailForCode(code);
     if (code && code.length > 50) throw new HttpError(422, "รหัสนักเรียนยาวเกินไป");
     try {
       const [student] = await sql<{ id: string; studentCode: string | null; displayName: string }[]>`
@@ -107,43 +103,20 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
       throw error;
     }
   }, { body: t.Object({ displayName: t.String({ minLength: 1, maxLength: 120 }), studentCode: t.Optional(t.String({ maxLength: 50 })), email: t.Optional(t.String({ maxLength: 254 })) }) })
-  .post("/classrooms/:classroomId/students/:studentId/invite", async ({ params, request }) => {
-    checkRequestOrigin(request);
-    const actor = await requireActor(request);
-    await ownedClass(actor, params.classroomId);
-    const [student] = await sql<{ email: string | null }[]>`
-      SELECT email FROM classroom.students
-      WHERE id = ${params.studentId} AND classroom_id = ${params.classroomId} AND archived_at IS NULL
-    `;
-    if (!student) throw new HttpError(404, "ไม่พบนักเรียนนี้");
-    if (!student.email) throw new HttpError(422, "เพิ่มอีเมลนักเรียนก่อนส่งคำเชิญ");
-    const token = randomBytes(32).toString("base64url");
-    const tokenHash = createHash("sha256").update(token).digest("hex");
-    await sql.begin(async (tx) => {
-      await tx`DELETE FROM classroom.student_auth_tokens WHERE student_id = ${params.studentId} AND token_kind = 'invite'`;
-      await tx`
-        INSERT INTO classroom.student_auth_tokens (token_hash, token_kind, email, student_id, expires_at)
-        VALUES (${tokenHash}, 'invite', ${student.email}, ${params.studentId}, NOW() + INTERVAL '24 hours')
-      `;
-    });
-    const url = new URL("/student/activate#token=" + token, process.env.APP_URL ?? "http://localhost:3000").toString();
-    try {
-      await sendStudentAccessEmail(student.email, url, "invite");
-    } catch {
-      await sql`DELETE FROM classroom.student_auth_tokens WHERE token_hash = ${tokenHash}`;
-      throw new HttpError(503, "ส่งอีเมลไม่ได้ กรุณาตรวจสอบการตั้งค่า SMTP");
-    }
-    return { ok: true };
+  .post("/classrooms/:classroomId/students/:studentId/invite", () => {
+    throw new HttpError(410, "Student email invitations were retired. Students sign in with Google.");
   })
   .patch("/classrooms/:classroomId/students/:studentId", async ({ params, body, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
     await ownedClass(actor, params.classroomId);
-    const [student] = await sql<{ id: string }[]>`
-      SELECT id FROM classroom.students WHERE id = ${params.studentId} AND classroom_id = ${params.classroomId}
+    const [student] = await sql<{ id: string; studentCode: string | null; email: string | null }[]>`
+      SELECT id, student_code AS "studentCode", email FROM classroom.students
+      WHERE id = ${params.studentId} AND classroom_id = ${params.classroomId}
     `;
     if (!student) throw new HttpError(404, "ไม่พบนักเรียนนี้");
     try {
+      const nextCode = body.studentCode === undefined ? student.studentCode : body.studentCode.trim() || null;
       if (body.displayName !== undefined || body.studentCode !== undefined) {
         const name = body.displayName === undefined ? undefined : cleanText(body.displayName, 120);
         const code = body.studentCode === undefined ? undefined : body.studentCode.trim() || null;
@@ -154,15 +127,14 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
           WHERE id = ${params.studentId} AND classroom_id = ${params.classroomId}
         `;
       }
-      if (body.email !== undefined) {
-        const email = normalizeEmail(body.email);
+      if (body.email !== undefined || (!student.email && body.studentCode !== undefined)) {
+        const email = normalizeEmail(body.email) ?? studentEmailForCode(nextCode);
         await sql.begin(async (tx) => {
           await tx`
             UPDATE classroom.students
             SET email = ${email}, account_id = CASE WHEN email IS DISTINCT FROM ${email} THEN NULL ELSE account_id END
             WHERE id = ${params.studentId} AND classroom_id = ${params.classroomId}
           `;
-          await tx`DELETE FROM classroom.student_auth_tokens WHERE student_id = ${params.studentId} AND token_kind = 'invite' AND consumed_at IS NULL`;
         });
       }
       if (body.archived !== undefined) {

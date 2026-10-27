@@ -44,7 +44,7 @@ Tests: src/file-storage.test.ts, src/student-workflow.test.ts (optional PostgreS
 ## Technical debt and warnings
 
 - Files are stored on the application host. Loss of the VPS or volume loses uploads unless an off-server copy exists.
-- SMTP delivery and live Coolify persistent-volume behavior still need production configuration and verification.
+- Live Coolify persistent-volume behavior still needs production configuration and verification.
 - OBJ textures/material libraries and browser-side file version history are unsupported.
 
 ## Open questions

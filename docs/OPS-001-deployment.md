@@ -33,15 +33,11 @@ DATABASE_POOL_SIZE
 UPLOAD_DIR (defaults to /app/uploads)
 UPLOAD_MAX_FILE_BYTES (defaults to 50 MiB)
 UPLOAD_MAX_TOTAL_BYTES (defaults to 5 GiB)
+GOOGLE_CLIENT_ID (required to enable student sign-in)
+GOOGLE_WORKSPACE_DOMAIN (defaults to banjan.ac.th)
 OWNER_USERNAME (first-owner setup only)
 OWNER_DISPLAY_NAME (first-owner setup only)
 OWNER_PASSWORD (first-owner setup only)
-SMTP_HOST
-SMTP_PORT (defaults to 587; port 465 uses TLS by default)
-SMTP_SECURE (optional; true for implicit TLS)
-SMTP_USER (optional if the relay does not require authentication)
-SMTP_PASSWORD (optional; keep as a Coolify secret)
-EMAIL_FROM
 ```
 
 `APP_URL` must be the public HTTPS origin. Initial owner variables create an owner only if none exists; remove them from Coolify after the first successful startup.
@@ -54,12 +50,14 @@ EMAIL_FROM
 - Database backups are managed at the PostgreSQL service; the app container has no independent backup or migration rollback workflow.
 - The file quota is enforced from registered PostgreSQL file rows across classrooms. Keep actual free disk space above the configured quota; interrupted staging files are cleaned at startup.
 - Login throttling is process-local, so the documented initial target is a single application container.
-- Student invitations and password recovery use a configurable SMTP transport. No mail provider or credentials are provisioned by the repository; set the SMTP variables in Coolify before sending invitations.
+- Google sign-in uses a Web application client. Add the public app origin as an authorized JavaScript origin and the exact `${APP_URL}/api/auth/student/google` callback as an authorized redirect URI. The callback uses the visible app host (Vite's `/api` proxy in local development); the client ID is public and this ID-token flow needs no client secret.
+- Set `GOOGLE_WORKSPACE_DOMAIN=banjan.ac.th`. The endpoint rejects unverified email, missing or wrong `hd`, wrong audience/issuer/expiry, invalid CSRF, and accounts without active roster matches.
+- Google Workspace for Education may require school administrator approval before students, particularly under-18 users, can use the app.
 - No Coolify volume declaration, compose file, CI pipeline, external monitoring, object storage, or cache is configured in the repository. Configure the volume in Coolify directly.
 
 ## Deploy and initialize
 
-See [README deployment instructions](../README.md). After configuring the database role/schema and Coolify runtime values, the first app startup applies the migration. Supply the initial owner values for that first startup, then remove them. Verify `/health/ready` and SMTP delivery before inviting students.
+Back up PostgreSQL before release: migration `004_google_student_auth.sql` preserves account IDs, password hashes, teacher sessions, attendance, and files, but clears student sessions and old email invitation/reset tokens. Students will sign in again. Configure the Google client and school approval before releasing because student password login is retired. See [README deployment instructions](../README.md), then verify `/health/ready`, teacher login, and a real school student login.
 
 ## Open questions
 

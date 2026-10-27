@@ -50,3 +50,7 @@ export function normalizeEmail(value: string | null | undefined) {
   }
   return email;
 }
+
+export function studentEmailForCode(code: string | null | undefined) {
+  return code && /^[0-9]+$/.test(code) ? `${code}@banjan.ac.th` : null;
+}

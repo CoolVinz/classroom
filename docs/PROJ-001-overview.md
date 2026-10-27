@@ -7,7 +7,7 @@ A Thai-language classroom management app for teachers. Teachers manage their own
 ## Capabilities
 
 - Sign-in for teachers and the owner.
-- Email-invited student sign-in; one student account can access linked roster entries across classrooms.
+- Google-only student sign-in for verified `@banjan.ac.th` Workspace accounts; an account can access matching active roster entries across classrooms.
 - Teacher-owned classrooms and student rosters.
 - Daily student attendance with present, absent, late, excused, or unmarked status.
 - Per-class, per-student attendance counts over a selected date range.
@@ -24,8 +24,8 @@ Parent accounts, gradebook, gallery blocks/likes, public sharing, and announceme
 2. The owner creates a teacher account and gives its login details to the teacher.
 3. A teacher creates a classroom, adds students, and maintains the roster.
 4. A teacher creates assignments, attaches class materials, and uploads models for individual students.
-5. A teacher imports or enters student email addresses and explicitly sends account invitations.
-6. Students sign in, view active assignments and worksheets for linked classrooms, and submit files; teachers see submission status and review files.
+5. A teacher imports or enters the student's school email; numeric student IDs receive an address automatically. The student signs in with Google, and matching active roster entries link automatically.
+6. Students view active assignments and worksheets for linked classrooms and submit files; teachers see submission status and review files.
 7. A teacher records attendance for a classroom date and saves the full roster atomically.
 8. A teacher views classroom/student attendance counts for a date range.
 

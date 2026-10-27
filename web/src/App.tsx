@@ -4,13 +4,12 @@ import { api } from "./api";
 import { ClassroomWork } from "./ClassroomWork";
 import { StudentRosterImport } from "./StudentRosterImport";
 import { StudentPortal } from "./StudentPortal";
-import { StudentForgotPage, StudentInvitePage, StudentResetPage } from "./StudentAccess";
 
 type TeacherUser = { id: string; username: string; displayName: string; role: "owner" | "teacher" };
 type User = TeacherUser | { id: string; username: string; displayName: string; role: "student" };
 type Classroom = { id: string; name: string; studentCount: number };
 type Status = "present" | "absent" | "late" | "excused";
-type Student = { id: string; studentCode: string | null; displayName: string; email?: string | null; hasAccount?: boolean; invitePending?: boolean; archived?: boolean; status?: Status | null };
+type Student = { id: string; studentCode: string | null; displayName: string; email?: string | null; googleLinked?: boolean; archived?: boolean; status?: Status | null };
 type View = "home" | "classes" | "summary" | "teachers";
 const statuses: Status[] = ["present", "absent", "late", "excused"];
 const labels: Record<Status, string> = { present: "มาเรียน", absent: "ขาด", late: "สาย", excused: "ลา" };
@@ -23,29 +22,37 @@ function Button(props: React.ButtonHTMLAttributes<HTMLButtonElement> & { tone?: 
 }
 
 function Login({ onLogin }: { onLogin: (user: User) => void }) {
-  const [mode, setMode] = useState<"teacher" | "student">("teacher");
-  const [username, setUsername] = useState(""); const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
-  const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
+  const [mode, setMode] = useState<"teacher" | "student">(() => new URLSearchParams(window.location.search).get("role") === "student" ? "student" : "teacher");
+  const [username, setUsername] = useState(""); const [password, setPassword] = useState("");
+  const [error, setError] = useState(() => ({ config: "Google sign-in is not configured yet.", signin: "Google sign-in could not be verified. Please try again.", domain: "Use your verified @banjan.ac.th school Google account.", roster: "Your school account is not linked to an active classroom roster. Ask your teacher to check your student ID and email." } as Record<string, string>)[new URLSearchParams(window.location.search).get("error") ?? ""] ?? "");
+  const [busy, setBusy] = useState(false);
+  const [googleConfig, setGoogleConfig] = useState<{ enabled: boolean; clientId: string | null; domain: string; loginUri: string } | null>(null);
+  const [googleConfigFailed, setGoogleConfigFailed] = useState(false);
+  useEffect(() => { api<{ enabled: boolean; clientId: string | null; domain: string; loginUri: string }>("/auth/student/config").then(setGoogleConfig).catch(() => setGoogleConfigFailed(true)); }, []);
+  useEffect(() => {
+    if (mode !== "student" || !googleConfig?.enabled || document.getElementById("google-identity-script")) return;
+    const script = document.createElement("script");
+    script.id = "google-identity-script"; script.src = "https://accounts.google.com/gsi/client"; script.async = true; script.defer = true;
+    script.onerror = () => setError("Google Sign-In could not load. Please check your connection and try again.");
+    document.head.append(script);
+    return () => { script.remove(); };
+  }, [mode, googleConfig]);
   async function submit(event: FormEvent) {
     event.preventDefault(); setBusy(true); setError("");
     try {
-      const path = mode === "teacher" ? "/auth/login" : "/auth/student/login";
-      const credentials = mode === "teacher" ? { username, password } : { email, password };
-      const result = await api<{ user: User }>(path, { method: "POST", body: JSON.stringify(credentials) }); onLogin(result.user);
+      const result = await api<{ user: User }>("/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }); onLogin(result.user);
     }
     catch (reason) { setError(reason instanceof Error ? reason.message : "เข้าสู่ระบบไม่สำเร็จ"); }
     finally { setBusy(false); }
   }
   return <main className="login-page"><section className="login-card"><div className="brand-mark large">ค</div><p className="eyebrow">จัดการชั้นเรียน</p><h1>ยินดีต้อนรับกลับ</h1><p className="muted">เลือกประเภทบัญชีเพื่อเข้าสู่ระบบ</p>
     <div className="login-mode"><button type="button" className={mode === "teacher" ? "selected" : ""} onClick={() => { setMode("teacher"); setError(""); }}>คุณครู</button><button type="button" className={mode === "student" ? "selected" : ""} onClick={() => { setMode("student"); setError(""); }}>นักเรียน</button></div>
-    <form className="form-stack login-form" onSubmit={submit}>{mode === "teacher" ? <label>ชื่อผู้ใช้<input autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} required /></label> : <label>อีเมล<input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} required /></label>}<label>รหัสผ่าน<input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required /></label>{error && <p className="form-error" role="alert">{error}</p>}<Button disabled={busy}>{busy ? "กำลังเข้าสู่ระบบ…" : "เข้าสู่ระบบ"}</Button></form>{mode === "student" ? <a className="login-footer" href="/student/forgot">ลืมรหัสผ่าน?</a> : <p className="login-footer">พื้นที่ทำงานสำหรับคุณครูและผู้ดูแล</p>}
+    {mode === "teacher" ? <form className="form-stack login-form" onSubmit={submit}><label>ชื่อผู้ใช้<input autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} required /></label><label>รหัสผ่าน<input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required /></label>{error && <p className="form-error" role="alert">{error}</p>}<Button disabled={busy}>{busy ? "กำลังเข้าสู่ระบบ…" : "เข้าสู่ระบบ"}</Button></form> : <div className="google-login">{error && <p className="form-error" role="alert">{error}</p>}{googleConfigFailed ? <p className="muted" role="alert">โหลดการตั้งค่า Google ไม่สำเร็จ กรุณาลองใหม่</p> : !googleConfig ? <p className="muted">กำลังโหลด Google Sign-In…</p> : !googleConfig.enabled ? <p className="muted">Google Sign-In ยังไม่ได้ตั้งค่า กรุณาติดต่อครู</p> : <><div id="g_id_onload" data-client_id={googleConfig.clientId!} data-login_uri={googleConfig.loginUri} data-ux_mode="redirect" data-hd={googleConfig.domain}/><div className="g_id_signin" data-type="standard" data-size="large" data-theme="outline" data-text="signin_with" data-shape="rectangular" data-width="320"/></>}</div>}
+    {mode === "teacher" && <p className="login-footer">พื้นที่ทำงานสำหรับคุณครูและผู้ดูแล</p>}
   </section></main>;
 }
 
 function App() {
-  if (window.location.pathname === "/student/activate") return <StudentInvitePage/>;
-  if (window.location.pathname === "/student/forgot") return <StudentForgotPage/>;
-  if (window.location.pathname === "/student/reset") return <StudentResetPage/>;
   const [user, setUser] = useState<User | null>(null); const [ready, setReady] = useState(false);
   const [view, setView] = useState<View>("home"); const [selected, setSelected] = useState<Classroom | null>(null);
   const [rooms, setRooms] = useState<Classroom[]>([]); const [stats, setStats] = useState<Record<string, number | string> | null>(null);
@@ -130,15 +137,13 @@ function Attendance({ room, onError }: { room: Classroom; onError: (message: str
 }
 
 function Roster({ room, refresh, onError }: { room: Classroom; refresh: () => Promise<void>; onError: (message: string) => void }) {
-  const [students, setStudents] = useState<Student[]>([]); const [name, setName] = useState(""); const [code, setCode] = useState(""); const [email, setEmail] = useState(""); const [saving, setSaving] = useState(false); const [editId, setEditId] = useState(""); const [editName, setEditName] = useState(""); const [editCode, setEditCode] = useState(""); const [editEmail, setEditEmail] = useState(""); const [inviteMessage, setInviteMessage] = useState("");
+  const [students, setStudents] = useState<Student[]>([]); const [name, setName] = useState(""); const [code, setCode] = useState(""); const [email, setEmail] = useState(""); const [saving, setSaving] = useState(false); const [editId, setEditId] = useState(""); const [editName, setEditName] = useState(""); const [editCode, setEditCode] = useState(""); const [editEmail, setEditEmail] = useState("");
   const load = useCallback(async () => { try { setStudents(await api<Student[]>("/classrooms/" + room.id + "/students")); } catch (reason) { onError(reason instanceof Error ? reason.message : "โหลดรายชื่อไม่สำเร็จ"); } }, [room.id, onError]);
   useEffect(() => { void load(); }, [load]);
   async function add(event: FormEvent) { event.preventDefault(); setSaving(true); try { await api("/classrooms/" + room.id + "/students", { method: "POST", body: JSON.stringify({ displayName: name, studentCode: code, email }) }); setName(""); setCode(""); setEmail(""); await load(); await refresh(); } catch (reason) { onError(reason instanceof Error ? reason.message : "เพิ่มรายชื่อไม่สำเร็จ"); } finally { setSaving(false); } }
   async function update(student: Student, body: Record<string, unknown>) { try { await api("/classrooms/" + room.id + "/students/" + student.id, { method: "PATCH", body: JSON.stringify(body) }); setEditId(""); await load(); await refresh(); } catch (reason) { onError(reason instanceof Error ? reason.message : "บันทึกไม่สำเร็จ"); } }
-  async function invite(student: Student) { setInviteMessage(""); try { await api("/classrooms/" + room.id + "/students/" + student.id + "/invite", { method: "POST" }); setInviteMessage("ส่งคำเชิญไปที่ " + student.email); await load(); } catch (reason) { onError(reason instanceof Error ? reason.message : "ส่งคำเชิญไม่สำเร็จ"); } }
-  return <><section className="panel"><header className="panel-heading compact"><div><p className="eyebrow">รายชื่อห้องเรียน</p><h2>นักเรียน <span className="small-count">{students.filter((s) => !s.archived).length} คน</span></h2></div></header><form className="add-student" onSubmit={add}><label>ชื่อนักเรียน<input placeholder="ชื่อและนามสกุล" value={name} onChange={(e) => setName(e.target.value)} required maxLength={120}/></label><label>รหัสนักเรียน <small>(ไม่บังคับ)</small><input placeholder="เช่น 64001" value={code} onChange={(e) => setCode(e.target.value)} maxLength={50}/></label><label>อีเมล <small>(ไม่บังคับ)</small><input type="email" value={email} onChange={(e) => setEmail(e.target.value)}/></label><Button disabled={saving || !name.trim()}>＋ เพิ่มรายชื่อ</Button></form>
-    {inviteMessage && <p className="success-message" role="status">{inviteMessage}</p>}
-    {students.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>นักเรียน</th><th>รหัสนักเรียน</th><th>อีเมล</th><th>สถานะ</th><th></th></tr></thead><tbody>{students.map((student) => <tr key={student.id} className={student.archived ? "archived-row" : ""}>{editId === student.id ? <><td><input className="table-input" value={editName} onChange={(e) => setEditName(e.target.value)}/></td><td><input className="table-input" value={editCode} onChange={(e) => setEditCode(e.target.value)}/></td><td><input className="table-input" type="email" value={editEmail} onChange={(e) => setEditEmail(e.target.value)}/></td><td>{student.archived ? "เก็บแล้ว" : "กำลังเรียน"}</td><td className="row-actions"><button className="text-button" onClick={() => void update(student, { displayName: editName, studentCode: editCode, email: editEmail })}>บันทึก</button><button className="text-button subdued" onClick={() => setEditId("")}>ยกเลิก</button></td></> : <><td><strong>{student.displayName}</strong></td><td>{student.studentCode || "—"}</td><td>{student.email || "—"}</td><td><span className={"student-state " + (student.archived ? "inactive" : "")}>{student.archived ? "เก็บแล้ว" : student.hasAccount ? "เชื่อมบัญชีแล้ว" : student.invitePending ? "รอตอบรับคำเชิญ" : "กำลังเรียน"}</span></td><td className="row-actions"><button className="text-button" onClick={() => { setEditId(student.id); setEditName(student.displayName); setEditCode(student.studentCode ?? ""); setEditEmail(student.email ?? ""); }}>แก้ไข</button>{!student.archived && !student.hasAccount && student.email && <button className="text-button" onClick={() => void invite(student)}>{student.invitePending ? "ส่งอีกครั้ง" : "เชิญนักเรียน"}</button>}<button className="text-button subdued" onClick={() => void update(student, { archived: !student.archived })}>{student.archived ? "นำกลับมา" : "เก็บรายชื่อ"}</button></td></>}</tr>)}</tbody></table></div> : <Empty icon="♙" title="ยังไม่มีรายชื่อนักเรียน" detail="เพิ่มชื่อและรหัสนักเรียนจากแบบฟอร์มด้านบน"/>}</section><StudentRosterImport classroomId={room.id} students={students} onImported={async () => { await load(); await refresh(); }} onError={onError}/></>;
+  return <><section className="panel"><header className="panel-heading compact"><div><p className="eyebrow">รายชื่อห้องเรียน</p><h2>นักเรียน <span className="small-count">{students.filter((s) => !s.archived).length} คน</span></h2></div></header><form className="add-student" onSubmit={add}><label>ชื่อนักเรียน<input placeholder="ชื่อและนามสกุล" value={name} onChange={(e) => setName(e.target.value)} required maxLength={120}/></label><label>รหัสนักเรียน <small>(ไม่บังคับ)</small><input placeholder="เช่น 64001" value={code} onChange={(e) => setCode(e.target.value)} maxLength={50}/></label><label>อีเมล <small>(ถ้าว่างและรหัสเป็นตัวเลข ระบบจะสร้าง @banjan.ac.th)</small><input type="email" value={email} onChange={(e) => setEmail(e.target.value)}/></label><Button disabled={saving || !name.trim()}>＋ เพิ่มรายชื่อ</Button></form>
+    {students.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>นักเรียน</th><th>รหัสนักเรียน</th><th>อีเมล</th><th>สถานะ</th><th></th></tr></thead><tbody>{students.map((student) => <tr key={student.id} className={student.archived ? "archived-row" : ""}>{editId === student.id ? <><td><input className="table-input" value={editName} onChange={(e) => setEditName(e.target.value)}/></td><td><input className="table-input" value={editCode} onChange={(e) => setEditCode(e.target.value)}/></td><td><input className="table-input" type="email" value={editEmail} onChange={(e) => setEditEmail(e.target.value)}/></td><td>{student.archived ? "เก็บแล้ว" : "กำลังเรียน"}</td><td className="row-actions"><button className="text-button" onClick={() => void update(student, { displayName: editName, studentCode: editCode, email: editEmail })}>บันทึก</button><button className="text-button subdued" onClick={() => setEditId("")}>ยกเลิก</button></td></> : <><td><strong>{student.displayName}</strong></td><td>{student.studentCode || "—"}</td><td>{student.email || "—"}</td><td><span className={"student-state " + (student.archived ? "inactive" : "")}>{student.archived ? "เก็บแล้ว" : student.googleLinked ? "Google เชื่อมแล้ว" : student.email ? "ยังไม่เคยเข้าสู่ระบบ" : "ต้องเพิ่มอีเมล"}</span></td><td className="row-actions"><button className="text-button" onClick={() => { setEditId(student.id); setEditName(student.displayName); setEditCode(student.studentCode ?? ""); setEditEmail(student.email ?? ""); }}>แก้ไข</button><button className="text-button subdued" onClick={() => void update(student, { archived: !student.archived })}>{student.archived ? "นำกลับมา" : "เก็บรายชื่อ"}</button></td></>}</tr>)}</tbody></table></div> : <Empty icon="♙" title="ยังไม่มีรายชื่อนักเรียน" detail="เพิ่มชื่อและรหัสนักเรียนจากแบบฟอร์มด้านบน"/>}</section><StudentRosterImport classroomId={room.id} students={students} onImported={async () => { await load(); await refresh(); }} onError={onError}/></>;
 }
 
 function SummaryPage({ rooms, onError }: { rooms: Classroom[]; onError: (message: string) => void }) {

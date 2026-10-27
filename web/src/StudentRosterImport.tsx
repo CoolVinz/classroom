@@ -82,7 +82,7 @@ export function StudentRosterImport({ classroomId, students, onImported, onError
     } finally { setSaving(false); }
   }
 
-  return <section className="panel roster-import"><header className="panel-heading compact"><div><p className="eyebrow">นำเข้ารายชื่อจากตาราง</p><h2>Excel หรือ CSV</h2><p className="muted">จับคู่คอลัมน์ก่อนนำเข้า ระบบจะข้ามรหัสนักเรียนที่มีอยู่แล้ว</p></div></header>
+  return <section className="panel roster-import"><header className="panel-heading compact"><div><p className="eyebrow">นำเข้ารายชื่อจากตาราง</p><h2>Excel หรือ CSV</h2><p className="muted">จับคู่คอลัมน์ก่อนนำเข้า ระบบจะข้ามรหัสเดิม และสร้างอีเมลโรงเรียนจากรหัสตัวเลขเมื่อไม่มีอีเมล</p></div></header>
     <div className="roster-import-controls"><label className="import-file">เลือกไฟล์<input type="file" accept=".xlsx,.csv" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; void chooseFile(file); }}/></label>{fileName && <span className="muted">{fileName}</span>}
       {sheets.length > 1 && <label>แผ่นงาน<select value={sheetName} onChange={(event) => chooseSheet(event.target.value)}>{sheets.map((item) => <option key={item.name}>{item.name}</option>)}</select></label>}
       {sheet && <>

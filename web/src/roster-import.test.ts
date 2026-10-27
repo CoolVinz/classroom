@@ -49,6 +49,15 @@ describe("student roster import", () => {
     expect(result.skipped[0]).not.toHaveProperty("email");
   });
 
+  test("generates school emails from numeric IDs and preserves explicit emails and leading zeroes", () => {
+    const result = previewRoster([
+      ["ID", "Name", "Email"], ["0024514", "Student One", ""], ["24515", "Student Two", "custom@school.edu"], ["AB15", "Student Three", ""],
+    ], { code: 0, fullName: 1, email: 2 }, new Set());
+    expect(result.add.map(({ studentCode, email }) => [studentCode, email])).toEqual([
+      ["0024514", "0024514@banjan.ac.th"], ["24515", "custom@school.edu"], ["AB15", undefined],
+    ]);
+  });
+
   test("rejects invalid and duplicate emails for new roster rows", () => {
     const result = previewRoster([
       ["ID", "Name", "Email"],

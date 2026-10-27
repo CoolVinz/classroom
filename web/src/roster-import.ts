@@ -21,7 +21,7 @@ export function previewRoster(rows: unknown[][], mapping: RosterMapping, existin
   const codes = data.map((row) => cell(row[mapping.code]));
   const frequencies = new Map<string, number>();
   for (const code of codes) if (code) frequencies.set(code, (frequencies.get(code) ?? 0) + 1);
-  const emails = data.map((row) => cell(row[mapping.email ?? -1]).toLowerCase());
+  const emails = data.map((row, index) => cell(row[mapping.email ?? -1]).toLowerCase() || studentEmailForCode(codes[index]) || "");
   const emailFrequencies = new Map<string, number>();
   for (const email of emails) if (email) emailFrequencies.set(email, (emailFrequencies.get(email) ?? 0) + 1);
   const result: RosterPreview = { add: [], skipped: [], errors: [] };
@@ -53,4 +53,8 @@ export function previewRoster(rows: unknown[][], mapping: RosterMapping, existin
 
 function cell(value: unknown) {
   return String(value ?? "").trim().replace(/\s+/g, " ");
+}
+
+export function studentEmailForCode(code: string) {
+  return /^[0-9]+$/.test(code) ? `${code}@banjan.ac.th` : null;
 }
