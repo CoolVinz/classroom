@@ -1,7 +1,7 @@
 import type * as React from "react";
 import { useMemo, useState } from "react";
 import { api } from "./api";
-import { previewRoster, readRosterFile, suggestRosterColumns, type RosterMapping, type RosterPreview, type RosterSheet } from "./roster-import";
+import { previewRoster, readPastedRoster, readRosterFile, suggestRosterColumns, type RosterMapping, type RosterPreview, type RosterSheet } from "./roster-import";
 
 type Student = { studentCode: string | null; email?: string | null; archived?: boolean };
 
@@ -18,6 +18,8 @@ export function StudentRosterImport({ classroomId, students, onImported, onError
   const [prefixColumn, setPrefixColumn] = useState(-1);
   const [emailColumn, setEmailColumn] = useState(-1);
   const [saving, setSaving] = useState(false);
+  const [reading, setReading] = useState(false);
+  const [pastedText, setPastedText] = useState("");
   const [fileName, setFileName] = useState("");
   const [notice, setNotice] = useState("");
   const sheet = sheets.find((item) => item.name === sheetName);
@@ -39,7 +41,10 @@ export function StudentRosterImport({ classroomId, students, onImported, onError
 
   async function chooseFile(file?: File) {
     if (!file) return;
+    setReading(true);
     setNotice("");
+    setSheets([]);
+    setPastedText("");
     setFileName(file.name);
     try {
       const nextSheets = await readRosterFile(file);
@@ -49,7 +54,23 @@ export function StudentRosterImport({ classroomId, students, onImported, onError
     } catch (reason) {
       setSheets([]); setFileName("");
       onError(reason instanceof Error ? reason.message : "อ่านไฟล์รายชื่อไม่สำเร็จ");
-    }
+    } finally { setReading(false); }
+  }
+
+  async function choosePastedData() {
+    setReading(true);
+    setNotice("");
+    setSheets([]);
+    setFileName("");
+    try {
+      const nextSheet = await readPastedRoster(pastedText);
+      setSheets([nextSheet]);
+      setSheetName(nextSheet.name);
+      setFileName(nextSheet.name);
+      applyHeaderMapping(nextSheet.rows[0] ?? []);
+    } catch (reason) {
+      onError(reason instanceof Error ? reason.message : "อ่านข้อมูลที่วางไม่สำเร็จ");
+    } finally { setReading(false); }
   }
 
   function chooseSheet(name: string) {
@@ -76,7 +97,7 @@ export function StudentRosterImport({ classroomId, students, onImported, onError
       const result = await api<{ added: number; skipped: number }>("/classrooms/" + classroomId + "/roster/import", {
         method: "POST", body: JSON.stringify({ students: preview.add.map(({ studentCode, displayName, email }) => ({ studentCode, displayName, email })) }),
       });
-      setSheets([]); setFileName("");
+      setSheets([]); setFileName(""); setPastedText("");
       await onImported();
       setNotice(`นำเข้า ${result.added} คน และข้ามรหัสเดิม ${result.skipped} คนแล้ว`);
     } catch (reason) {
@@ -84,8 +105,9 @@ export function StudentRosterImport({ classroomId, students, onImported, onError
     } finally { setSaving(false); }
   }
 
-  return <section className="panel roster-import"><header className="panel-heading compact"><div><p className="eyebrow">นำเข้ารายชื่อจากตาราง</p><h2>Excel หรือ CSV</h2><p className="muted">จับคู่คอลัมน์ก่อนนำเข้า ระบบจะข้ามรหัสเดิม และสร้างอีเมลโรงเรียนจากรหัสตัวเลขเมื่อไม่มีอีเมล</p></div></header>
-    <div className="roster-import-controls"><label className="import-file">เลือกไฟล์<input type="file" accept=".xlsx,.csv" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; void chooseFile(file); }}/></label>{fileName && <span className="muted">{fileName}</span>}
+  return <section className="panel roster-import"><header className="panel-heading compact"><div><p className="eyebrow">นำเข้ารายชื่อจากตาราง</p><h2>Excel, CSV หรือวางข้อมูล</h2><p className="muted">จับคู่คอลัมน์ก่อนนำเข้า ระบบจะข้ามรหัสเดิม และสร้างอีเมลโรงเรียนจากรหัสตัวเลขเมื่อไม่มีอีเมล</p></div></header>
+    <div className="roster-import-controls"><label className="import-file">เลือกไฟล์<input type="file" accept=".xlsx,.csv" disabled={saving || reading} onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; void chooseFile(file); }}/></label>{fileName && <span className="muted">{fileName}</span>}
+      <details className="import-paste"><summary>หรือวางข้อมูลจาก Google Sheets</summary><label>ข้อมูลรายชื่อ<small>คัดลอกเซลล์พร้อมแถวหัวคอลัมน์จาก Google Sheets หรือ Excel (ไม่เกิน 1,000 คน และ 5 MB)</small><textarea rows={5} value={pastedText} disabled={saving || reading} onChange={(event) => { setPastedText(event.target.value); setSheets([]); setFileName(""); setNotice(""); }}/></label><Button type="button" tone="quiet" disabled={saving || reading || !pastedText.trim()} onClick={() => void choosePastedData()}>{reading ? "กำลังอ่านข้อมูล…" : "ดูตัวอย่างข้อมูลที่วาง"}</Button></details>
       {sheets.length > 1 && <label>แผ่นงาน<select value={sheetName} onChange={(event) => chooseSheet(event.target.value)}>{sheets.map((item) => <option key={item.name}>{item.name}</option>)}</select></label>}
       {sheet && <>
         <label>รหัสนักเรียน<select value={codeColumn} onChange={(event) => setCodeColumn(Number(event.target.value))}><option value={-1}>เลือกคอลัมน์</option>{headers.map((header, index) => <option value={index} key={index}>{header}</option>)}</select></label>
@@ -99,7 +121,7 @@ export function StudentRosterImport({ classroomId, students, onImported, onError
       <div className="import-preview"><table className="data-table"><thead><tr><th>แถว</th><th>รหัสนักเรียน</th><th>ชื่อ</th><th>อีเมล</th><th>สถานะ</th></tr></thead><tbody>
         {previewRows.slice(0, 20).map((row) => <tr key={row.row + "-" + row.status}><td>{row.row}</td><td>{row.studentCode}</td><td>{row.displayName}</td><td>{row.email ?? "—"}</td><td>{row.status}</td></tr>)}
       </tbody></table></div>{previewRows.length > 20 && <p className="muted">แสดงตัวอย่าง 20 แถวแรก</p>}
-      <footer className="panel-footer"><span className="muted">รหัสเดิมและนักเรียนที่เก็บไว้จะไม่เปลี่ยนแปลง</span><Button disabled={saving || !preview.add.length || !!preview.errors.length} onClick={() => void importRows()}>{saving ? "กำลังนำเข้า…" : "ยืนยันนำเข้า"}</Button></footer>
+      <footer className="panel-footer"><span className="muted">รหัสเดิมและนักเรียนที่เก็บไว้จะไม่เปลี่ยนแปลง</span><Button disabled={saving || reading || !preview.add.length || !!preview.errors.length} onClick={() => void importRows()}>{saving ? "กำลังนำเข้า…" : "ยืนยันนำเข้า"}</Button></footer>
     </>}
   </section>;
 }

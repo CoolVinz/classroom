@@ -8,7 +8,7 @@ A Thai-language classroom manager for teachers. It runs on Bun + ElysiaJS, serve
 - Teacher-owned classrooms and student rosters. Students can be archived and restored without deleting attendance history.
 - Daily attendance with present, absent, late, excused, and unmarked states.
 - Classroom summaries by student and date range.
-- XLSX/CSV roster import by student ID with optional email mapping; missing email addresses are generated for numeric IDs (including leading zeroes), and existing/archived IDs are skipped without changing their details.
+- Roster import from XLSX/CSV files or cells copied from Google Sheets/Excel (include the header row), with column mapping and a confirmation preview. Optional title prefixes are joined with split names; missing email addresses are generated for numeric IDs (including leading zeroes), and existing/archived IDs are skipped without changing their details.
 - Classroom assignments, teacher worksheets, and private student submissions in PDF, image, Word, STL, or OBJ formats. Students can preview their own STL/OBJ files; teachers see submission status and can preview or download class work.
 - Thai interface, Bangkok date boundaries, and layouts for desktop and mobile.
 

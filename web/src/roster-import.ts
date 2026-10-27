@@ -29,6 +29,16 @@ export async function readRosterFile(file: File): Promise<RosterSheet[]> {
   }));
 }
 
+export async function readPastedRoster(text: string): Promise<RosterSheet> {
+  if (!text.trim()) throw new Error("วางข้อมูลรายชื่อที่คัดลอกจากตารางก่อน");
+  if (new Blob([text]).size > 5 * 1024 * 1024) throw new Error("ข้อมูลที่วางต้องมีขนาดไม่เกิน 5 MB");
+  const XLSX = await import("xlsx");
+  const workbook = XLSX.read(text, { type: "string", FS: "\t", raw: true, WTF: true });
+  const rows = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[workbook.SheetNames[0]], { header: 1, raw: false, defval: "", blankrows: false });
+  if ((rows[0]?.length ?? 0) < 2) throw new Error("คัดลอกคอลัมน์รหัสนักเรียนและชื่อจากตาราง พร้อมแถวหัวคอลัมน์");
+  return { name: "ข้อมูลที่วาง", rows };
+}
+
 export function previewRoster(rows: unknown[][], mapping: RosterMapping, existingCodes: Set<string>, existingEmails = new Set<string>()): RosterPreview {
   if (rows.length < 2) return { add: [], skipped: [], errors: [{ row: 1, message: "ไฟล์ไม่มีรายชื่อนักเรียน" }] };
   if (rows.length > 1001) return { add: [], skipped: [], errors: [{ row: 1002, message: "นำเข้าได้ไม่เกิน 1,000 คนต่อครั้ง" }] };

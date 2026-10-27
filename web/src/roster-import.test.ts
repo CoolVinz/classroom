@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import * as XLSX from "xlsx";
-import { previewRoster, readRosterFile, suggestRosterColumns } from "./roster-import";
+import { previewRoster, readPastedRoster, readRosterFile, suggestRosterColumns } from "./roster-import";
 
 describe("student roster import", () => {
   test("keeps leading zeroes and skips existing student IDs", () => {
@@ -30,6 +30,49 @@ describe("student roster import", () => {
     const files = await readRosterFile(new File([fileBytes], "roster.xlsx"));
     expect(files[0].name).toBe("Roster");
     expect(previewRoster(files[0].rows, { code: 0, fullName: 1 }, new Set()).add[0].studentCode).toBe("0007");
+  });
+
+  test("reads copied Thai spreadsheet cells with blank columns, prefixes and leading zeroes", async () => {
+    const sheet = await readPastedRoster([
+      "\tลำดับ\tเลขประจำตัวนักเรียน\tคำนำหน้าชื่อ\tชื่อ\tนามสกุล\tหมายเหตุ",
+      "\t1\t000123\tด.ช.\tผู้เรียน\tทดลอง\t",
+      "\t2\t000124\t\tนักเรียนใหม่\tทดสอบ\t",
+      "\t3\t000125\tด.ญ.\tนักเรียนเดิม\tตัวอย่าง\t",
+      "",
+    ].join("\r\n"));
+    const columns = suggestRosterColumns(sheet.rows[0]);
+    const result = previewRoster(sheet.rows, {
+      code: columns.code, prefix: columns.prefix, firstName: columns.firstName, lastName: columns.lastName,
+    }, new Set(["000125"]));
+    expect(result.errors).toEqual([]);
+    expect(result.add).toMatchObject([
+      { studentCode: "000123", displayName: "ด.ช. ผู้เรียน ทดลอง", email: "000123@banjan.ac.th" },
+      { studentCode: "000124", displayName: "นักเรียนใหม่ ทดสอบ", email: "000124@banjan.ac.th" },
+    ]);
+    expect(result.skipped).toMatchObject([{ studentCode: "000125" }]);
+  });
+
+  test("handles quoted and multiline pasted cells and keeps duplicate and missing-ID validation", async () => {
+    const sheet = await readPastedRoster('ID\tName\n0001\t"ผู้เรียน, ทดสอบ"\n0002\t"ผู้เรียน\nตัวอย่าง"\n0003\tFirst\n0003\tDuplicate\n\tMissing ID\n');
+    const result = previewRoster(sheet.rows, { code: 0, fullName: 1 }, new Set());
+    expect(result.add.map(({ studentCode, displayName }) => [studentCode, displayName])).toEqual([
+      ["0001", "ผู้เรียน, ทดสอบ"], ["0002", "ผู้เรียน ตัวอย่าง"],
+    ]);
+    expect(result.errors).toHaveLength(3);
+  });
+
+  test("rejects empty, oversized and non-tabular pasted data", async () => {
+    await expect(readPastedRoster(" \n\t ")).rejects.toThrow("วางข้อมูลรายชื่อ");
+    await expect(readPastedRoster("x".repeat(5 * 1024 * 1024 - 1) + "ก")).rejects.toThrow("5 MB");
+    await expect(readPastedRoster("ID Name\n0001 Student")).rejects.toThrow("คัดลอกคอลัมน์");
+  });
+
+  test("applies the existing 1,000-student limit to pasted rows", async () => {
+    const text = ["ID\tName", ...Array.from({ length: 1001 }, (_, index) => `${index}\tStudent ${index}`)].join("\n");
+    const sheet = await readPastedRoster(text);
+    const result = previewRoster(sheet.rows, { code: 0, fullName: 1 }, new Set());
+    expect(result.add).toEqual([]);
+    expect(result.errors).toMatchObject([{ message: "นำเข้าได้ไม่เกิน 1,000 คนต่อครั้ง" }]);
   });
 
   test("a repeated import skips a student already in the roster", () => {
