@@ -9,7 +9,7 @@ export const studentAttendanceRoutes = new Elysia({ prefix: "/api/student" })
     const actor = await requireStudent(request);
     return sql`
       SELECT l.classroom_id AS "classroomId", c.name AS "classroomName",
-        l.lesson_date AS date, l.starts_at AS "startsAt", l.ends_at AS "endsAt",
+        to_char(l.lesson_date, 'YYYY-MM-DD') AS date, l.starts_at AS "startsAt", l.ends_at AS "endsAt",
         l.grace_minutes AS "graceMinutes", p.first_arrival_at AS "firstArrivalAt",
         p.last_seen_at AS "lastSeenAt", p.visible_seconds AS "visibleSeconds",
         a.status AS "attendanceStatus"

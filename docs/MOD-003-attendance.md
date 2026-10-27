@@ -21,6 +21,7 @@ Record one daily attendance result per roster student, collect automatic arrival
 
 - PostgreSQL stores attendance date as `DATE`; the single daily key remains `(student_id, attendance_date)` because each roster ID belongs to one classroom. Future dates are rejected by both UI and API.
 - Dated lessons use Bangkok calendar dates and `TIMESTAMPTZ` start/end instants. A timetable permits one continuous lesson per weekday; only unstarted, unfinalized future lessons follow edits.
+- Timetable term dates and teacher/student lesson dates use `YYYY-MM-DD` in API responses and requests. Start/end instants remain ISO timestamps; calendar dates must not be serialized as timestamps into date inputs, cancellation URLs, or student presence requests.
 - Arrival is based on the first server timestamp during `[lesson start, lesson end)`. Arrival at or before `start + grace` is present; arrival after the grace cutoff is late. No early arrival or automatic absence is recorded.
 - Presence timing is separate from status. Server time is authoritative; each student/class/day has one active-view lease, and at most 45 seconds are credited per heartbeat interval. A stale gap resets the baseline.
 - A student may track at most one classroom at a time. Every heartbeat revalidates the authenticated account and active roster membership. Archiving membership/classroom clears its active tracking lease.

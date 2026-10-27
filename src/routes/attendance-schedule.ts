@@ -16,7 +16,8 @@ export const attendanceScheduleRoutes = new Elysia({ prefix: "/api" })
     const actor = await requireActor(request);
     await ownedClass(params.classroomId, actor.id);
     const [timetable] = await sql<{ termStartsOn: string; termEndsOn: string; graceMinutes: number }[]>`
-      SELECT term_starts_on AS "termStartsOn", term_ends_on AS "termEndsOn", grace_minutes AS "graceMinutes"
+      SELECT to_char(term_starts_on, 'YYYY-MM-DD') AS "termStartsOn",
+        to_char(term_ends_on, 'YYYY-MM-DD') AS "termEndsOn", grace_minutes AS "graceMinutes"
       FROM classroom.weekly_timetables WHERE classroom_id = ${params.classroomId}
     `;
     const weekdays = timetable ? await sql<{ weekday: number; startsAt: string; endsAt: string }[]>`
@@ -24,7 +25,7 @@ export const attendanceScheduleRoutes = new Elysia({ prefix: "/api" })
       FROM classroom.weekly_timetable_days WHERE classroom_id = ${params.classroomId} ORDER BY weekday
     ` : [];
     const lessons = await sql<{ date: string; startsAt: string; endsAt: string; cancelledAt: string | null; finalizedAt: string | null }[]>`
-      SELECT lesson_date AS date, starts_at AS "startsAt", ends_at AS "endsAt",
+      SELECT to_char(lesson_date, 'YYYY-MM-DD') AS date, starts_at AS "startsAt", ends_at AS "endsAt",
         cancelled_at AS "cancelledAt", finalized_at AS "finalizedAt"
       FROM classroom.lessons WHERE classroom_id = ${params.classroomId}
         AND lesson_date >= (NOW() AT TIME ZONE 'Asia/Bangkok')::date

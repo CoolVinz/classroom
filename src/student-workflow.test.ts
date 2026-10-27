@@ -116,9 +116,27 @@ describe("student submission API", () => {
       }));
       expect(scheduled.status).toBe(200);
       const scheduleView = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/timetable`, { headers: teacherHeaders }));
-      expect((await scheduleView.json() as { lessons: { date: string; startsAt: string }[] }).lessons).toHaveLength(1);
+      const scheduleData = await scheduleView.json() as {
+        timetable: { termStartsOn: string; termEndsOn: string; graceMinutes: number };
+        weekdays: { weekday: number; startsAt: string; endsAt: string }[];
+        lessons: { date: string; startsAt: string; endsAt: string }[];
+      };
+      expect(scheduleData.timetable).toEqual({ termStartsOn: scheduleDay[0].date, termEndsOn: scheduleDay[0].date, graceMinutes: 10 });
+      expect(scheduleData.lessons).toHaveLength(1);
+      expect(scheduleData.lessons[0]).toMatchObject({ date: scheduleDay[0].date,
+        startsAt: `${scheduleDay[0].date}T02:00:00.000Z`, endsAt: `${scheduleDay[0].date}T03:00:00.000Z` });
+      const editedSchedule = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/timetable`, {
+        method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" },
+        body: JSON.stringify({ ...scheduleData.timetable, weekdays: scheduleData.weekdays.map((day) => ({ ...day, startsAt: "09:30", endsAt: "10:30" })) }),
+      }));
+      expect(editedSchedule.status).toBe(200);
+      const reopenedSchedule = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/timetable`, { headers: teacherHeaders }));
+      const reopenedData = await reopenedSchedule.json() as typeof scheduleData;
+      expect(reopenedData.timetable).toEqual(scheduleData.timetable);
+      expect(reopenedData.weekdays).toEqual([{ weekday: scheduleDay[0].weekday, startsAt: "09:30", endsAt: "10:30" }]);
+      expect(reopenedData.lessons[0].startsAt).toBe(`${scheduleDay[0].date}T02:30:00.000Z`);
       expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/timetable`, { method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ termStartsOn: scheduleDay[0].date, termEndsOn: scheduleDay[0].date, graceMinutes: 10, weekdays: [{ weekday: scheduleDay[0].weekday, startsAt: "10:00", endsAt: "09:00" }] }) }))).status).toBe(422);
-      const cancelLesson = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/lessons/${scheduleDay[0].date}`, { method: "PATCH", headers: teacherHeaders }));
+      const cancelLesson = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/lessons/${reopenedData.lessons[0].date}`, { method: "PATCH", headers: teacherHeaders }));
       expect(cancelLesson.status).toBe(200);
       const cancelledSchedule = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/timetable`, { headers: teacherHeaders }));
       expect((await cancelledSchedule.json() as { lessons: { cancelledAt: string | null }[] }).lessons[0].cancelledAt).not.toBeNull();
@@ -134,11 +152,13 @@ describe("student submission API", () => {
           VALUES (${roomA}, (${todayDate[0].date}::date - 1), NOW() - INTERVAL '1 day 2 hours', NOW() - INTERVAL '1 day 1 hour', 10)`;
       });
       const studentLessons = await app.handle(new Request("http://localhost/api/student/lessons", { headers: studentHeaders }));
-      expect((await studentLessons.json() as { classroomId: string }[]).map((lesson) => lesson.classroomId).sort()).toEqual([roomA, roomB].sort());
+      const studentLessonData = await studentLessons.json() as { classroomId: string; date: string; startsAt: string; endsAt: string }[];
+      expect(studentLessonData.map((lesson) => lesson.classroomId).sort()).toEqual([roomA, roomB].sort());
+      expect(studentLessonData.map((lesson) => lesson.date)).toEqual([todayDate[0].date, todayDate[0].date]);
       const viewId = randomUUID();
       const pulse = (active: boolean, sequence: number, classroomId = roomA) => app.handle(new Request(`http://localhost/api/student/classrooms/${classroomId}/attendance/presence`, {
         method: "POST", headers: { ...studentHeaders, "content-type": "application/json" },
-        body: JSON.stringify({ lessonDate: todayDate[0].date, viewId, sequence, active }),
+        body: JSON.stringify({ lessonDate: studentLessonData.find((lesson) => lesson.classroomId === classroomId)!.date, viewId, sequence, active }),
       }));
       const arrived = await pulse(true, 1);
       expect(arrived.status).toBe(200);
@@ -158,6 +178,20 @@ describe("student submission API", () => {
       expect(await paused.json()).toMatchObject({ accepted: true, attendanceStatus: "present" });
       const teacherAttendance = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/attendance?date=${todayDate[0].date}`, { headers: teacherHeaders }));
       expect((await teacherAttendance.json() as { students: { studentId: string; status: string; source: string; visibleSeconds: number }[] }).students.find((student) => student.studentId === studentA)).toMatchObject({ status: "present", source: "automatic" });
+      const historicalLessons = await sql`SELECT lesson_date::text, starts_at, ends_at, grace_minutes
+        FROM classroom.lessons WHERE classroom_id = ${roomA} AND lesson_date <= ${todayDate[0].date}::date ORDER BY lesson_date`;
+      const recordedAttendance = await sql`SELECT * FROM classroom.attendance WHERE classroom_id = ${roomA}`;
+      const recordedPresence = await sql`SELECT * FROM classroom.attendance_presence WHERE classroom_id = ${roomA}`;
+      const timetableChange = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/timetable`, {
+        method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" },
+        body: JSON.stringify({ termStartsOn: todayDate[0].date, termEndsOn: scheduleDay[0].date, graceMinutes: 20,
+          weekdays: [{ weekday: new Date(todayDate[0].date + "T12:00:00Z").getUTCDay() || 7, startsAt: "00:01", endsAt: "23:59" }] }),
+      }));
+      expect(timetableChange.status).toBe(200);
+      expect([...(await sql`SELECT lesson_date::text, starts_at, ends_at, grace_minutes
+        FROM classroom.lessons WHERE classroom_id = ${roomA} AND lesson_date <= ${todayDate[0].date}::date ORDER BY lesson_date`)]).toEqual([...historicalLessons]);
+      expect([...(await sql`SELECT * FROM classroom.attendance WHERE classroom_id = ${roomA}`)]).toEqual([...recordedAttendance]);
+      expect([...(await sql`SELECT * FROM classroom.attendance_presence WHERE classroom_id = ${roomA}`)]).toEqual([...recordedPresence]);
       expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/attendance/${todayDate[0].date}/finalize`, { method: "POST", headers: teacherHeaders }))).status).toBe(409);
       const finalized = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/attendance/${new Date(Date.parse(todayDate[0].date + "T12:00:00Z") - 86400000).toISOString().slice(0, 10)}/finalize`, { method: "POST", headers: teacherHeaders }));
       expect(finalized.status).toBe(200);
