@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import * as XLSX from "xlsx";
-import { previewRoster, readRosterFile } from "./roster-import";
+import { previewRoster, readRosterFile, suggestRosterColumns } from "./roster-import";
 
 describe("student roster import", () => {
   test("keeps leading zeroes and skips existing student IDs", () => {
@@ -55,6 +55,28 @@ describe("student roster import", () => {
     ], { code: 0, fullName: 1, email: 2 }, new Set());
     expect(result.add.map(({ studentCode, email }) => [studentCode, email])).toEqual([
       ["0024514", "0024514@banjan.ac.th"], ["24515", "custom@school.edu"], ["AB15", undefined],
+    ]);
+  });
+
+  test("suggests Thai ID and prefix columns and joins a nonblank prefix with split names", () => {
+    const headers = ["ลำดับ", "เลขประจำตัวนักเรียน", "คำนำหน้าชื่อ", "ชื่อ", "นามสกุล", "หมายเหตุ"];
+    const mapping = suggestRosterColumns(headers);
+    expect(mapping).toEqual({ code: 1, fullName: -1, firstName: 3, lastName: 4, prefix: 2, email: -1 });
+
+    const result = previewRoster([
+      headers,
+      ["1", "001234", "ด.ช.", "สมชาย", "ใจดี", ""],
+      ["2", "001235", "", "ผู้เรียนใหม่", "ทดสอบ", ""],
+    ], {
+      code: mapping.code,
+      prefix: mapping.prefix,
+      firstName: mapping.firstName,
+      lastName: mapping.lastName,
+    }, new Set());
+
+    expect(result.add.map(({ studentCode, displayName, email }) => [studentCode, displayName, email])).toEqual([
+      ["001234", "ด.ช. สมชาย ใจดี", "001234@banjan.ac.th"],
+      ["001235", "ผู้เรียนใหม่ ทดสอบ", "001235@banjan.ac.th"],
     ]);
   });
 

@@ -11,7 +11,7 @@ Let an authenticated teacher create and manage their own classrooms and student 
 ## Workflows
 
 - Create a named classroom, rename it, or archive it.
-- Add a student with a required name and optional classroom-specific code/email, or import a roster from XLSX/CSV with an optional email column. A missing email is generated as `<numeric student ID>@banjan.ac.th`, preserving leading zeroes.
+- Add a student with a required name and optional classroom-specific code/email, or import a roster from XLSX/CSV with optional email and title-prefix columns. Split first and last names are combined, including a nonblank prefix; a missing email is generated as `<numeric student ID>@banjan.ac.th`, preserving leading zeroes.
 - Edit student name/code/email; archive or restore a student without deleting attendance history.
 - Preview roster imports by student ID; existing IDs, including archived students, are skipped without changing their details or attendance.
 - A verified student Google email automatically links matching active roster rows across classrooms on sign-in. Teachers can edit a roster email when it is missing or incorrect.

@@ -1,7 +1,22 @@
 export type RosterSheet = { name: string; rows: unknown[][] };
-export type RosterMapping = { code: number; fullName?: number; firstName?: number; lastName?: number; email?: number };
+export type RosterMapping = { code: number; fullName?: number; firstName?: number; lastName?: number; prefix?: number; email?: number };
+export type RosterColumnSuggestions = { code: number; fullName: number; firstName: number; lastName: number; prefix: number; email: number };
 export type RosterRow = { studentCode: string; displayName: string; email?: string; row: number };
 export type RosterPreview = { add: RosterRow[]; skipped: RosterRow[]; errors: { row: number; message: string }[] };
+
+export function suggestRosterColumns(headers: unknown[]): RosterColumnSuggestions {
+  const normalized = headers.map((header) => String(header ?? "").trim().toLowerCase());
+  const find = (pattern: RegExp) => normalized.findIndex((header) => pattern.test(header));
+  const prefix = find(/คำนำหน้า|prefix|title/i);
+  return {
+    code: find(/รหัส|เลขประจำตัว|student.?id|^id$|code/i),
+    fullName: find(/ชื่อ.?นามสกุล|ชื่อ.*สกุล|full.?name|student.?name|^name$/i),
+    firstName: normalized.findIndex((header, index) => index !== prefix && /ชื่อ|first.?name/i.test(header)),
+    lastName: find(/สกุล|last.?name/i),
+    prefix,
+    email: find(/อีเมล|email|e-mail/i),
+  };
+}
 
 export async function readRosterFile(file: File): Promise<RosterSheet[]> {
   if (!/\.(csv|xlsx)$/i.test(file.name)) throw new Error("เลือกไฟล์ .xlsx หรือ .csv เท่านั้น");
@@ -31,7 +46,7 @@ export function previewRoster(rows: unknown[][], mapping: RosterMapping, existin
     const email = emails[index] || undefined;
     const displayName = mapping.fullName !== undefined
       ? cell(row[mapping.fullName])
-      : [cell(row[mapping.firstName ?? -1]), cell(row[mapping.lastName ?? -1])].filter(Boolean).join(" ");
+      : [cell(row[mapping.prefix ?? -1]), cell(row[mapping.firstName ?? -1]), cell(row[mapping.lastName ?? -1])].filter(Boolean).join(" ");
     if (!studentCode || !displayName) {
       result.errors.push({ row: rowNumber, message: "ต้องมีรหัสนักเรียนและชื่อ" });
     } else if (studentCode.length > 50 || displayName.length > 120) {
