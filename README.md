@@ -5,10 +5,10 @@ A Thai-language classroom manager for teachers. It runs on Bun + ElysiaJS, serve
 ## Included
 
 - Teacher sign-in; an owner can create, disable, and reset teacher accounts. Students sign in with school Google accounts and can join more than one classroom with the same account.
-- Teacher-owned classrooms and student rosters. Students can be archived and restored without deleting attendance history.
+- Teacher-owned classrooms and student rosters with a separate classroom number (เลขที่). Students can be archived/restored or permanently removed from one classroom; permanent removal deletes only that classroom's attendance and attributed files while preserving the shared Google account and other classroom records.
 - Daily attendance with present, absent, late, excused, and unmarked states.
 - Classroom summaries by student and date range.
-- Roster import from XLSX/CSV files or cells copied from Google Sheets/Excel (include the header row), with column mapping and a confirmation preview. Optional title prefixes are joined with split names; missing email addresses are generated for numeric IDs (including leading zeroes), and existing/archived IDs are skipped without changing their details.
+- Roster import from XLSX/UTF-8 CSV files or cells copied from Google Sheets/Excel, with headered or headerless column mapping and a confirmation preview. Optional title prefixes are joined with split names; active existing IDs without a classroom number can receive the missing number, while other existing/archived details remain unchanged. Missing email addresses are generated for numeric IDs (including leading zeroes).
 - Classroom assignments, teacher worksheets, and private student submissions in PDF, image, Word, STL, or OBJ formats. Students can preview their own STL/OBJ files; teachers see submission status and can preview or download class work.
 - Thai interface, Bangkok date boundaries, and layouts for desktop and mobile.
 

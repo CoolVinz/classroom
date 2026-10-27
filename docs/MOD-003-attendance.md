@@ -10,7 +10,7 @@ Record one daily attendance status for every active student in a classroom and v
 
 ## Workflows
 
-- Select a classroom and date (default Asia/Bangkok today).
+- Select a classroom and date (default Asia/Bangkok today). Students display in classroom-number order, with unnumbered students last and `—` for a missing number.
 - Mark students present, absent, late, excused, or leave them unmarked; the UI can mark everyone present.
 - Save the full active roster in a database transaction. Existing marks update; unmarked students have no record.
 - Review class summaries across a date range; archived students remain visible in historical summaries.
@@ -18,7 +18,7 @@ Record one daily attendance status for every active student in a classroom and v
 ## Business rules
 
 - PostgreSQL stores attendance date as `DATE`; future dates are rejected by both UI and API.
-- A student can have at most one attendance status on a calendar date.
+- A student can have at most one attendance status on a calendar date. Permanent roster removal deletes that student's attendance rows in the selected classroom.
 - Allowed persisted statuses are `present`, `absent`, `late`, and `excused`.
 - Saving requires the submitted student IDs to match the active roster. Stale or duplicate rosters fail without partial writes.
 - A summary counts saved statuses only; unmarked students do not count as absent.
@@ -31,16 +31,16 @@ Record one daily attendance status for every active student in a classroom and v
 **Code Map:**
 
 ```text
-UI: web/src/App.tsx (Attendance, SummaryPage, RoomSummary)
+UI: web/src/App.tsx (Attendance, SummaryPage, RoomSummary; displays classroom numbers)
 API and SQL: src/routes/classrooms.ts
 Bangkok dates/input helpers: src/security.ts
 Database: src/db/migrations/001_initial.sql (attendance)
-Tests: None found
+Tests: src/student-workflow.test.ts (optional PostgreSQL integration for student removal/history)
 ```
 
 ## Technical debt and warnings
 
-- No automated tests verify date boundaries, ownership, transactional saves, or summary calculations.
+- Automated API tests for date boundaries, ownership, transactional saves, and summary calculations remain incomplete.
 - Attendance rules live in the classroom route module alongside roster behavior.
 - Past attendance dates remain editable; no audit history or change log exists.
 

@@ -153,7 +153,7 @@ The initial owner can also be provisioned once with the `OWNER_USERNAME`, `OWNER
 
 ## Tests / Lint
 
-`bun test` runs file validation and roster parsing tests. `src/student-workflow.test.ts` covers Google callback validation, account linking, retired password endpoints, sessions, access boundaries, and uploads when `CLASSROOM_TEST_DATABASE_URL` points to an isolated migrated PostgreSQL 18 database. Google token verification is mocked; there is no live school-account or browser suite.
+`bun test` runs file validation and roster parsing tests. `src/student-workflow.test.ts` covers Google callback validation, account linking, roster numbers/import, classroom-scoped student removal, access boundaries, and uploads when `CLASSROOM_TEST_DATABASE_URL` points to an isolated migrated PostgreSQL 18 database. Google token verification is mocked; there is no live school-account or browser suite.
 
 ---
 
@@ -192,7 +192,7 @@ GOOGLE_WORKSPACE_DOMAIN
 - One daily attendance record is stored per student/date; valid statuses are present, absent, late, and excused. Unmarked students have no record.
 - A model file belongs to one classroom, assignment, and student; worksheets belong to a classroom assignment. File contents require persistent volume storage and off-server backup.
 - File uploads default to 50 MiB each and 5 GiB total. Model previews are limited to 500,000 triangles and 10 seconds of parsing.
-- Roster import requires student IDs, skips existing and archived IDs, and never changes attendance.
+- Roster import requires student IDs, preserves existing student details, and skips archived/already-numbered rows; it can fill a missing classroom number on an active row. Classroom numbers are positive integers unique among active students in a classroom. Permanent removal deletes attendance and attributed files only within that classroom and preserves shared Google accounts and other classroom memberships.
 - Login throttling and sessions are process/database based respectively; login throttling is in-memory per account identifier per application process.
 
 ---

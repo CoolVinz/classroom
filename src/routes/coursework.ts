@@ -28,7 +28,7 @@ async function ownedAssignment(classroomId: string, assignmentId: string, ownerI
   if (!assignment) throw new HttpError(404, "ไม่พบงานนี้");
 }
 
-const importRow = t.Object({ studentCode: t.String({ minLength: 1, maxLength: 50 }), displayName: t.String({ minLength: 1, maxLength: 120 }), email: t.Optional(t.String({ maxLength: 254 })) });
+const importRow = t.Object({ studentCode: t.String({ minLength: 1, maxLength: 50 }), studentNumber: t.Optional(t.Nullable(t.Integer({ minimum: 1, maximum: 2147483647 }))), displayName: t.Optional(t.String({ minLength: 1, maxLength: 120 })), email: t.Optional(t.String({ maxLength: 254 })) });
 
 export const courseworkRoutes = new Elysia({ prefix: "/api" })
   .get("/classrooms/:classroomId/assignments", async ({ params, request }) => {
@@ -156,19 +156,38 @@ export const courseworkRoutes = new Elysia({ prefix: "/api" })
   .delete("/files/:fileId", async ({ params, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
-    const [record] = await sql<{ storageName: string }[]>`
-      SELECT f.storage_name AS "storageName" FROM classroom.files f
-      JOIN classroom.classrooms c ON c.id = f.classroom_id
-      WHERE f.id = ${params.fileId} AND c.owner_id = ${actor.id}
-    `;
-    if (!record) throw new HttpError(404, "ไม่พบไฟล์นี้");
-    const path = resolve(uploadRoot(), record.storageName);
-    const tombstone = path + ".deleting";
-    await rename(path, tombstone);
-    try { await sql`DELETE FROM classroom.files WHERE id = ${params.fileId}`; }
-    catch (error) { await rename(tombstone, path).catch(() => {}); throw error; }
-    await rm(tombstone, { force: true }).catch(() => {});
-    return { ok: true };
+    const staged: { path: string; tombstone: string }[] = [];
+    try {
+      const [record] = await sql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(870010022)`;
+        const [file] = await tx<{ storageName: string }[]>`
+          SELECT f.storage_name AS "storageName" FROM classroom.files f
+          JOIN classroom.classrooms c ON c.id = f.classroom_id
+          WHERE f.id = ${params.fileId} AND c.owner_id = ${actor.id} FOR UPDATE OF f
+        `;
+        if (!file) throw new HttpError(404, "ไม่พบไฟล์นี้");
+        const path = resolve(uploadRoot(), file.storageName);
+        const tombstone = path + ".deleting";
+        staged.push({ path, tombstone });
+        try { await rename(path, tombstone); }
+        catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; }
+        await tx`DELETE FROM classroom.files WHERE id = ${params.fileId}`;
+        return [file];
+      });
+      if (!record) throw new HttpError(404, "ไม่พบไฟล์นี้");
+    } catch (error) {
+      const stagedFile = staged[0];
+      if (stagedFile) {
+        try {
+          const [record] = await sql`SELECT id FROM classroom.files WHERE id = ${params.fileId}`;
+          if (record) await rename(stagedFile.tombstone, stagedFile.path).catch(() => {});
+          else await rm(stagedFile.tombstone, { force: true }).catch(() => {});
+        } catch { /* Startup reconciliation resolves staged files if the transaction result is unknown. */ }
+      }
+      throw error;
+    }
+    const cleanupPending = staged[0] ? await rm(staged[0].tombstone, { force: true }).then(() => false, () => true) : false;
+    return { ok: true, cleanupPending };
   })
   .post("/classrooms/:classroomId/roster/import", async ({ params, body, request }) => {
     checkRequestOrigin(request);
@@ -178,30 +197,49 @@ export const courseworkRoutes = new Elysia({ prefix: "/api" })
     const seenEmails = new Set<string>();
     const rows = body.students.map((row) => {
       const studentCode = cleanText(row.studentCode, 50);
-      const displayName = cleanText(row.displayName, 120);
-      const email = normalizeEmail(row.email) ?? studentEmailForCode(studentCode);
-      if (seen.has(studentCode)) throw new HttpError(422, "ไฟล์มีรหัสนักเรียนซ้ำ");
+      if (!studentCode || seen.has(studentCode)) throw new HttpError(422, "ไฟล์มีรหัสนักเรียนซ้ำหรือว่าง");
       seen.add(studentCode);
-      if (email && seenEmails.has(email)) throw new HttpError(422, "อีเมลนักเรียนซ้ำในไฟล์");
-      if (email) seenEmails.add(email);
-      return { studentCode, displayName, email };
+      return { studentCode, studentNumber: row.studentNumber ?? null, displayName: row.displayName === undefined ? null : cleanText(row.displayName, 120), email: row.email };
     });
     return sql.begin(async (tx) => {
       const [room] = await tx<{ id: string }[]>`SELECT id FROM classroom.classrooms WHERE id = ${params.classroomId} AND owner_id = ${actor.id} AND archived_at IS NULL FOR UPDATE`;
       if (!room) throw new HttpError(404, "ไม่พบห้องเรียนนี้");
+      const assignedNumbers = await tx<{ studentNumber: number }[]>`
+        SELECT student_number AS "studentNumber" FROM classroom.students
+        WHERE classroom_id = ${params.classroomId} AND archived_at IS NULL AND student_number IS NOT NULL
+      `;
+      const claimedNumbers = new Set(assignedNumbers.map(({ studentNumber }) => studentNumber));
       let added = 0;
+      let updated = 0;
+      let skipped = 0;
       for (const row of rows) {
-        const inserted = await tx<{ id: string }[]>`
-          INSERT INTO classroom.students (classroom_id, student_code, display_name, email)
-          VALUES (${params.classroomId}, ${row.studentCode}, ${row.displayName}, ${row.email})
-          ON CONFLICT (classroom_id, student_code) DO NOTHING RETURNING id
+        const [existing] = await tx<{ id: string; archived: boolean; studentNumber: number | null }[]>`
+          SELECT id, archived_at IS NOT NULL AS archived, student_number AS "studentNumber"
+          FROM classroom.students WHERE classroom_id = ${params.classroomId} AND student_code = ${row.studentCode} FOR UPDATE
         `;
-        added += inserted.length;
+        if (existing) {
+          if (existing.archived || existing.studentNumber !== null || row.studentNumber === null) { skipped++; continue; }
+          if (claimedNumbers.has(row.studentNumber)) throw new HttpError(409, "เลขที่ซ้ำในห้องเรียน");
+          await tx`UPDATE classroom.students SET student_number = ${row.studentNumber} WHERE id = ${existing.id}`;
+          claimedNumbers.add(row.studentNumber); updated++;
+          continue;
+        }
+        if (!row.displayName) throw new HttpError(422, "นักเรียนใหม่ต้องมีชื่อ");
+        if (row.studentNumber !== null && claimedNumbers.has(row.studentNumber)) throw new HttpError(409, "เลขที่ซ้ำในห้องเรียน");
+        const email = normalizeEmail(row.email) ?? studentEmailForCode(row.studentCode);
+        if (email && seenEmails.has(email)) throw new HttpError(422, "อีเมลนักเรียนซ้ำในไฟล์");
+        if (email) seenEmails.add(email);
+        await tx`
+          INSERT INTO classroom.students (classroom_id, student_code, student_number, display_name, email)
+          VALUES (${params.classroomId}, ${row.studentCode}, ${row.studentNumber}, ${row.displayName}, ${email})
+        `;
+        if (row.studentNumber !== null) claimedNumbers.add(row.studentNumber);
+        added++;
       }
-      return { added, skipped: rows.length - added };
+      return { added, updated, skipped };
     }).catch((error) => {
       if (error && typeof error === "object" && "code" in error && error.code === "23505") {
-        throw new HttpError(409, "มีอีเมลนี้อยู่ในห้องเรียนแล้ว");
+        throw new HttpError(409, "รหัส อีเมล หรือเลขที่นักเรียนนี้มีอยู่ในห้องเรียนแล้ว");
       }
       throw error;
     });

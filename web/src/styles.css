@@ -15,3 +15,5 @@
 @media(max-width:700px){.student-submission-groups,.submission-roster{padding-inline:15px}.submission-roster span{font-size:.76rem}}
 .google-login{display:grid;justify-items:center;gap:12px;min-height:48px}.google-login>.muted{text-align:center}
 .import-paste{width:100%}.import-paste summary{cursor:pointer;color:#287366;font-size:.88rem}.import-paste label{margin:10px 0}.import-paste textarea{width:100%;min-height:120px;resize:vertical;border:1px solid #dce7e3;border-radius:8px;background:#fff;padding:8px 10px;color:var(--ink);font:inherit}.import-paste textarea:focus-visible,.import-paste summary:focus-visible{outline:3px solid #79c3ad;outline-offset:2px}
+.header-row-toggle{display:flex!important;align-items:center;gap:8px;min-width:100%!important}.header-row-toggle input{accent-color:#347c69}.text-button.danger{color:#a83f3f}.text-button.danger:hover{color:#7d2424}
+.add-student{grid-template-columns:minmax(150px,1.3fr) minmax(92px,.7fr) minmax(125px,1fr) minmax(175px,1.4fr) auto}@media(max-width:900px){.add-student{grid-template-columns:1fr 1fr}}@media(max-width:700px){.add-student{grid-template-columns:1fr}}

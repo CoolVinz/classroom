@@ -104,7 +104,7 @@ describe("student roster import", () => {
   test("suggests Thai ID and prefix columns and joins a nonblank prefix with split names", () => {
     const headers = ["ลำดับ", "เลขประจำตัวนักเรียน", "คำนำหน้าชื่อ", "ชื่อ", "นามสกุล", "หมายเหตุ"];
     const mapping = suggestRosterColumns(headers);
-    expect(mapping).toEqual({ code: 1, fullName: -1, firstName: 3, lastName: 4, prefix: 2, email: -1 });
+    expect(mapping).toEqual({ code: 1, studentNumber: 0, fullName: -1, firstName: 3, lastName: 4, prefix: 2, email: -1 });
 
     const result = previewRoster([
       headers,
@@ -133,5 +133,59 @@ describe("student roster import", () => {
     ], { code: 0, fullName: 1, email: 2 }, new Set(), new Set(["used@school.edu"]));
     expect(result.add).toHaveLength(0);
     expect(result.errors).toHaveLength(4);
+  });
+
+  test("imports headerless pasted rows without dropping the first student", async () => {
+    const sheet = await readPastedRoster([
+      "1\t00024508\tด.ช.\tชื่อทดสอบ\tนามสกุลทดสอบ",
+      "2\t00024509\t\tชื่อใหม่\tนามสกุลใหม่",
+    ].join("\n"));
+    const result = previewRoster(sheet.rows, { code: 1, studentNumber: 0, prefix: 2, firstName: 3, lastName: 4 }, new Set(), new Set(), new Map(), false);
+    expect(result.errors).toEqual([]);
+    expect(result.add.map(({ studentCode, studentNumber, displayName, email, row }) => [studentCode, studentNumber, displayName, email, row])).toEqual([
+      ["00024508", 1, "ด.ช. ชื่อทดสอบ นามสกุลทดสอบ", "00024508@banjan.ac.th", 1],
+      ["00024509", 2, "ชื่อใหม่ นามสกุลใหม่", "00024509@banjan.ac.th", 2],
+    ]);
+  });
+
+  test("maps class number headers and reads UTF-8 CSV rows", async () => {
+    const file = new File(["เลขที่,รหัสนักเรียน,คำนำหน้า,ชื่อ,นามสกุล\n1,0001,ด.ญ.,ชื่อทดสอบ,นามสกุลทดสอบ\n"], "roster.csv");
+    const [sheet] = await readRosterFile(file);
+    const columns = suggestRosterColumns(sheet.rows[0]);
+    expect(columns).toMatchObject({ studentNumber: 0, code: 1, prefix: 2, firstName: 3, lastName: 4 });
+    const preview = previewRoster(sheet.rows, { code: columns.code, studentNumber: columns.studentNumber, prefix: columns.prefix, firstName: columns.firstName, lastName: columns.lastName }, new Set());
+    expect(preview.add).toMatchObject([{ studentNumber: 1, studentCode: "0001", displayName: "ด.ญ. ชื่อทดสอบ นามสกุลทดสอบ" }]);
+
+    const headerless = ["3,0003,ด.ช.,ชื่อใหม่,นามสกุลใหม่\n"];
+    const [csv] = await readRosterFile(new File(headerless, "headerless.csv"));
+    const csvPreview = previewRoster(csv.rows, { studentNumber: 0, code: 1, prefix: 2, firstName: 3, lastName: 4 }, new Set(), new Set(), new Map(), false);
+    expect(csvPreview.add).toMatchObject([{ row: 1, studentNumber: 3, studentCode: "0003", displayName: "ด.ช. ชื่อใหม่ นามสกุลใหม่" }]);
+
+    const book = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(book, XLSX.utils.aoa_to_sheet([[4, "0004", "ด.ญ.", "ผู้เรียนใหม่", "ตัวอย่าง"]]), "No headers");
+    const bytes = XLSX.write(book, { type: "array", bookType: "xlsx" });
+    const [xlsx] = await readRosterFile(new File([bytes], "headerless.xlsx"));
+    const xlsxPreview = previewRoster(xlsx.rows, { studentNumber: 0, code: 1, prefix: 2, firstName: 3, lastName: 4 }, new Set(), new Set(), new Map(), false);
+    expect(xlsxPreview.add).toMatchObject([{ row: 1, studentNumber: 4, studentCode: "0004", displayName: "ด.ญ. ผู้เรียนใหม่ ตัวอย่าง" }]);
+  });
+
+  test("fills only missing numbers and detects occupied classroom numbers", () => {
+    const result = previewRoster([
+      ["No.", "ID", "Name"], ["4", "0001", "Changed name is ignored"], ["8", "0002", "Existing number is kept"], ["8", "0004", "Duplicate number"],
+    ], { studentNumber: 0, code: 1, fullName: 2 }, new Set(["0001", "0002"]), new Set(), new Map([
+      ["0001", { studentNumber: null }], ["0002", { studentNumber: 8 }], ["0003", { studentNumber: null, archived: true }],
+    ]));
+    expect(result.update).toEqual([{ studentCode: "0001", studentNumber: 4, row: 2 }]);
+    expect(result.skipped).toMatchObject([{ studentCode: "0002" }]);
+    expect(result.errors).toMatchObject([{ row: 4, message: "เลขที่ซ้ำในห้องเรียน" }]);
+  });
+
+  test("rejects duplicate numbers in new and fill-only rows", () => {
+    const result = previewRoster([
+      ["No.", "ID", "Name"], ["6", "0001", "Existing"], ["6", "0002", "New"],
+    ], { studentNumber: 0, code: 1, fullName: 2 }, new Set(["0001"]), new Set(), new Map([["0001", { studentNumber: null }]]));
+    expect(result.add).toEqual([]);
+    expect(result.update).toEqual([]);
+    expect(result.errors).toHaveLength(2);
   });
 });

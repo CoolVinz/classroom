@@ -14,12 +14,13 @@ Students see active assignments and attached worksheets for their classrooms, pl
 
 - Teachers create or edit an assignment and attach one or more worksheet files.
 - Teachers upload one or more model files for an active student in that classroom.
-- Teacher file routes check classroom ownership. Student routes require a student session and an active linked roster row; students can see worksheets and their own attributed files only.
+- Teacher file routes check classroom ownership. Student routes require a student session and an active linked roster row; students can see worksheets and their own attributed files only. Permanent student removal deletes attributed file metadata and stages stored files for cleanup under the same storage lock used by uploads and individual file deletion.
 - An assignment, student, and file must belong to the same classroom. Models require a student; worksheets do not.
 - Allowed formats: PDF, PNG, JPEG, DOC/DOCX, STL, OBJ. Teacher and student uploads default to 50 MiB each and 5 GiB total; configured limits are enforced by the server.
 - Production storage defaults to `/app/uploads`; development defaults to `./uploads`. Container storage must be mounted persistently and backed up separately.
 - The preview uses neutral geometry and accepts up to 500,000 triangles, with a 10-second parse limit. Complex models remain downloadable.
 - Assignment archival hides work from students while preserving associated files. Earlier models and submissions are never replaced by later uploads.
+- Removing a student from one classroom removes their files only in that classroom; shared Google accounts and records in other classes remain. Individual-file removal and student removal coordinate with uploads, move stored content to `.deleting` before database commit, restore staged content on rollback, and unlink after commit. Missing physical files do not block record deletion.
 - Student uploads use the same private storage and UUIDs as teacher files. STL/OBJ remain distinguishable for future gallery use; the gallery itself is not implemented here.
 
 ## Dependencies and consumers

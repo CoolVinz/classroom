@@ -1,8 +1,11 @@
 import { Elysia, t } from "elysia";
+import { rename, rm } from "node:fs/promises";
+import { resolve } from "node:path";
 import { sql } from "../db/client";
 import { requireActor, type Actor } from "../auth/session";
 import { HttpError } from "../http-error";
 import { bangkokToday, checkRequestOrigin, cleanText, normalizeEmail, studentEmailForCode, validCalendarDate } from "../security";
+import { uploadRoot } from "../file-storage";
 
 async function ownedClass(actor: Actor, classroomId: string, includeArchived = false) {
   const [room] = await sql<{ id: string; name: string; archived: boolean }[]>`
@@ -72,13 +75,13 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
     const actor = await requireActor(request);
     await ownedClass(actor, params.classroomId);
     return sql`
-      SELECT id, student_code AS "studentCode", display_name AS "displayName",
+      SELECT id, student_code AS "studentCode", student_number AS "studentNumber", display_name AS "displayName",
         email, EXISTS (SELECT 1 FROM classroom.student_accounts a
           WHERE a.id = students.account_id AND a.google_subject IS NOT NULL) AS "googleLinked",
         archived_at IS NOT NULL AS archived
       FROM classroom.students
       WHERE classroom_id = ${params.classroomId}
-      ORDER BY archived_at NULLS FIRST, display_name
+      ORDER BY archived_at NULLS FIRST, student_number NULLS LAST, display_name, id
     `;
   })
   .post("/classrooms/:classroomId/students", async ({ params, body, request }) => {
@@ -90,19 +93,19 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
     const email = normalizeEmail(body.email) ?? studentEmailForCode(code);
     if (code && code.length > 50) throw new HttpError(422, "รหัสนักเรียนยาวเกินไป");
     try {
-      const [student] = await sql<{ id: string; studentCode: string | null; displayName: string }[]>`
-        INSERT INTO classroom.students (classroom_id, student_code, display_name, email)
-        VALUES (${params.classroomId}, ${code}, ${name}, ${email})
-        RETURNING id, student_code AS "studentCode", display_name AS "displayName", email
+      const [student] = await sql<{ id: string; studentCode: string | null; studentNumber: number | null; displayName: string; email: string | null }[]>`
+        INSERT INTO classroom.students (classroom_id, student_code, student_number, display_name, email)
+        VALUES (${params.classroomId}, ${code}, ${body.studentNumber ?? null}, ${name}, ${email})
+        RETURNING id, student_code AS "studentCode", student_number AS "studentNumber", display_name AS "displayName", email
       `;
       return student;
     } catch (error) {
       if (error && typeof error === "object" && "code" in error && error.code === "23505") {
-        throw new HttpError(409, "รหัสนักเรียนนี้มีอยู่ในห้องแล้ว");
+        throw new HttpError(409, "รหัสหรือเลขที่นักเรียนนี้มีอยู่ในห้องแล้ว");
       }
       throw error;
     }
-  }, { body: t.Object({ displayName: t.String({ minLength: 1, maxLength: 120 }), studentCode: t.Optional(t.String({ maxLength: 50 })), email: t.Optional(t.String({ maxLength: 254 })) }) })
+  }, { body: t.Object({ displayName: t.String({ minLength: 1, maxLength: 120 }), studentCode: t.Optional(t.String({ maxLength: 50 })), studentNumber: t.Optional(t.Nullable(t.Integer({ minimum: 1, maximum: 2147483647 }))), email: t.Optional(t.String({ maxLength: 254 })) }) })
   .post("/classrooms/:classroomId/students/:studentId/invite", () => {
     throw new HttpError(410, "Student email invitations were retired. Students sign in with Google.");
   })
@@ -110,56 +113,90 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
     checkRequestOrigin(request);
     const actor = await requireActor(request);
     await ownedClass(actor, params.classroomId);
-    const [student] = await sql<{ id: string; studentCode: string | null; email: string | null }[]>`
-      SELECT id, student_code AS "studentCode", email FROM classroom.students
-      WHERE id = ${params.studentId} AND classroom_id = ${params.classroomId}
-    `;
-    if (!student) throw new HttpError(404, "ไม่พบนักเรียนนี้");
     try {
-      const nextCode = body.studentCode === undefined ? student.studentCode : body.studentCode.trim() || null;
-      if (body.displayName !== undefined || body.studentCode !== undefined) {
-        const name = body.displayName === undefined ? undefined : cleanText(body.displayName, 120);
-        const code = body.studentCode === undefined ? undefined : body.studentCode.trim() || null;
-        await sql`
-          UPDATE classroom.students
-          SET display_name = COALESCE(${name ?? null}, display_name),
-              student_code = CASE WHEN ${body.studentCode !== undefined} THEN ${code ?? null} ELSE student_code END
+      await sql.begin(async (tx) => {
+        const [student] = await tx<{ studentCode: string | null; displayName: string; email: string | null }[]>`
+          SELECT student_code AS "studentCode", display_name AS "displayName", email
+          FROM classroom.students WHERE id = ${params.studentId} AND classroom_id = ${params.classroomId} FOR UPDATE
+        `;
+        if (!student) throw new HttpError(404, "ไม่พบนักเรียนนี้");
+        const nextCode = body.studentCode === undefined ? student.studentCode : body.studentCode.trim() || null;
+        const email = body.email !== undefined
+          ? normalizeEmail(body.email) ?? studentEmailForCode(nextCode)
+          : !student.email && body.studentCode !== undefined ? studentEmailForCode(nextCode) : student.email;
+        const name = body.displayName === undefined ? student.displayName : cleanText(body.displayName, 120);
+        await tx`
+          UPDATE classroom.students SET
+            display_name = ${name},
+            student_code = ${nextCode},
+            student_number = CASE WHEN ${body.studentNumber !== undefined} THEN ${body.studentNumber ?? null}::integer ELSE student_number END,
+            email = ${email},
+            account_id = CASE WHEN email IS DISTINCT FROM ${email} THEN NULL ELSE account_id END,
+            archived_at = CASE WHEN ${body.archived !== undefined} THEN ${body.archived ? new Date() : null} ELSE archived_at END
           WHERE id = ${params.studentId} AND classroom_id = ${params.classroomId}
         `;
-      }
-      if (body.email !== undefined || (!student.email && body.studentCode !== undefined)) {
-        const email = normalizeEmail(body.email) ?? studentEmailForCode(nextCode);
-        await sql.begin(async (tx) => {
-          await tx`
-            UPDATE classroom.students
-            SET email = ${email}, account_id = CASE WHEN email IS DISTINCT FROM ${email} THEN NULL ELSE account_id END
-            WHERE id = ${params.studentId} AND classroom_id = ${params.classroomId}
-          `;
-        });
-      }
-      if (body.archived !== undefined) {
-        await sql`UPDATE classroom.students SET archived_at = ${body.archived ? sql`NOW()` : sql`NULL`} WHERE id = ${params.studentId}`;
-      }
+      });
       return { ok: true };
     } catch (error) {
       if (error && typeof error === "object" && "code" in error && error.code === "23505") {
-        throw new HttpError(409, "รหัสหรืออีเมลนักเรียนนี้มีอยู่ในห้องแล้ว");
+        throw new HttpError(409, "รหัส อีเมล หรือเลขที่นักเรียนนี้มีอยู่ในห้องแล้ว");
       }
       throw error;
     }
-  }, { body: t.Object({ displayName: t.Optional(t.String({ minLength: 1, maxLength: 120 })), studentCode: t.Optional(t.String({ maxLength: 50 })), email: t.Optional(t.String({ maxLength: 254 })), archived: t.Optional(t.Boolean()) }) })
+  }, { body: t.Object({ displayName: t.Optional(t.String({ minLength: 1, maxLength: 120 })), studentCode: t.Optional(t.String({ maxLength: 50 })), studentNumber: t.Optional(t.Nullable(t.Integer({ minimum: 1, maximum: 2147483647 }))), email: t.Optional(t.String({ maxLength: 254 })), archived: t.Optional(t.Boolean()) }) })
+  .delete("/classrooms/:classroomId/students/:studentId", async ({ params, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireActor(request);
+    const staged: { path: string; tombstone: string; storageName: string }[] = [];
+    try {
+      await sql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(870010022)`;
+        const [student] = await tx<{ id: string }[]>`
+          SELECT s.id FROM classroom.students s JOIN classroom.classrooms c ON c.id = s.classroom_id
+          WHERE s.id = ${params.studentId} AND s.classroom_id = ${params.classroomId} AND c.owner_id = ${actor.id}
+          FOR UPDATE OF s
+        `;
+        if (!student) throw new HttpError(404, "ไม่พบนักเรียนนี้");
+        const files = await tx<{ storageName: string }[]>`
+          SELECT storage_name AS "storageName" FROM classroom.files
+          WHERE classroom_id = ${params.classroomId} AND student_id = ${params.studentId} FOR UPDATE
+        `;
+        for (const file of files) {
+          const path = resolve(uploadRoot(), file.storageName);
+          try { await rename(path, path + ".deleting"); staged.push({ path, tombstone: path + ".deleting", storageName: file.storageName }); }
+          catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; }
+        }
+        await tx`DELETE FROM classroom.attendance WHERE classroom_id = ${params.classroomId} AND student_id = ${params.studentId}`;
+        await tx`DELETE FROM classroom.student_auth_tokens WHERE student_id = ${params.studentId}`;
+        await tx`DELETE FROM classroom.files WHERE classroom_id = ${params.classroomId} AND student_id = ${params.studentId}`;
+        await tx`DELETE FROM classroom.students WHERE id = ${params.studentId} AND classroom_id = ${params.classroomId}`;
+      });
+    } catch (error) {
+      for (const file of staged) {
+        try {
+          const [record] = await sql`SELECT id FROM classroom.files WHERE storage_name = ${file.storageName}`;
+          if (record) await rename(file.tombstone, file.path).catch(() => {});
+          else await rm(file.tombstone, { force: true }).catch(() => {});
+        } catch { /* Startup reconciliation resolves staged files if the transaction result is unknown. */ }
+      }
+      throw error;
+    }
+    let cleanupPending = false;
+    for (const file of staged) if (await rm(file.tombstone, { force: true }).then(() => false, () => true)) cleanupPending = true;
+    return { ok: true, cleanupPending };
+  })
   .get("/classrooms/:classroomId/attendance", async ({ params, query, request }) => {
     const actor = await requireActor(request);
     await ownedClass(actor, params.classroomId);
     const date = query.date ?? bangkokToday();
     if (!validCalendarDate(date) || date > bangkokToday()) throw new HttpError(422, "วันที่ไม่ถูกต้อง");
     const students = await sql`
-      SELECT s.id AS "studentId", s.student_code AS "studentCode",
+      SELECT s.id AS "studentId", s.student_code AS "studentCode", s.student_number AS "studentNumber",
         s.display_name AS "displayName", a.status
       FROM classroom.students s
       LEFT JOIN classroom.attendance a ON a.student_id = s.id AND a.attendance_date = ${date}::date
       WHERE s.classroom_id = ${params.classroomId} AND s.archived_at IS NULL
-      ORDER BY s.display_name
+      ORDER BY s.student_number NULLS LAST, s.display_name, s.id
     `;
     return { date, students };
   }, { query: t.Object({ date: t.Optional(t.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" })) }) })
@@ -206,7 +243,7 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
       throw new HttpError(422, "ช่วงวันที่ไม่ถูกต้อง");
     }
     const students = await sql`
-      SELECT s.id AS "studentId", s.student_code AS "studentCode", s.display_name AS "displayName",
+      SELECT s.id AS "studentId", s.student_code AS "studentCode", s.student_number AS "studentNumber", s.display_name AS "displayName",
         COUNT(a.status) FILTER (WHERE a.status = 'present')::int AS present,
         COUNT(a.status) FILTER (WHERE a.status = 'absent')::int AS absent,
         COUNT(a.status) FILTER (WHERE a.status = 'late')::int AS late,
@@ -215,7 +252,7 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
       LEFT JOIN classroom.attendance a ON a.student_id = s.id
         AND a.attendance_date BETWEEN ${from}::date AND ${to}::date
       WHERE s.classroom_id = ${params.classroomId}
-      GROUP BY s.id ORDER BY s.archived_at NULLS FIRST, s.display_name
+      GROUP BY s.id ORDER BY s.archived_at NULLS FIRST, s.student_number NULLS LAST, s.display_name, s.id
     `;
     return { from, to, students };
   }, { query: t.Object({ from: t.Optional(t.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" })), to: t.Optional(t.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" })) }) });
