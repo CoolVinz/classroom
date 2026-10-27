@@ -15,7 +15,7 @@ describe("student submission API", () => {
 
   test("keeps class membership and file access private while accepting append-only uploads", async () => {
     process.env.DATABASE_URL = databaseUrl;
-    process.env.DATABASE_SSL = "disable";
+    process.env.DATABASE_SSL = process.env.CLASSROOM_TEST_DATABASE_SSL ?? "disable";
     process.env.APP_URL = "http://localhost:3000";
     process.env.GOOGLE_CLIENT_ID = "classroom-test-client";
     process.env.GOOGLE_WORKSPACE_DOMAIN = "banjan.ac.th";
@@ -26,11 +26,11 @@ describe("student submission API", () => {
 
     const { sql } = await import("./db/client");
     const { createSession } = await import("./auth/session");
-    const [{ authRoutes }, { studentAuthRoutes }, { classroomRoutes }, { courseworkRoutes }, { studentCourseworkRoutes }] = await Promise.all([
+    const [{ authRoutes }, { studentAuthRoutes }, { classroomRoutes }, { courseworkRoutes }, { studentCourseworkRoutes }, { attendanceScheduleRoutes }, { studentAttendanceRoutes }] = await Promise.all([
       import("./routes/auth"), import("./routes/student-auth"), import("./routes/classrooms"),
-      import("./routes/coursework"), import("./routes/student-coursework"),
+      import("./routes/coursework"), import("./routes/student-coursework"), import("./routes/attendance-schedule"), import("./routes/student-attendance"),
     ]);
-    const app = new Elysia().use(authRoutes).use(studentAuthRoutes).use(classroomRoutes).use(courseworkRoutes).use(studentCourseworkRoutes);
+    const app = new Elysia().use(authRoutes).use(studentAuthRoutes).use(classroomRoutes).use(attendanceScheduleRoutes).use(courseworkRoutes).use(studentCourseworkRoutes).use(studentAttendanceRoutes);
     const teacherId = randomUUID(); const accountId = randomUUID();
     const roomA = randomUUID(); const roomB = randomUUID();
     const studentA = randomUUID(); const studentB = randomUUID(); const studentC = randomUUID();
@@ -105,6 +105,66 @@ describe("student submission API", () => {
       studentToken = signedIn.headers.get("set-cookie")!.split(";")[0].split("=")[1];
       let studentHeaders = { cookie: signedIn.headers.get("set-cookie")!.split(";")[0], origin: "http://localhost:3000" };
       const teacherHeaders = { cookie: `classroom_session=${teacherToken}`, origin: "http://localhost:3000" };
+
+      const scheduleDay = await sql<{ date: string; weekday: number }[]>`
+        SELECT ((NOW() AT TIME ZONE 'Asia/Bangkok')::date + 2)::text AS date,
+          EXTRACT(ISODOW FROM (NOW() AT TIME ZONE 'Asia/Bangkok')::date + 2)::int AS weekday
+      `;
+      const scheduled = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/timetable`, {
+        method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" },
+        body: JSON.stringify({ termStartsOn: scheduleDay[0].date, termEndsOn: scheduleDay[0].date, graceMinutes: 10, weekdays: [{ weekday: scheduleDay[0].weekday, startsAt: "09:00", endsAt: "10:00" }] }),
+      }));
+      expect(scheduled.status).toBe(200);
+      const scheduleView = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/timetable`, { headers: teacherHeaders }));
+      expect((await scheduleView.json() as { lessons: { date: string; startsAt: string }[] }).lessons).toHaveLength(1);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/timetable`, { method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ termStartsOn: scheduleDay[0].date, termEndsOn: scheduleDay[0].date, graceMinutes: 10, weekdays: [{ weekday: scheduleDay[0].weekday, startsAt: "10:00", endsAt: "09:00" }] }) }))).status).toBe(422);
+      const cancelLesson = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/lessons/${scheduleDay[0].date}`, { method: "PATCH", headers: teacherHeaders }));
+      expect(cancelLesson.status).toBe(200);
+      const cancelledSchedule = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/timetable`, { headers: teacherHeaders }));
+      expect((await cancelledSchedule.json() as { lessons: { cancelledAt: string | null }[] }).lessons[0].cancelledAt).not.toBeNull();
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/timetable`, { headers: studentHeaders }))).status).toBe(401);
+
+      const todayDate = await sql<{ date: string }[]>`SELECT (NOW() AT TIME ZONE 'Asia/Bangkok')::date::text AS date`;
+      await sql.begin(async (tx) => {
+        await tx`INSERT INTO classroom.lessons (classroom_id, lesson_date, starts_at, ends_at, grace_minutes)
+          VALUES (${roomA}, ${todayDate[0].date}::date, NOW() - INTERVAL '5 minutes', NOW() + INTERVAL '15 minutes', 10),
+            (${roomB}, ${todayDate[0].date}::date, NOW() - INTERVAL '5 minutes', NOW() + INTERVAL '15 minutes', 10)`;
+        await tx`UPDATE classroom.students SET created_at = NOW() - INTERVAL '2 days' WHERE id = ${studentB}`;
+        await tx`INSERT INTO classroom.lessons (classroom_id, lesson_date, starts_at, ends_at, grace_minutes)
+          VALUES (${roomA}, (${todayDate[0].date}::date - 1), NOW() - INTERVAL '1 day 2 hours', NOW() - INTERVAL '1 day 1 hour', 10)`;
+      });
+      const studentLessons = await app.handle(new Request("http://localhost/api/student/lessons", { headers: studentHeaders }));
+      expect((await studentLessons.json() as { classroomId: string }[]).map((lesson) => lesson.classroomId).sort()).toEqual([roomA, roomB].sort());
+      const viewId = randomUUID();
+      const pulse = (active: boolean, sequence: number, classroomId = roomA) => app.handle(new Request(`http://localhost/api/student/classrooms/${classroomId}/attendance/presence`, {
+        method: "POST", headers: { ...studentHeaders, "content-type": "application/json" },
+        body: JSON.stringify({ lessonDate: todayDate[0].date, viewId, sequence, active }),
+      }));
+      const arrived = await pulse(true, 1);
+      expect(arrived.status).toBe(200);
+      expect(await arrived.json()).toMatchObject({ accepted: true, attendanceStatus: "present", visibleSeconds: 0 });
+      expect(await (await pulse(true, 1)).json()).toMatchObject({ accepted: false, reason: "stale" });
+      expect(await (await pulse(true, 2, roomB)).json()).toMatchObject({ accepted: false, reason: "another-classroom" });
+      const override = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/attendance`, {
+        method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" },
+        body: JSON.stringify({ date: todayDate[0].date, partial: true, entries: [{ studentId: studentA, status: "late" }] }),
+      }));
+      expect(override.status).toBe(200);
+      const continued = await pulse(true, 2);
+      expect(await continued.json()).toMatchObject({ attendanceStatus: "late" });
+      const reset = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/attendance/${todayDate[0].date}/students/${studentA}/reset`, { method: "POST", headers: teacherHeaders }));
+      expect(reset.status).toBe(200);
+      const paused = await pulse(false, 3);
+      expect(await paused.json()).toMatchObject({ accepted: true, attendanceStatus: "present" });
+      const teacherAttendance = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/attendance?date=${todayDate[0].date}`, { headers: teacherHeaders }));
+      expect((await teacherAttendance.json() as { students: { studentId: string; status: string; source: string; visibleSeconds: number }[] }).students.find((student) => student.studentId === studentA)).toMatchObject({ status: "present", source: "automatic" });
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/attendance/${todayDate[0].date}/finalize`, { method: "POST", headers: teacherHeaders }))).status).toBe(409);
+      const finalized = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/attendance/${new Date(Date.parse(todayDate[0].date + "T12:00:00Z") - 86400000).toISOString().slice(0, 10)}/finalize`, { method: "POST", headers: teacherHeaders }));
+      expect(finalized.status).toBe(200);
+      expect(await finalized.json()).toMatchObject({ ok: true, addedAbsent: 1 });
+      const finalizeAgain = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/attendance/${new Date(Date.parse(todayDate[0].date + "T12:00:00Z") - 86400000).toISOString().slice(0, 10)}/finalize`, { method: "POST", headers: teacherHeaders }));
+      expect(await finalizeAgain.json()).toMatchObject({ ok: true, addedAbsent: 0 });
+      expect(await sql`SELECT status FROM classroom.attendance WHERE student_id = ${studentB} AND attendance_date = ${new Date(Date.parse(todayDate[0].date + "T12:00:00Z") - 86400000).toISOString().slice(0, 10)}::date`).toMatchObject([{ status: "absent" }]);
 
       const list = await app.handle(new Request("http://localhost/api/student/assignments", { headers: studentHeaders }));
       expect(list.status).toBe(200);
@@ -256,10 +316,13 @@ describe("student submission API", () => {
       expect((await app.handle(new Request(`http://localhost/api/files/${uploaded.id}/content`, { headers: studentHeaders }))).status).toBe(401);
       expect((await app.handle(new Request(`http://localhost/api/files/${uploaded.id}`, { method: "DELETE", headers: studentHeaders }))).status).toBe(401);
 
+      expect(await (await pulse(true, 4)).json()).toMatchObject({ accepted: true });
       const archiveMember = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/students/${studentA}`, {
         method: "PATCH", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ archived: true }),
       }));
       expect(archiveMember.status).toBe(200);
+      expect(await sql`SELECT active_view FROM classroom.attendance_presence WHERE classroom_id = ${roomA} AND student_id = ${studentA}`).toMatchObject([{ active_view: null }]);
+      expect((await pulse(true, 5)).status).toBe(404);
       expect((await app.handle(new Request(`http://localhost/api/student/classrooms/${roomA}/assignments/${assignmentA}/files`, { headers: studentHeaders }))).status).toBe(404);
       const remainingAssignments = await app.handle(new Request("http://localhost/api/student/assignments", { headers: studentHeaders }));
       expect((await remainingAssignments.json() as { assignmentId: string }[]).map((item) => item.assignmentId)).toEqual([assignmentB]);
@@ -349,6 +412,9 @@ describe("student submission API", () => {
       await sql.begin(async (tx) => {
         await tx`DELETE FROM classroom.files WHERE classroom_id IN (${roomA}, ${roomB})`;
         await tx`DELETE FROM classroom.assignments WHERE classroom_id IN (${roomA}, ${roomB})`;
+        await tx`DELETE FROM classroom.attendance WHERE classroom_id IN (${roomA}, ${roomB})`;
+        await tx`DELETE FROM classroom.lessons WHERE classroom_id IN (${roomA}, ${roomB})`;
+        await tx`DELETE FROM classroom.weekly_timetables WHERE classroom_id IN (${roomA}, ${roomB})`;
         await tx`DELETE FROM classroom.students WHERE classroom_id IN (${roomA}, ${roomB})`;
         await tx`DELETE FROM classroom.classrooms WHERE id IN (${roomA}, ${roomB})`;
         if (peerAccountId) await tx`DELETE FROM classroom.student_accounts WHERE id = ${peerAccountId}`;
@@ -360,5 +426,5 @@ describe("student submission API", () => {
       await rm(uploadDir, { recursive: true, force: true });
       verification.mockRestore();
     }
-  });
+  }, 120000);
 });

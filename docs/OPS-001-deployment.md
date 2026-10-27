@@ -17,7 +17,7 @@
 - App containers are replaceable. Classroom, roster, attendance, session, account, assignment, and file metadata is stored in PostgreSQL. Uploaded file contents require a persistent Coolify mount.
 - Configure Coolify Persistent Storage with destination `/app/uploads` (or match `UPLOAD_DIR`) and make it writable by the Bun container user (`bun`, UID 1000). A missing or read-only mount prevents uploads or can put files in replaceable container storage.
 - Persistent volumes survive container replacement but are not backups. Back up uploaded files off the VPS as well as PostgreSQL.
-- The app applies numbered tracked migrations at startup. Migration `005_classroom_student_numbers.sql` adds the nullable number and active-number uniqueness index. If `classroom` contains untracked objects, startup stops for inspection.
+- The app applies numbered tracked migrations at startup. Migration `005_classroom_student_numbers.sql` adds classroom numbering; `006_scheduled_attendance.sql` adds timetable, dated lessons, attendance provenance, and visible-time records. If `classroom` contains untracked objects, startup stops for inspection.
 
 ## Runtime environment
 
@@ -57,7 +57,7 @@ OWNER_PASSWORD (first-owner setup only)
 
 ## Deploy and initialize
 
-Back up PostgreSQL before release because the app applies migrations on startup and the new permanent-removal action has no in-app undo. Migration `005_classroom_student_numbers.sql` adds a nullable field and index without rewriting existing student records. After deployment, verify `/health/ready`, confirm migration `005_classroom_student_numbers` is tracked, and test teacher roster/attendance access before using permanent removal. Uploaded file contents need their own off-server backup. See [README deployment instructions](../README.md).
+Back up PostgreSQL before release because the app applies migrations on startup. Migration `006_scheduled_attendance.sql` preserves historical daily attendance and adds the new schedule/presence tables. After deployment, verify `/health/ready`, confirm migrations through `006_scheduled_attendance` are tracked, and test teacher and student access. Uploaded file contents need their own off-server backup. See [README deployment instructions](../README.md).
 
 ## Open questions
 

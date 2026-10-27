@@ -67,7 +67,10 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
       await sql`UPDATE classroom.classrooms SET name = ${name} WHERE id = ${params.classroomId} AND owner_id = ${actor.id}`;
     }
     if (body.archived !== undefined) {
-      await sql`UPDATE classroom.classrooms SET archived_at = ${body.archived ? sql`NOW()` : sql`NULL`} WHERE id = ${params.classroomId} AND owner_id = ${actor.id}`;
+      await sql.begin(async (tx) => {
+        await tx`UPDATE classroom.classrooms SET archived_at = ${body.archived ? sql`NOW()` : sql`NULL`} WHERE id = ${params.classroomId} AND owner_id = ${actor.id}`;
+        if (body.archived) await tx`UPDATE classroom.attendance_presence SET active_view = NULL WHERE classroom_id = ${params.classroomId}`;
+      });
     }
     return { ok: true };
   }, { body: t.Object({ name: t.Optional(t.String({ minLength: 1, maxLength: 120 })), archived: t.Optional(t.Boolean()) }) })
@@ -135,6 +138,8 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
             archived_at = CASE WHEN ${body.archived !== undefined} THEN ${body.archived ? new Date() : null} ELSE archived_at END
           WHERE id = ${params.studentId} AND classroom_id = ${params.classroomId}
         `;
+        if (body.archived) await tx`UPDATE classroom.attendance_presence SET active_view = NULL
+          WHERE classroom_id = ${params.classroomId} AND student_id = ${params.studentId}`;
       });
       return { ok: true };
     } catch (error) {
@@ -167,6 +172,7 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
           catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; }
         }
         await tx`DELETE FROM classroom.attendance WHERE classroom_id = ${params.classroomId} AND student_id = ${params.studentId}`;
+        await tx`DELETE FROM classroom.attendance_presence WHERE classroom_id = ${params.classroomId} AND student_id = ${params.studentId}`;
         await tx`DELETE FROM classroom.student_auth_tokens WHERE student_id = ${params.studentId}`;
         await tx`DELETE FROM classroom.files WHERE classroom_id = ${params.classroomId} AND student_id = ${params.studentId}`;
         await tx`DELETE FROM classroom.students WHERE id = ${params.studentId} AND classroom_id = ${params.classroomId}`;
@@ -190,15 +196,23 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
     await ownedClass(actor, params.classroomId);
     const date = query.date ?? bangkokToday();
     if (!validCalendarDate(date) || date > bangkokToday()) throw new HttpError(422, "วันที่ไม่ถูกต้อง");
+    const [lesson] = await sql`
+      SELECT starts_at AS "startsAt", ends_at AS "endsAt", grace_minutes AS "graceMinutes",
+        cancelled_at AS "cancelledAt", finalized_at AS "finalizedAt"
+      FROM classroom.lessons WHERE classroom_id = ${params.classroomId} AND lesson_date = ${date}::date
+    `;
     const students = await sql`
       SELECT s.id AS "studentId", s.student_code AS "studentCode", s.student_number AS "studentNumber",
-        s.display_name AS "displayName", a.status
+        s.display_name AS "displayName", a.status, a.source,
+        p.first_arrival_at AS "firstArrivalAt", p.last_seen_at AS "lastSeenAt",
+        p.visible_seconds AS "visibleSeconds", p.active_view IS NOT NULL AND p.last_heartbeat_at > NOW() - INTERVAL '45 seconds' AS "tracking"
       FROM classroom.students s
       LEFT JOIN classroom.attendance a ON a.student_id = s.id AND a.attendance_date = ${date}::date
+      LEFT JOIN classroom.attendance_presence p ON p.student_id = s.id AND p.attendance_date = ${date}::date
       WHERE s.classroom_id = ${params.classroomId} AND s.archived_at IS NULL
       ORDER BY s.student_number NULLS LAST, s.display_name, s.id
     `;
-    return { date, students };
+    return { date, lesson: lesson ?? null, students };
   }, { query: t.Object({ date: t.Optional(t.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" })) }) })
   .put("/classrooms/:classroomId/attendance", async ({ params, body, request }) => {
     checkRequestOrigin(request);
@@ -214,8 +228,11 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
         WHERE classroom_id = ${params.classroomId} AND archived_at IS NULL
       `;
       const rosterIds = new Set(roster.map((student) => student.id));
-      if (rosterIds.size !== ids.length || ids.some((id) => !rosterIds.has(id))) {
+      if ((!body.partial && rosterIds.size !== ids.length) || ids.some((id) => !rosterIds.has(id))) {
         throw new HttpError(409, "รายชื่อนักเรียนเปลี่ยนแล้ว กรุณาโหลดหน้าอีกครั้ง");
+      }
+      for (const id of [...ids].sort()) {
+        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${"daily-attendance:" + params.classroomId + ":" + id + ":" + body.date}, 0))`;
       }
       for (const entry of body.entries) {
         if (entry.status === null) {
@@ -223,17 +240,30 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
             DELETE FROM classroom.attendance
             WHERE classroom_id = ${params.classroomId} AND student_id = ${entry.studentId} AND attendance_date = ${body.date}::date
           `;
+          await tx`
+            INSERT INTO classroom.attendance (classroom_id, student_id, attendance_date, status, source)
+            SELECT p.classroom_id, p.student_id, p.attendance_date,
+              CASE WHEN p.first_arrival_at <= l.starts_at + l.grace_minutes * INTERVAL '1 minute' THEN 'present' ELSE 'late' END,
+              'automatic'
+            FROM classroom.attendance_presence p JOIN classroom.lessons l
+              ON l.classroom_id = p.classroom_id AND l.lesson_date = p.attendance_date
+            WHERE p.classroom_id = ${params.classroomId} AND p.student_id = ${entry.studentId}
+              AND p.attendance_date = ${body.date}::date
+            ON CONFLICT (student_id, attendance_date) DO UPDATE
+              SET status = EXCLUDED.status, source = 'automatic', updated_at = NOW()
+              WHERE classroom.attendance.source = 'automatic'
+          `;
         } else {
           await tx`
             INSERT INTO classroom.attendance (classroom_id, student_id, attendance_date, status)
             VALUES (${params.classroomId}, ${entry.studentId}, ${body.date}::date, ${entry.status})
-            ON CONFLICT (student_id, attendance_date) DO UPDATE SET status = EXCLUDED.status, updated_at = NOW()
+            ON CONFLICT (student_id, attendance_date) DO UPDATE SET status = EXCLUDED.status, source = 'manual', updated_at = NOW()
           `;
         }
       }
     });
     return { ok: true, savedAt: new Date().toISOString() };
-  }, { body: t.Object({ date: t.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" }), entries: t.Array(t.Object({ studentId: t.String({ format: "uuid" }), status: attendanceStatus }), { maxItems: 1000 }) }) })
+  }, { body: t.Object({ date: t.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" }), partial: t.Optional(t.Boolean()), entries: t.Array(t.Object({ studentId: t.String({ format: "uuid" }), status: attendanceStatus }), { maxItems: 1000 }) }) })
   .get("/classrooms/:classroomId/summary", async ({ params, query, request }) => {
     const actor = await requireActor(request);
     await ownedClass(actor, params.classroomId);
@@ -247,10 +277,15 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
         COUNT(a.status) FILTER (WHERE a.status = 'present')::int AS present,
         COUNT(a.status) FILTER (WHERE a.status = 'absent')::int AS absent,
         COUNT(a.status) FILTER (WHERE a.status = 'late')::int AS late,
-        COUNT(a.status) FILTER (WHERE a.status = 'excused')::int AS excused
+        COUNT(a.status) FILTER (WHERE a.status = 'excused')::int AS excused,
+        COALESCE(p.visible_seconds, 0)::int AS "visibleSeconds"
       FROM classroom.students s
       LEFT JOIN classroom.attendance a ON a.student_id = s.id
         AND a.attendance_date BETWEEN ${from}::date AND ${to}::date
+      LEFT JOIN LATERAL (
+        SELECT SUM(visible_seconds)::int AS visible_seconds FROM classroom.attendance_presence
+        WHERE student_id = s.id AND attendance_date BETWEEN ${from}::date AND ${to}::date
+      ) p ON TRUE
       WHERE s.classroom_id = ${params.classroomId}
       GROUP BY s.id ORDER BY s.archived_at NULLS FIRST, s.student_number NULLS LAST, s.display_name, s.id
     `;

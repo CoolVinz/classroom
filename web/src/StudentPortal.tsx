@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useState, type FormEvent } from "react";
 import { api } from "./api";
+import { StudentAttendance } from "./StudentAttendance";
 
 const ModelPreview = lazy(() => import("./ModelPreview"));
 export type StudentUser = { id: string; username: string; displayName: string; role: "student" };
@@ -61,6 +62,7 @@ export function StudentPortal({ user, logout }: { user: StudentUser; logout: () 
     <main className="main-area"><header className="topbar"><div className="breadcrumb">ห้องเรียน <span>/</span> งานของฉัน</div></header><div className="page-content">
       {error && <div className="notice" role="alert">{error}<button onClick={() => setError("")} aria-label="ปิด">×</button></div>}
       <div className="page-heading"><div><p className="eyebrow">พื้นที่นักเรียน</p><h1>งานของฉัน</h1><p className="muted page-description">ดูคำชี้แจงและไฟล์ใบงาน แล้วส่งงานของคุณ</p></div></div>
+      <StudentAttendance />
       <section className="panel"><header className="panel-heading compact"><div><h2>งานที่ได้รับ <small>{assignments.length} งาน</small></h2></div><button className="text-button" onClick={() => void loadAssignments()}>โหลดใหม่</button></header>
         {loading ? <p className="inline-loading"><i className="spinner"/>กำลังโหลดงาน…</p> : assignments.length ? <div className="assignment-list">{assignments.map((assignment) => <div className="assignment-row" key={assignment.assignmentId}><button className={"assignment-select " + (assignment.assignmentId === selectedId ? "selected" : "")} onClick={() => setSelectedId(assignment.assignmentId)}><strong>{assignment.title}</strong><small>{assignment.classroomName} · ส่งแล้ว {assignment.submissionCount} ไฟล์</small></button>{assignment.assignmentId === selectedId && <span className="assignment-marker">●</span>}</div>)}</div> : <p className="assignment-empty muted">ยังไม่มีงานที่เปิดอยู่</p>}
       </section>

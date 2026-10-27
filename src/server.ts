@@ -11,6 +11,8 @@ import { ensureUploadRoot, maxUploadBytes } from "./file-storage";
 import { courseworkRoutes } from "./routes/coursework";
 import { studentAuthRoutes } from "./routes/student-auth";
 import { studentCourseworkRoutes } from "./routes/student-coursework";
+import { attendanceScheduleRoutes } from "./routes/attendance-schedule";
+import { studentAttendanceRoutes } from "./routes/student-attendance";
 
 const port = Number(process.env.PORT ?? 3000);
 const appUrl = process.env.APP_URL ?? "http://localhost:3000";
@@ -32,8 +34,10 @@ const app = new Elysia({ serve: { maxRequestBodySize: maxUploadBytes() + 1024 * 
   .use(authRoutes)
   .use(studentAuthRoutes)
   .use(classroomRoutes)
+  .use(attendanceScheduleRoutes)
   .use(courseworkRoutes)
   .use(studentCourseworkRoutes)
+  .use(studentAttendanceRoutes)
   .use(teacherRoutes)
   .onError(({ error, set }) => {
     if (error instanceof HttpError) {

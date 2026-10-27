@@ -13,12 +13,18 @@ PostgreSQL 18 or newer stores app data in an app-owned `classroom` schema in the
 - **Student account:** UUID ID, unique normalized email, nullable unique Google subject, historical nullable password hash, and creation time. A nullable account link on a roster row lets one account access several classrooms; email addresses are unique per roster within a classroom.
 - **Student session/auth token:** Hashed 14-day session tokens reference an account. The legacy invitation/reset-token table remains for schema compatibility, but migration 004 clears its rows and no route issues or consumes them.
 - **Attendance:** classroom and student foreign keys, `DATE`, status, update timestamp. Composite primary key `(student_id, attendance_date)` allows one daily mark per student. A composite foreign key keeps the classroom consistent with the student's roster.
+- **Weekly timetable:** one per classroom, with term bounds and grace minutes; child weekday rows store one start/end time window per ISO weekday in Bangkok local time.
+- **Lesson:** one dated classroom lesson with snapshotted `TIMESTAMPTZ` start/end, grace, cancellation, and finalization timestamps. Future unstarted lessons can be resynchronized from timetable edits; started and historical lessons remain stable.
+- **Attendance provenance and presence:** attendance source distinguishes manual from automatic results. `attendance_presence` stores first arrival, last contact, estimated visible seconds, and a short-lived active-view lease per roster student/day; its composite foreign keys bind both student and lesson to the same classroom.
 - **Assignment:** UUID ID, classroom foreign key, title, instructions, archive and creation timestamps. `(id, classroom_id)` supports file/classroom consistency.
 - **File:** stable UUID ID, classroom and assignment foreign keys, optional student, teacher-uploader, and student-submitter foreign keys, kind, original and generated storage names, media type, byte size, and creation timestamp. Worksheets require a teacher uploader and have no student; models and submissions require a student in the same classroom. New student submissions identify the uploading account; a model cannot have both teacher and student submitter attribution. Multiple files may reference one student and assignment.
 
 ## Constraints and behavior
 
 - Attendance status is constrained to `present`, `absent`, `late`, or `excused`; an unmarked student has no attendance row.
+- Existing attendance remains keyed once per roster student/day and is marked manual by migration default. Presence duration is stored separately and does not affect status counts.
+- The server determines lesson eligibility and timestamps. A visible focused-page heartbeat is capped at 45 credited seconds; duplicate/stale views cannot extend a lease, and one student account may track only one classroom at once.
+- Finalization records eligible no-arrivals as absent after lesson end, preserves all existing marks, and is idempotent. Manual marks override automatic results until explicitly reset.
 - Attendance dates are calendar dates, interpreted as Asia/Bangkok for “today”; future dates are rejected.
 - Teacher passwords are never stored in plaintext. Student login uses Google's verified `sub` identity; old student password hashes are retained but no longer used. Session cookies carry a random token while PostgreSQL stores its hash.
 - Student account access is derived from active roster rows. Archiving a roster row or its classroom removes that membership from student APIs while preserving the account and file/attendance history.

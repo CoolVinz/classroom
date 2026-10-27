@@ -27,7 +27,7 @@ Authenticate owner and teacher accounts with passwords and students with verifie
 - Sessions are random 32-byte tokens in HttpOnly, SameSite=Lax cookies. Only SHA-256 token hashes are stored, with a 14-day expiry; production cookies use Secure.
 - Google's double-submit `g_csrf_token` cookie/body pair is checked on the cross-site redirect callback. The callback does not use the app's same-origin check because Google posts directly to it.
 - Teacher login throttling uses process-local memory keyed by username.
-- Student access is limited to active classroom roster rows linked to the account. Archiving a student or classroom removes that membership from student APIs.
+- Student access is limited to active classroom roster rows linked to the account. Archiving a student or classroom removes that membership from student APIs and clears its active attendance-tracking lease.
 
 ## Dependencies and consumers
 
