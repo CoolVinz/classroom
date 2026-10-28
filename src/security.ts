@@ -26,6 +26,11 @@ export function validCalendarDate(value: string) {
   return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
 }
 
+export function validCalendarDateRange(start: string, end: string, maximumDays: number) {
+  return validCalendarDate(start) && validCalendarDate(end) && start <= end
+    && Date.parse(end + "T00:00:00Z") - Date.parse(start + "T00:00:00Z") <= maximumDays * 86400000;
+}
+
 export function bangkokToday() {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Bangkok", year: "numeric", month: "2-digit", day: "2-digit",

@@ -10,6 +10,11 @@ function bangkokToday() {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Bangkok" }).format(new Date());
 }
 
+function dateAfterDays(value: string, days: number) {
+  if (!value) return undefined;
+  return new Date(Date.parse(value + "T00:00:00Z") + days * 86400000).toISOString().slice(0, 10);
+}
+
 function displayDate(value: string) {
   return new Intl.DateTimeFormat("th-TH", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Bangkok" }).format(new Date(value));
 }
@@ -22,6 +27,11 @@ export function AttendanceTimetable({ classroomId, onError }: { classroomId: str
   const [days, setDays] = useState<Record<number, { startsAt: string; endsAt: string }>>({});
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
+  const dateRangeError = startDate > endDate
+    ? "วันสิ้นสุดต้องไม่อยู่ก่อนวันเริ่มภาคเรียน"
+    : Date.parse(endDate + "T00:00:00Z") - Date.parse(startDate + "T00:00:00Z") > 365 * 86400000
+      ? "ช่วงภาคเรียนต้องไม่เกิน 1 ปี (365 วัน)"
+      : "";
 
   const load = useCallback(async () => {
     try {
@@ -66,9 +76,10 @@ export function AttendanceTimetable({ classroomId, onError }: { classroomId: str
     <details className="timetable-settings" open={!data?.timetable}>
       <summary>{data?.timetable ? "แก้ไขตารางและช่วงภาคเรียน" : "ตั้งค่าตารางเรียน"}</summary>
       <form onSubmit={(event) => void save(event)}>
-        <div className="timetable-dates"><label>วันเริ่มภาคเรียน<input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} required/></label><label>วันสิ้นสุด<input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} required/></label><label>มาสายหลังเริ่มเรียน (นาที)<input type="number" min="0" max="120" value={grace} onChange={(event) => setGrace(event.target.value)} required/></label></div>
+        <div className="timetable-dates"><label>วันเริ่มภาคเรียน<input type="date" value={startDate} max={endDate || undefined} onChange={(event) => setStartDate(event.target.value)} required/></label><label>วันสิ้นสุด<input type="date" value={endDate} min={startDate || undefined} max={dateAfterDays(startDate, 365)} onChange={(event) => setEndDate(event.target.value)} required/></label><label>มาสายหลังเริ่มเรียน (นาที)<input type="number" min="0" max="120" value={grace} onChange={(event) => setGrace(event.target.value)} required/></label></div>
+        {dateRangeError && <p className="form-error" role="alert">{dateRangeError}</p>}
         <div className="timetable-days">{dayNames.map((name, index) => { const weekday = index + 1; const selected = days[weekday]; return <div className="timetable-day" key={weekday}><label className="timetable-day-check"><input type="checkbox" checked={Boolean(selected)} onChange={(event) => setDays((current) => { const next = { ...current }; if (event.target.checked) next[weekday] = { startsAt: "09:00", endsAt: "10:00" }; else delete next[weekday]; return next; })}/>{name}</label>{selected && <><input aria-label={`${name} เวลาเริ่ม`} type="time" value={selected.startsAt} onChange={(event) => changeDay(weekday, "startsAt", event.target.value)} required/><span>ถึง</span><input aria-label={`${name} เวลาเลิก`} type="time" value={selected.endsAt} onChange={(event) => changeDay(weekday, "endsAt", event.target.value)} required/></>}</div>; })}</div>
-        <div className="timetable-save"><small>เวลาใช้เขตเวลาไทย · บันทึกได้ไม่เกิน 1 ปีต่อครั้ง · เวลาเรียนที่เริ่มแล้วจะคงเดิม</small><button className="button button-primary" disabled={saving || !Object.keys(days).length}>{saving ? "กำลังบันทึก…" : "บันทึกตาราง"}</button></div>
+        <div className="timetable-save"><small>เวลาใช้เขตเวลาไทย · บันทึกได้ไม่เกิน 365 วันต่อครั้ง · เวลาเรียนที่เริ่มแล้วจะคงเดิม</small><button className="button button-primary" disabled={saving || Boolean(dateRangeError) || !Object.keys(days).length}>{saving ? "กำลังบันทึก…" : "บันทึกตาราง"}</button></div>
       </form>
     </details>
     {message && <p className="success-message">{message}</p>}

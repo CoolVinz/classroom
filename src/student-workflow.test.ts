@@ -26,13 +26,14 @@ describe("student submission API", () => {
 
     const { sql } = await import("./db/client");
     const { createSession } = await import("./auth/session");
-    const [{ authRoutes }, { studentAuthRoutes }, { classroomRoutes }, { courseworkRoutes }, { studentCourseworkRoutes }, { attendanceScheduleRoutes }, { studentAttendanceRoutes }] = await Promise.all([
+    const [{ authRoutes }, { studentAuthRoutes }, { classroomRoutes }, { courseworkRoutes }, { studentCourseworkRoutes }, { attendanceScheduleRoutes }, { studentAttendanceRoutes }, { handleAppError }] = await Promise.all([
       import("./routes/auth"), import("./routes/student-auth"), import("./routes/classrooms"),
       import("./routes/coursework"), import("./routes/student-coursework"), import("./routes/attendance-schedule"), import("./routes/student-attendance"),
+      import("./error-handler"),
     ]);
-    const app = new Elysia().use(authRoutes).use(studentAuthRoutes).use(classroomRoutes).use(attendanceScheduleRoutes).use(courseworkRoutes).use(studentCourseworkRoutes).use(studentAttendanceRoutes);
+    const app = new Elysia().onError(handleAppError).use(authRoutes).use(studentAuthRoutes).use(classroomRoutes).use(attendanceScheduleRoutes).use(courseworkRoutes).use(studentCourseworkRoutes).use(studentAttendanceRoutes);
     const teacherId = randomUUID(); const accountId = randomUUID();
-    const roomA = randomUUID(); const roomB = randomUUID();
+    const roomA = randomUUID(); const roomB = randomUUID(); const emptyRoom = randomUUID();
     const studentA = randomUUID(); const studentB = randomUUID(); const studentC = randomUUID();
     const assignmentA = randomUUID(); const assignmentB = randomUUID();
     const teacherFile = randomUUID(); const peerFile = randomUUID();
@@ -71,7 +72,7 @@ describe("student submission API", () => {
         await tx`INSERT INTO classroom.teachers (id, username, display_name, password_hash) VALUES (${teacherId}, ${"it-" + teacherId.slice(0, 8)}, 'Teacher', ${passwordHash})`;
         await tx`INSERT INTO classroom.teachers (id, username, display_name, password_hash, role) VALUES (${otherTeacherId}, ${"other-" + otherTeacherId.slice(0, 8)}, 'Other Teacher', ${passwordHash}, 'teacher')`;
         await tx`INSERT INTO classroom.student_accounts (id, email, password_hash) VALUES (${accountId}, ${accountEmail}, ${passwordHash})`;
-        await tx`INSERT INTO classroom.classrooms (id, owner_id, name) VALUES (${roomA}, ${teacherId}, 'Room A'), (${roomB}, ${teacherId}, 'Room B')`;
+        await tx`INSERT INTO classroom.classrooms (id, owner_id, name) VALUES (${roomA}, ${teacherId}, 'Room A'), (${roomB}, ${teacherId}, 'Room B'), (${emptyRoom}, ${teacherId}, 'Empty Room')`;
         await tx`INSERT INTO classroom.students (id, classroom_id, student_code, display_name, email, account_id)
           VALUES (${studentA}, ${roomA}, '001', 'Student One', ${accountEmail}, ${accountId}),
             (${studentB}, ${roomA}, '002', 'Student Two', ${peerEmail}, NULL),
@@ -105,6 +106,27 @@ describe("student submission API", () => {
       studentToken = signedIn.headers.get("set-cookie")!.split(";")[0].split("=")[1];
       let studentHeaders = { cookie: signedIn.headers.get("set-cookie")!.split(";")[0], origin: "http://localhost:3000" };
       const teacherHeaders = { cookie: `classroom_session=${teacherToken}`, origin: "http://localhost:3000" };
+
+      const timetableRequest = (classroomId: string, termStartsOn: string, termEndsOn: string) => app.handle(new Request(`http://localhost/api/classrooms/${classroomId}/timetable`, {
+        method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" },
+        body: JSON.stringify({ termStartsOn, termEndsOn, graceMinutes: 10, weekdays: [{ weekday: 2, startsAt: "10:00", endsAt: "11:00" }] }),
+      }));
+      const leapYearSchedule = await timetableRequest(emptyRoom, "2096-02-29", "2097-02-28");
+      expect(leapYearSchedule.status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${emptyRoom}/timetable`, { headers: teacherHeaders })).then((response) => response.json()) as { timetable: { termStartsOn: string; termEndsOn: string } }).timetable).toEqual({ termStartsOn: "2096-02-29", termEndsOn: "2097-02-28" });
+      for (const [roomId, startsOn, endsOn] of [
+        [roomB, "2096-02-29", "2097-03-01"],
+        [roomB, "2027-02-23", "2026-10-27"],
+      ]) {
+        const invalidSchedule = await timetableRequest(roomId, startsOn, endsOn);
+        expect(invalidSchedule.status).toBe(422);
+        expect(await invalidSchedule.json()).toMatchObject({ error: "ช่วงวันที่ของตารางเรียนไม่ถูกต้อง (ไม่เกินหนึ่งปี)" });
+      }
+      const rejectedInput = await app.handle(new Request(`http://localhost/api/classrooms/${roomB}/timetable`, {
+        method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ termStartsOn: "not-a-date" }),
+      }));
+      expect(rejectedInput.status).toBe(422);
+      expect(await rejectedInput.json()).toMatchObject({ error: "ข้อมูลที่ส่งไม่ถูกต้อง กรุณาตรวจสอบค่าที่กรอก" });
 
       const scheduleDay = await sql<{ date: string; weekday: number }[]>`
         SELECT ((NOW() AT TIME ZONE 'Asia/Bangkok')::date + 2)::text AS date,
@@ -444,13 +466,13 @@ describe("student submission API", () => {
       if (otherTeacherToken) await sql`DELETE FROM classroom.sessions WHERE token_hash = ${hash(otherTeacherToken)}`;
       if (studentToken) await sql`DELETE FROM classroom.student_sessions WHERE token_hash = ${hash(studentToken)}`;
       await sql.begin(async (tx) => {
-        await tx`DELETE FROM classroom.files WHERE classroom_id IN (${roomA}, ${roomB})`;
-        await tx`DELETE FROM classroom.assignments WHERE classroom_id IN (${roomA}, ${roomB})`;
-        await tx`DELETE FROM classroom.attendance WHERE classroom_id IN (${roomA}, ${roomB})`;
-        await tx`DELETE FROM classroom.lessons WHERE classroom_id IN (${roomA}, ${roomB})`;
-        await tx`DELETE FROM classroom.weekly_timetables WHERE classroom_id IN (${roomA}, ${roomB})`;
-        await tx`DELETE FROM classroom.students WHERE classroom_id IN (${roomA}, ${roomB})`;
-        await tx`DELETE FROM classroom.classrooms WHERE id IN (${roomA}, ${roomB})`;
+        await tx`DELETE FROM classroom.files WHERE classroom_id IN (${roomA}, ${roomB}, ${emptyRoom})`;
+        await tx`DELETE FROM classroom.assignments WHERE classroom_id IN (${roomA}, ${roomB}, ${emptyRoom})`;
+        await tx`DELETE FROM classroom.attendance WHERE classroom_id IN (${roomA}, ${roomB}, ${emptyRoom})`;
+        await tx`DELETE FROM classroom.lessons WHERE classroom_id IN (${roomA}, ${roomB}, ${emptyRoom})`;
+        await tx`DELETE FROM classroom.weekly_timetables WHERE classroom_id IN (${roomA}, ${roomB}, ${emptyRoom})`;
+        await tx`DELETE FROM classroom.students WHERE classroom_id IN (${roomA}, ${roomB}, ${emptyRoom})`;
+        await tx`DELETE FROM classroom.classrooms WHERE id IN (${roomA}, ${roomB}, ${emptyRoom})`;
         if (peerAccountId) await tx`DELETE FROM classroom.student_accounts WHERE id = ${peerAccountId}`;
         await tx`DELETE FROM classroom.student_accounts WHERE id = ${accountId}`;
         await tx`DELETE FROM classroom.teachers WHERE id = ${otherTeacherId}`;

@@ -7,6 +7,7 @@ import { authRoutes } from "./routes/auth";
 import { classroomRoutes } from "./routes/classrooms";
 import { teacherRoutes } from "./routes/teachers";
 import { HttpError } from "./http-error";
+import { handleAppError } from "./error-handler";
 import { ensureUploadRoot, maxUploadBytes } from "./file-storage";
 import { courseworkRoutes } from "./routes/coursework";
 import { studentAuthRoutes } from "./routes/student-auth";
@@ -26,6 +27,7 @@ const webRoot = resolve(import.meta.dir, "../web/dist");
 const indexFile = resolve(webRoot, "index.html");
 
 const app = new Elysia({ serve: { maxRequestBodySize: maxUploadBytes() + 1024 * 1024 } })
+  .onError(handleAppError)
   .get("/health/live", () => ({ ok: true }))
   .get("/health/ready", async () => {
     await sql.unsafe("SELECT 1");
@@ -39,15 +41,6 @@ const app = new Elysia({ serve: { maxRequestBodySize: maxUploadBytes() + 1024 * 
   .use(studentCourseworkRoutes)
   .use(studentAttendanceRoutes)
   .use(teacherRoutes)
-  .onError(({ error, set }) => {
-    if (error instanceof HttpError) {
-      set.status = error.status;
-      return { error: error.message };
-    }
-    console.error("Request failed:", error instanceof Error ? error.name : "UnknownError");
-    set.status = 500;
-    return { error: "เกิดข้อผิดพลาดภายในระบบ กรุณาลองอีกครั้ง" };
-  })
   .get("/student/*", () => new Response(null, { status: 302, headers: { Location: "/?role=student" } }))
   .get("/", () => file(indexFile))
   .get("/assets/*", ({ request }) => {

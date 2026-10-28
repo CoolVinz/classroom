@@ -2,7 +2,7 @@ import { Elysia, t } from "elysia";
 import { requireActor } from "../auth/session";
 import { sql } from "../db/client";
 import { HttpError } from "../http-error";
-import { bangkokToday, checkRequestOrigin, validCalendarDate } from "../security";
+import { bangkokToday, checkRequestOrigin, validCalendarDate, validCalendarDateRange } from "../security";
 
 const hhmm = t.String({ pattern: "^(?:[01]\\d|2[0-3]):[0-5]\\d$" });
 
@@ -37,9 +37,7 @@ export const attendanceScheduleRoutes = new Elysia({ prefix: "/api" })
     checkRequestOrigin(request);
     const actor = await requireActor(request);
     await ownedClass(params.classroomId, actor.id);
-    if (!validCalendarDate(body.termStartsOn) || !validCalendarDate(body.termEndsOn)
-      || body.termStartsOn > body.termEndsOn
-      || Date.parse(body.termEndsOn + "T00:00:00Z") - Date.parse(body.termStartsOn + "T00:00:00Z") > 365 * 86400000) {
+    if (!validCalendarDateRange(body.termStartsOn, body.termEndsOn, 365)) {
       throw new HttpError(422, "ช่วงวันที่ของตารางเรียนไม่ถูกต้อง (ไม่เกินหนึ่งปี)");
     }
     if (!body.weekdays.length || new Set(body.weekdays.map((day) => day.weekday)).size !== body.weekdays.length
