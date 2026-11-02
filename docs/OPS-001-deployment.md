@@ -14,9 +14,10 @@
 - PostgreSQL 18 or newer is external to the application container.
 - Admin setup creates a dedicated login and an app-owned `classroom` schema. The app login does not need privileges to create databases or schemas.
 - The app uses PostgreSQL TLS by default. A private development database without TLS can explicitly set `DATABASE_SSL=disable`.
-- App containers are replaceable. Classroom, roster, attendance, session, account, assignment, and file metadata is stored in PostgreSQL. Uploaded file contents require a persistent Coolify mount.
-- Configure Coolify Persistent Storage with destination `/app/uploads` (or match `UPLOAD_DIR`) and make it writable by the Bun container user (`bun`, UID 1000). A missing or read-only mount prevents uploads or can put files in replaceable container storage.
+- App containers are replaceable. Classroom, roster, attendance, session, account, assignment, and file metadata is stored in PostgreSQL. Uploaded file contents require persistent storage. On 2026-11-02, production was configured with a Coolify Docker volume at `/app/uploads` and `UPLOAD_DIR=/app/uploads`; the live terminal confirmed it is mounted read/write and the Bun process runs as root.
+- The 2026-11-02 production audit found 70 file metadata records but an empty upload directory and no previous Classroom container or upload volume. The PostgreSQL backup preserves metadata only; missing originals must be re-uploaded. Do not delete those records automatically.
 - Persistent volumes survive container replacement but are not backups. Back up uploaded files off the VPS as well as PostgreSQL.
+- Before attaching a volume to an existing deployment, copy recoverable files from the running container into it under their existing storage UUIDs. A new empty mount hides the old container directory; mounting does not recover missing data.
 - The app applies numbered tracked migrations at startup. Migration `005_classroom_student_numbers.sql` adds classroom numbering; `006_scheduled_attendance.sql` adds timetable, dated lessons, attendance provenance, and visible-time records. If `classroom` contains untracked objects, startup stops for inspection.
 
 ## Runtime environment

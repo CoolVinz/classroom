@@ -1,5 +1,29 @@
 import { describe, expect, test } from "bun:test";
-import { validateStudentUpload, validateUpload } from "./file-storage";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+import { storedFilePath, validateStudentUpload, validateUpload } from "./file-storage";
+
+describe("stored upload access", () => {
+  test("returns a readable file, a clear missing-file 404, and a storage 503", async () => {
+    const root = await mkdtemp(resolve(tmpdir(), "classroom-stored-file-"));
+    const oldUploadDir = process.env.UPLOAD_DIR;
+    process.env.UPLOAD_DIR = root;
+    try {
+      await writeFile(resolve(root, "present"), "student work");
+      expect(await storedFilePath("present")).toBe(resolve(root, "present"));
+      await expect(storedFilePath("missing")).rejects.toMatchObject({ status: 404 });
+      await mkdir(resolve(root, "not-a-file"));
+      await expect(storedFilePath("not-a-file")).rejects.toMatchObject({ status: 503 });
+      process.env.UPLOAD_DIR = resolve(root, "unmounted");
+      await expect(storedFilePath("present")).rejects.toMatchObject({ status: 503 });
+    } finally {
+      if (oldUploadDir === undefined) delete process.env.UPLOAD_DIR;
+      else process.env.UPLOAD_DIR = oldUploadDir;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("file upload validation", () => {
   test("accepts a PDF worksheet by its content signature", async () => {

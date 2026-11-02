@@ -6,7 +6,7 @@ import { requireStudent } from "../auth/session";
 import { sql } from "../db/client";
 import { HttpError } from "../http-error";
 import { checkRequestOrigin } from "../security";
-import { maxStoredBytes, uploadRoot, validateStudentUpload } from "../file-storage";
+import { maxStoredBytes, storedFilePath, uploadRoot, validateStudentUpload } from "../file-storage";
 
 async function activeMembership(classroomId: string, assignmentId: string, accountId: string) {
   const [membership] = await sql<{ studentId: string }[]>`
@@ -120,7 +120,7 @@ export const studentCourseworkRoutes = new Elysia({ prefix: "/api/student" })
             AND (f.kind = 'worksheet' OR f.student_id = s.id))
     `;
     if (!record) throw new HttpError(404, "ไม่พบไฟล์นี้");
-    const path = resolve(uploadRoot(), record.storageName);
+    const path = await storedFilePath(record.storageName);
     const disposition = record.mediaType === "application/pdf" || record.mediaType.startsWith("image/") ? "inline" : "attachment";
     return new Response(Bun.file(path), { headers: {
       "content-type": record.mediaType,

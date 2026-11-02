@@ -341,6 +341,13 @@ describe("student submission API", () => {
       expect(filesResponse.status).toBe(200);
       expect(files.map((file) => file.id)).toEqual([teacherFile]);
       expect((await app.handle(new Request(`http://localhost/api/student/files/${peerFile}/content`, { headers: studentHeaders }))).status).toBe(404);
+      const studentMissingWorksheet = await app.handle(new Request(`http://localhost/api/student/files/${teacherFile}/content`, { headers: studentHeaders }));
+      expect(studentMissingWorksheet.status).toBe(404);
+      expect(await studentMissingWorksheet.json()).toMatchObject({ error: expect.stringContaining("ต้นฉบับ") });
+      const teacherMissingWorksheet = await app.handle(new Request(`http://localhost/api/files/${teacherFile}/content`, { headers: teacherHeaders }));
+      expect(teacherMissingWorksheet.status).toBe(404);
+      expect(await teacherMissingWorksheet.json()).toMatchObject({ error: expect.stringContaining("ต้นฉบับ") });
+      expect((await app.handle(new Request(`http://localhost/api/files/${teacherFile}/content`, { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).status).toBe(404);
       expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/students`, { headers: studentHeaders }))).status).toBe(401);
 
       const form = new FormData();
@@ -365,6 +372,8 @@ describe("student submission API", () => {
       const modelRecord = await sql<{ kind: string }[]>`SELECT kind FROM classroom.files WHERE id = ${uploadedModel.id}`;
       expect(modelRecord[0].kind).toBe("model");
       expect((await app.handle(new Request(`http://localhost/api/student/files/${uploadedModel.id}/content`, { headers: studentHeaders }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/files/${uploadedModel.id}/content`, { headers: teacherHeaders }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/student/files/${uploaded.id}/content`, { headers: teacherHeaders }))).status).toBe(401);
 
       const teacherFiles = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/assignments/${assignmentA}/files`, { headers: teacherHeaders }));
       expect(teacherFiles.status).toBe(200);

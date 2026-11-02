@@ -54,3 +54,13 @@ test("model loading cancels its parser and uses the private file request", async
     else Reflect.deleteProperty(globalThis, "Worker");
   }
 });
+
+test("model preview surfaces an explanatory file API error", async () => {
+  const request = spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ error: "ต้นฉบับไฟล์ไม่พบ" }, { status: 404 }));
+  try {
+    await expect(loadModel({ id: "missing", originalName: "missing.obj" }, "/api/files/missing/content", new AbortController().signal))
+      .rejects.toThrow("ต้นฉบับไฟล์ไม่พบ");
+  } finally {
+    request.mockRestore();
+  }
+});

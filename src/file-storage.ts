@@ -1,4 +1,5 @@
 import { access, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
+import { constants } from "node:fs";
 import { resolve } from "node:path";
 import { HttpError } from "./http-error";
 
@@ -23,6 +24,28 @@ function positiveLimit(name: string, fallback: number) {
 export const maxUploadBytes = () => positiveLimit("UPLOAD_MAX_FILE_BYTES", 50 * 1024 * 1024);
 export const maxStoredBytes = () => positiveLimit("UPLOAD_MAX_TOTAL_BYTES", 5 * 1024 * 1024 * 1024);
 export const uploadRoot = () => resolve(process.env.UPLOAD_DIR ?? (process.env.NODE_ENV === "production" ? "/app/uploads" : "./uploads"));
+
+export async function storedFilePath(storageName: string) {
+  const root = uploadRoot();
+  try {
+    if (!(await stat(root)).isDirectory()) throw new Error("upload root is not a directory");
+  } catch {
+    throw new HttpError(503, "พื้นที่จัดเก็บไฟล์ไม่พร้อมใช้งาน กรุณาติดต่อครู");
+  }
+
+  const path = resolve(root, storageName);
+  try {
+    if (!(await stat(path)).isFile()) throw new Error("stored upload is not a file");
+    await access(path, constants.R_OK);
+    return path;
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR")) {
+      throw new HttpError(404, "ไม่พบไฟล์ต้นฉบับในพื้นที่จัดเก็บ กรุณาติดต่อครู");
+    }
+    if (error instanceof HttpError) throw error;
+    throw new HttpError(503, "พื้นที่จัดเก็บไฟล์ไม่พร้อมใช้งาน กรุณาติดต่อครู");
+  }
+}
 
 export async function ensureUploadRoot() {
   const root = uploadRoot();

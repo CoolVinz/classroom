@@ -18,6 +18,7 @@ Students see active assignments and attached worksheets for their classrooms, pl
 - An assignment, student, and file must belong to the same classroom. Models require a student; worksheets do not.
 - Allowed formats: PDF, PNG, JPEG, DOC/DOCX, STL, OBJ. Teacher and student uploads default to 50 MiB each and 5 GiB total; configured limits are enforced by the server.
 - Production storage defaults to `/app/uploads`; development defaults to `./uploads`. Container storage must be mounted persistently and backed up separately.
+- Content requests check the configured upload directory and file before streaming. Authorized requests receive a clear `404` when an original is missing and a safe `503` when storage is unavailable; existing teacher/student authorization still runs first.
 - The preview uses neutral geometry and accepts up to 500,000 triangles, with a 10-second parse limit. Complex models remain downloadable.
 - Teacher submission review shows private image thumbnails and static STL/OBJ thumbnails beside files. Model thumbnails load near the viewport, render one at a time, and open the interactive viewer when clicked; PDF/Word keep document icons. Failed thumbnails preserve preview/download actions. Thumbnails stay in browser memory and require no stored derivatives or re-upload.
 - Assignment archival hides work from students while preserving associated files. Earlier models and submissions are never replaced by later uploads.
@@ -48,7 +49,7 @@ Tests: web/src/model-view.test.ts, src/file-storage.test.ts, src/student-workflo
 ## Technical debt and warnings
 
 - Files are stored on the application host. Loss of the VPS or volume loses uploads unless an off-server copy exists.
-- Live Coolify persistent-volume behavior still needs production configuration and verification.
+- Production now has a Coolify volume mounted at `/app/uploads` with `UPLOAD_DIR=/app/uploads`. An audit on 2026-11-02 found 70 file records but no corresponding uploaded contents in the active container; no old container or upload volume remained. Metadata and attribution are preserved, but missing originals must be re-uploaded.
 - OBJ textures/material libraries and browser-side file version history are unsupported.
 - Model thumbnails download the original model on demand; large model collections can use significant bandwidth. Model thumbnails need browser WebGL; unsupported/complex files keep a fallback icon.
 

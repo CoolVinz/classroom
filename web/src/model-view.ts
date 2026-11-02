@@ -9,7 +9,10 @@ export async function loadModel(file: ModelFile, contentPath: string, signal: Ab
   const extension = file.originalName.split(".").pop()?.toLowerCase();
   if (extension !== "stl" && extension !== "obj") throw new Error("รองรับไฟล์ STL และ OBJ เท่านั้น");
   const response = await fetch(contentPath, { credentials: "same-origin", signal });
-  if (!response.ok) throw new Error("โมเดลนี้ไม่พร้อมแสดงตัวอย่าง");
+  if (!response.ok) {
+    const result = await response.json().catch(() => null) as { error?: unknown } | null;
+    throw new Error(typeof result?.error === "string" ? result.error : "โมเดลนี้ไม่พร้อมแสดงตัวอย่าง");
+  }
   const buffer = await response.arrayBuffer();
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
