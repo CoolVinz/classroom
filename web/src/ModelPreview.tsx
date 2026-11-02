@@ -2,10 +2,9 @@ import type * as React from "react";
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { createModelView, loadModel } from "./model-view";
 
 type FileItem = { id: string; originalName: string };
-type Part = { positions: Float32Array; normals: Float32Array; indices?: Uint32Array };
-type WorkerReply = { parts?: Part[]; triangles?: number; error?: string };
 
 export default function ModelPreview({ file, contentPath, close }: { file: FileItem; contentPath?: string; close: () => void }) {
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -17,64 +16,25 @@ export default function ModelPreview({ file, contentPath, close }: { file: FileI
   const [triangles, setTriangles] = useState(0);
 
   useEffect(() => {
-    let disposed = false;
-    let timer = 0;
+    const controller = new AbortController();
     let renderer: THREE.WebGLRenderer | undefined;
+    let view: ReturnType<typeof createModelView> | undefined;
     let controls: OrbitControls | undefined;
     let resizeObserver: ResizeObserver | undefined;
     let frame = 0;
-    const materials: THREE.MeshStandardMaterial[] = [];
-    const geometries: THREE.BufferGeometry[] = [];
-    const worker = new Worker(new URL("./model-preview.worker.ts", import.meta.url), { type: "module" });
     const canvasElement = canvas.current;
+    setLoading(true); setError(""); setTriangles(0);
 
     async function load() {
       try {
-        const response = await fetch(contentPath ?? "/api/files/" + file.id + "/content", { credentials: "same-origin" });
-        if (!response.ok) throw new Error("โมเดลนี้ไม่พร้อมแสดงตัวอย่าง");
-        const extension = file.originalName.split(".").pop()?.toLowerCase();
-        if (extension !== "stl" && extension !== "obj") throw new Error("รองรับไฟล์ STL และ OBJ เท่านั้น");
-        const buffer = await response.arrayBuffer();
-        timer = window.setTimeout(() => {
-          worker.terminate();
-          if (!disposed) { setError("ใช้เวลาอ่านโมเดลนานเกินไป กรุณาดาวน์โหลดไฟล์เพื่อตรวจสอบ"); setLoading(false); }
-        }, 10_000);
-        worker.postMessage({ extension, buffer }, [buffer]);
-      } catch (reason) {
-        if (!disposed) { setError(reason instanceof Error ? reason.message : "โหลดโมเดลไม่สำเร็จ"); setLoading(false); }
-      }
-    }
-
-    worker.onmessage = (event: MessageEvent<WorkerReply>) => {
-      window.clearTimeout(timer);
-      if (disposed) return;
-      if (event.data.error || !event.data.parts?.length || !canvasElement) {
-        setError(event.data.error ?? "อ่านโมเดลไม่สำเร็จ"); setLoading(false); return;
-      }
-      try {
-        renderer = new THREE.WebGLRenderer({ canvas: canvasElement, antialias: true, alpha: true });
+        const model = await loadModel(file, contentPath ?? "/api/files/" + file.id + "/content", controller.signal);
+        if (controller.signal.aborted || !canvasElement) return;
+        try { renderer = new THREE.WebGLRenderer({ canvas: canvasElement, antialias: true, alpha: true }); }
+        catch { throw new Error("WebGL ไม่พร้อมใช้งานในเบราว์เซอร์นี้"); }
         renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-        const scene = new THREE.Scene();
-        scene.background = new THREE.Color("#f7faf8");
-        scene.add(new THREE.HemisphereLight(0xffffff, 0x7d8d87, 2));
-        const keyLight = new THREE.DirectionalLight(0xffffff, 2.2);
-        keyLight.position.set(4, 7, 6); scene.add(keyLight);
-        const object = new THREE.Group();
-        for (const part of event.data.parts) {
-          const geometry = new THREE.BufferGeometry();
-          geometry.setAttribute("position", new THREE.BufferAttribute(part.positions, 3));
-          geometry.setAttribute("normal", new THREE.BufferAttribute(part.normals, 3));
-          if (part.indices) geometry.setIndex(new THREE.BufferAttribute(part.indices, 1));
-          const material = new THREE.MeshStandardMaterial({ color: 0x4b9a80, metalness: 0.05, roughness: 0.7, wireframe });
-          geometries.push(geometry); materials.push(material); object.add(new THREE.Mesh(geometry, material));
-        }
-        scene.add(object);
-        const bounds = new THREE.Box3().setFromObject(object);
-        const center = bounds.getCenter(new THREE.Vector3());
-        object.position.sub(center);
-        const radius = Math.max(bounds.getBoundingSphere(new THREE.Sphere()).radius, 0.1);
-        const camera = new THREE.PerspectiveCamera(38, 1, radius / 1000, radius * 100);
-        camera.position.set(radius * 2.6, radius * 2.1, radius * 2.6);
+        view = createModelView(model.parts);
+        const { camera, scene, materials } = view;
+        materials.forEach((material) => { material.wireframe = wireframe; });
         controls = new OrbitControls(camera, renderer.domElement);
         controls.target.set(0, 0, 0); controls.enableDamping = true; controls.saveState();
         controlsRef.current = controls; materialsRef.current = materials;
@@ -87,19 +47,17 @@ export default function ModelPreview({ file, contentPath, close }: { file: FileI
         };
         resizeObserver = new ResizeObserver(resize);
         resizeObserver.observe(canvasElement); resize();
-        const render = () => { if (!renderer || disposed) return; frame = requestAnimationFrame(render); controls?.update(); renderer.render(scene, camera); };
+        const render = () => { if (!renderer || controller.signal.aborted) return; frame = requestAnimationFrame(render); controls?.update(); renderer.render(scene, camera); };
         render(); setLoading(false);
-        setTriangles(event.data.triangles ?? 0);
+        setTriangles(model.triangles);
       } catch (reason) {
-        setError(reason instanceof Error ? "WebGL ไม่พร้อมใช้งานในเบราว์เซอร์นี้" : "แสดงโมเดลไม่สำเร็จ");
-        setLoading(false);
+        if (!controller.signal.aborted) { setError(reason instanceof Error ? reason.message : "แสดงโมเดลไม่สำเร็จ"); setLoading(false); }
       }
-    };
-    worker.onerror = () => { window.clearTimeout(timer); if (!disposed) { setError("อ่านโมเดลไม่สำเร็จ"); setLoading(false); } };
+    }
     void load();
     return () => {
-      disposed = true; window.clearTimeout(timer); cancelAnimationFrame(frame); worker.terminate(); resizeObserver?.disconnect(); controls?.dispose();
-      geometries.forEach((geometry) => geometry.dispose()); materials.forEach((material) => material.dispose()); renderer?.dispose();
+      controller.abort(); cancelAnimationFrame(frame); resizeObserver?.disconnect(); controls?.dispose();
+      view?.dispose(); renderer?.dispose(); renderer?.forceContextLoss();
       controlsRef.current = null; materialsRef.current = [];
     };
   }, [file.id, file.originalName, contentPath]);
