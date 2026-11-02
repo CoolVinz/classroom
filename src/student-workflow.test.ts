@@ -199,7 +199,9 @@ describe("student submission API", () => {
       const paused = await pulse(false, 3);
       expect(await paused.json()).toMatchObject({ accepted: true, attendanceStatus: "present" });
       const teacherAttendance = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/attendance?date=${todayDate[0].date}`, { headers: teacherHeaders }));
-      expect((await teacherAttendance.json() as { students: { studentId: string; status: string; source: string; visibleSeconds: number }[] }).students.find((student) => student.studentId === studentA)).toMatchObject({ status: "present", source: "automatic" });
+      const attendanceRows = (await teacherAttendance.json() as { students: { studentId: string; status: string | null; source: string | null; visibleSeconds: number }[] }).students;
+      expect(attendanceRows.find((student) => student.studentId === studentA)).toMatchObject({ status: "present", source: "automatic" });
+      expect(attendanceRows.find((student) => student.studentId === studentB)).toMatchObject({ studentId: studentB, status: null });
       const historicalLessons = await sql`SELECT lesson_date::text, starts_at, ends_at, grace_minutes
         FROM classroom.lessons WHERE classroom_id = ${roomA} AND lesson_date <= ${todayDate[0].date}::date ORDER BY lesson_date`;
       const recordedAttendance = await sql`SELECT * FROM classroom.attendance WHERE classroom_id = ${roomA}`;
