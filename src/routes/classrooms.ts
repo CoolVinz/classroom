@@ -274,6 +274,7 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
     }
     const students = await sql`
       SELECT s.id AS "studentId", s.student_code AS "studentCode", s.student_number AS "studentNumber", s.display_name AS "displayName",
+        (s.archived_at IS NOT NULL) AS archived,
         COUNT(a.status) FILTER (WHERE a.status = 'present')::int AS present,
         COUNT(a.status) FILTER (WHERE a.status = 'absent')::int AS absent,
         COUNT(a.status) FILTER (WHERE a.status = 'late')::int AS late,
@@ -287,7 +288,7 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
         WHERE student_id = s.id AND attendance_date BETWEEN ${from}::date AND ${to}::date
       ) p ON TRUE
       WHERE s.classroom_id = ${params.classroomId}
-      GROUP BY s.id ORDER BY s.archived_at NULLS FIRST, s.student_number NULLS LAST, s.display_name, s.id
+      GROUP BY s.id, p.visible_seconds ORDER BY s.archived_at NULLS FIRST, s.student_number NULLS LAST, s.display_name, s.id
     `;
     return { from, to, students };
   }, { query: t.Object({ from: t.Optional(t.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" })), to: t.Optional(t.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" })) }) });
