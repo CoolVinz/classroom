@@ -16,8 +16,9 @@ PostgreSQL 18 or newer stores app data in an app-owned `classroom` schema in the
 - **Weekly timetable:** one per classroom, with term bounds and grace minutes; child weekday rows store one start/end time window per ISO weekday in Bangkok local time.
 - **Lesson:** one dated classroom lesson with snapshotted `TIMESTAMPTZ` start/end, grace, cancellation, and finalization timestamps. Future unstarted lessons can be resynchronized from timetable edits; started and historical lessons remain stable.
 - **Attendance provenance and presence:** attendance source distinguishes manual from automatic results. `attendance_presence` stores first arrival, last contact, estimated visible seconds, and a short-lived active-view lease per roster student/day; its composite foreign keys bind both student and lesson to the same classroom.
-- **Assignment:** UUID ID, classroom foreign key, title, instructions, archive and creation timestamps. `(id, classroom_id)` supports file/classroom consistency.
-- **File:** stable UUID ID, classroom and assignment foreign keys, optional student, teacher-uploader, and student-submitter foreign keys, kind, original and generated storage names, media type, byte size, and creation timestamp. Worksheets require a teacher uploader and have no student; models and submissions require a student in the same classroom. New student submissions identify the uploading account; a model cannot have both teacher and student submitter attribution. Multiple files may reference one student and assignment.
+- **Assignment:** UUID ID, classroom foreign key, title, instructions, editable positive maximum score (default 100), archive and creation timestamps. `(id, classroom_id)` supports file/classroom consistency.
+- **Assessment:** one row per assignment and classroom student, with a private draft score/feedback/reviewed-file list and revision, plus a separately snapshotted published result, maximum score, and revision. Composite classroom-scoped foreign keys prevent cross-class assessment links; roster removal cascades only the removed student's assessment. Student APIs read only the published snapshot.
+- **File:** stable UUID ID, classroom and assignment foreign keys, optional student, teacher-uploader, and student-submitter foreign keys, kind, original and generated storage names, media type, original byte size, optional thumbnail byte size, work-order sequence, and creation timestamp. Worksheets require a teacher uploader and have no student; models and submissions require a student in the same classroom. New student submissions identify the uploading account; a model cannot have both teacher and student submitter attribution. Multiple files may reference one student and assignment.
 
 ## Constraints and behavior
 
@@ -35,6 +36,7 @@ PostgreSQL 18 or newer stores app data in an app-owned `classroom` schema in the
 - Student import matches `student_code` within one classroom. Existing details are preserved; only active matches missing a classroom number can be updated by import. Archived and already-numbered IDs are skipped; imported spreadsheets are not stored.
 - Blank emails on digit-only student IDs become the digits plus `@banjan.ac.th`, preserving leading zeroes. Existing nonblank emails are preserved, and the migration leaves classroom email collisions unchanged for teacher correction.
 - File contents live outside PostgreSQL on persistent application storage. PostgreSQL keeps file ownership metadata.
+- Original files and generated 256 × 192 PNG thumbnails share the persistent upload volume; the database records thumbnail size and assessment-reviewed file UUIDs. Original and thumbnail bytes both count toward the configured storage quota.
 - A roster import requires student IDs even though manual student creation still permits a blank code.
 - The API enforces classroom ownership for classroom, roster, attendance, and summary access. PostgreSQL row-level security is not configured.
 

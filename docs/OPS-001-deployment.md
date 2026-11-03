@@ -18,7 +18,7 @@
 - The 2026-11-02 production audit found 70 file metadata records but an empty upload directory and no previous Classroom container or upload volume. The PostgreSQL backup preserves metadata only; missing originals must be re-uploaded. Do not delete those records automatically.
 - Persistent volumes survive container replacement but are not backups. Back up uploaded files off the VPS as well as PostgreSQL.
 - Before attaching a volume to an existing deployment, copy recoverable files from the running container into it under their existing storage UUIDs. A new empty mount hides the old container directory; mounting does not recover missing data.
-- The app applies numbered tracked migrations at startup. Migration `005_classroom_student_numbers.sql` adds classroom numbering; `006_scheduled_attendance.sql` adds timetable, dated lessons, attendance provenance, and visible-time records. If `classroom` contains untracked objects, startup stops for inspection.
+- The app applies numbered tracked migrations at startup. Migration `005_classroom_student_numbers.sql` adds classroom numbering; `006_scheduled_attendance.sql` adds timetable, dated lessons, attendance provenance, and visible-time records; `007_thumbnails_assessments.sql` adds saved-thumbnail metadata, assignment maximum scores, and private/published assessments. If `classroom` contains untracked objects, startup stops for inspection.
 
 ## Runtime environment
 
@@ -49,7 +49,7 @@ OWNER_PASSWORD (first-owner setup only)
 - Use a dedicated database login that owns only the app schema, and restrict database network access to the application server where possible.
 - The preflight connection used the PostgreSQL `postgres` role, which owns the `classroom` schema. Do not use that superuser login as the deployed app credential; create a dedicated role that owns the app schema.
 - Database backups are managed at the PostgreSQL service; the app container has no independent backup or migration rollback workflow.
-- The file quota is enforced from registered PostgreSQL file rows across classrooms. Keep actual free disk space above the configured quota; interrupted staging files are cleaned at startup.
+- The file quota includes original and thumbnail bytes from registered PostgreSQL file rows across classrooms. Keep actual free disk space above the configured quota; interrupted staging files are cleaned at startup.
 - Login throttling is process-local, so the documented initial target is a single application container.
 - Google sign-in uses a Web application client. Add the public app origin as an authorized JavaScript origin and the exact `${APP_URL}/api/auth/student/google` callback as an authorized redirect URI. The callback uses the visible app host (Vite's `/api` proxy in local development); the client ID is public and this ID-token flow needs no client secret.
 - Set `GOOGLE_WORKSPACE_DOMAIN=banjan.ac.th`. The endpoint rejects unverified email, missing or wrong `hd`, wrong audience/issuer/expiry, invalid CSRF, and accounts without active roster matches.
@@ -58,7 +58,7 @@ OWNER_PASSWORD (first-owner setup only)
 
 ## Deploy and initialize
 
-Back up PostgreSQL before release because the app applies migrations on startup. Migration `006_scheduled_attendance.sql` preserves historical daily attendance and adds the new schedule/presence tables. After deployment, verify `/health/ready`, confirm migrations through `006_scheduled_attendance` are tracked, and test teacher and student access. Uploaded file contents need their own off-server backup. See [README deployment instructions](../README.md).
+Back up PostgreSQL and the upload volume before release because the app applies migrations on startup. Migration `007_thumbnails_assessments.sql` gives existing assignments a maximum score of 100 and leaves historical files without thumbnails; they are generated lazily when visible. After deployment, verify `/health/ready`, confirm migrations through `007_thumbnails_assessments` are tracked, and test teacher marking, student result privacy, and thumbnail persistence. Uploaded file contents need their own off-server backup. See [README deployment instructions](../README.md).
 
 ## Open questions
 

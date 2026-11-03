@@ -1,38 +1,46 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type Ref } from "react";
+import { generateThumbnail } from "./thumbnail-jobs";
 
-type ThumbnailFile = { id: string; originalName: string; kind: "worksheet" | "model" | "submission"; mediaType: string };
+type ThumbnailFile = { id: string; originalName: string; kind: "worksheet" | "model" | "submission"; mediaType: string; thumbnailAvailable?: boolean };
 
-export function FileThumbnail({ file, onPreview }: { file: ThumbnailFile; onPreview: () => void }) {
-  const element = useRef<HTMLButtonElement>(null);
+export function FileThumbnail({ file, onPreview, student = false }: { file: ThumbnailFile; onPreview: () => void; student?: boolean }) {
+  const element = useRef<HTMLElement>(null);
   const [visible, setVisible] = useState(false);
   const [source, setSource] = useState("");
   const [failed, setFailed] = useState(false);
-  const model = file.kind === "model";
+  const [hasThumbnail, setHasThumbnail] = useState(file.thumbnailAvailable ?? false);
+  const [generating, setGenerating] = useState(false);
+  const model = file.mediaType.startsWith("model/");
   const image = file.mediaType.startsWith("image/");
-  const path = "/api/files/" + file.id + "/content";
+  const apiPath = (student ? "/student/files/" : "/files/") + file.id;
+  const path = "/api" + apiPath + "/content";
+  const thumbnailPath = apiPath + "/thumbnail";
 
   useEffect(() => {
-    if (!model || !element.current) return;
+    if ((!model && !image) || !element.current) return;
     if (typeof IntersectionObserver === "undefined") { setVisible(true); return; }
     const observer = new IntersectionObserver(([entry]) => setVisible(entry.isIntersecting), { rootMargin: "150px" });
     observer.observe(element.current);
     return () => observer.disconnect();
-  }, [model]);
+  }, [model, image, file.id]);
 
   useEffect(() => {
-    if (!model || !visible || source || failed) return;
+    if ((!model && !image) || !visible || hasThumbnail || failed) return;
     const controller = new AbortController();
-    void import("./model-view").then(({ renderModelThumbnail }) => renderModelThumbnail(file, path, controller.signal))
-      .then((url) => { if (!controller.signal.aborted) setSource(url); })
-      .catch(() => { if (!controller.signal.aborted) setFailed(true); });
+    setGenerating(true);
+    void generateThumbnail(file, path, thumbnailPath, controller.signal)
+      .then((blob) => { if (!controller.signal.aborted) { setSource(URL.createObjectURL(blob)); setHasThumbnail(true); } })
+      .catch(() => { if (!controller.signal.aborted) setFailed(true); })
+      .finally(() => { if (!controller.signal.aborted) setGenerating(false); });
     return () => controller.abort();
-  }, [model, visible, source, failed, file.id, file.originalName, path]);
+  }, [model, image, visible, hasThumbnail, failed, file.id, file.originalName, file.mediaType, path, thumbnailPath]);
 
-  if (model) return <button ref={element} type="button" className="work-thumbnail" onClick={onPreview} aria-label={"แสดงตัวอย่าง " + file.originalName} title={failed ? "สร้างภาพตัวอย่างไม่สำเร็จ · คลิกเพื่อเปิดโมเดล" : "คลิกเพื่อเปิดโมเดล"}>
-    {source ? <img src={source} alt={"ตัวอย่าง " + file.originalName}/> : <span>3D<small>{failed ? "ไม่มีภาพตัวอย่าง" : visible ? "กำลังสร้างภาพ…" : "ตัวอย่างโมเดล"}</small></span>}
-  </button>;
-  if (image) return <a className="work-thumbnail" href={path} target="_blank" rel="noreferrer" aria-label={"เปิดภาพ " + file.originalName}>
-    {failed ? <span>IMG<small>ไม่มีภาพตัวอย่าง</small></span> : <img src={path} alt={"ตัวอย่าง " + file.originalName} loading="lazy" decoding="async" onError={() => setFailed(true)}/>}
-  </a>;
+  useEffect(() => () => { if (source) URL.revokeObjectURL(source); }, [source]);
+  useEffect(() => { setVisible(false); setSource(""); setFailed(false); setHasThumbnail(file.thumbnailAvailable ?? false); }, [file.id]);
+
+  const thumbnail = source || (hasThumbnail ? thumbnailPath : "");
+  const preview = thumbnail ? <img src={thumbnail} alt={"ตัวอย่าง " + file.originalName} loading="lazy" decoding="async" onError={() => { setHasThumbnail(false); if (source) setFailed(true); }}/> : <span>{model ? "3D" : "IMG"}<small>{failed ? "ไม่มีภาพตัวอย่าง" : generating ? "กำลังสร้างภาพ…" : model ? "ตัวอย่างโมเดล" : "ตัวอย่างรูปภาพ"}</small></span>;
+  if (model) return <button ref={element as Ref<HTMLButtonElement>} type="button" className="work-thumbnail" onClick={onPreview} aria-label={"แสดงตัวอย่าง " + file.originalName} title={failed ? "สร้างภาพตัวอย่างไม่สำเร็จ · คลิกเพื่อเปิดโมเดล" : "คลิกเพื่อเปิดโมเดล"}>{preview}</button>;
+  if (image) return <a ref={element as Ref<HTMLAnchorElement>} className="work-thumbnail" href={path} target="_blank" rel="noreferrer" aria-label={"เปิดภาพ " + file.originalName}>{preview}</a>;
   return <span className="file-kind">{file.mediaType.includes("word") ? "DOC" : "PDF"}</span>;
 }

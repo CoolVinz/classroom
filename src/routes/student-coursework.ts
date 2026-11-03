@@ -6,7 +6,7 @@ import { requireStudent } from "../auth/session";
 import { sql } from "../db/client";
 import { HttpError } from "../http-error";
 import { checkRequestOrigin } from "../security";
-import { maxStoredBytes, storedFilePath, uploadRoot, validateStudentUpload } from "../file-storage";
+import { maxStoredBytes, saveFileThumbnail, storedFilePath, uploadRoot, uploadThumbnailPath, validateStudentUpload, validateThumbnail } from "../file-storage";
 
 async function activeMembership(classroomId: string, assignmentId: string, accountId: string) {
   const [membership] = await sql<{ studentId: string }[]>`
@@ -28,15 +28,22 @@ export const studentCourseworkRoutes = new Elysia({ prefix: "/api/student" })
     return sql`
       SELECT a.id AS "assignmentId", a.title, a.instructions,
         c.id AS "classroomId", c.name AS "classroomName",
-        a.created_at AS "createdAt",
-        COUNT(f.id) FILTER (WHERE f.submitted_by_account_id = ${actor.id})::int AS "submissionCount"
+        a.created_at AS "createdAt", q.published_score AS "publishedScore",
+        q.published_max_score AS "publishedMaxScore", q.published_feedback AS "publishedFeedback",
+        q.published_at AS "publishedAt",
+        (SELECT COUNT(*)::int FROM classroom.files f WHERE f.assignment_id = a.id
+          AND f.student_id = s.id AND f.submitted_by_account_id = ${actor.id}) AS "submissionCount",
+        EXISTS (SELECT 1 FROM classroom.files newer
+          WHERE newer.assignment_id = a.id AND newer.student_id = s.id
+            AND newer.kind IN ('model', 'submission')
+            AND NOT (newer.id = ANY(COALESCE(q.published_reviewed_file_ids, ARRAY[]::uuid[])))) AS "newWork"
       FROM classroom.students s
       JOIN classroom.classrooms c ON c.id = s.classroom_id
       JOIN classroom.assignments a ON a.classroom_id = c.id
-      LEFT JOIN classroom.files f ON f.assignment_id = a.id AND f.student_id = s.id
+      LEFT JOIN classroom.assignment_assessments q ON q.assignment_id = a.id AND q.student_id = s.id
       WHERE s.account_id = ${actor.id} AND s.archived_at IS NULL
         AND c.archived_at IS NULL AND a.archived_at IS NULL
-      GROUP BY a.id, c.id ORDER BY c.name, a.created_at DESC
+      ORDER BY c.name, a.created_at DESC
     `;
   })
   .get("/classrooms/:classroomId/assignments/:assignmentId/files", async ({ params, request }) => {
@@ -46,7 +53,8 @@ export const studentCourseworkRoutes = new Elysia({ prefix: "/api/student" })
       SELECT f.id, f.assignment_id AS "assignmentId", f.student_id AS "studentId",
         f.kind, f.original_name AS "originalName", f.media_type AS "mediaType",
         f.size_bytes AS "sizeBytes", f.created_at AS "createdAt",
-        f.submitted_by_account_id = ${actor.id} AS "studentSubmission"
+        f.submitted_by_account_id = ${actor.id} AS "studentSubmission",
+        f.thumbnail_size_bytes IS NOT NULL AS "thumbnailAvailable"
       FROM classroom.files f
       WHERE f.classroom_id = ${params.classroomId} AND f.assignment_id = ${params.assignmentId}
         AND (f.kind = 'worksheet' OR f.student_id = ${studentId})
@@ -81,7 +89,9 @@ export const studentCourseworkRoutes = new Elysia({ prefix: "/api/student" })
           FOR SHARE OF s, c, a
         `;
         if (!membership) throw new HttpError(404, "ไม่พบงานนี้");
-        const [usage] = await tx<{ used: string }[]>`SELECT COALESCE(SUM(size_bytes), 0)::text AS used FROM classroom.files`;
+        const [usage] = await tx<{ used: string }[]>`
+          SELECT COALESCE(SUM(size_bytes + COALESCE(thumbnail_size_bytes, 0)), 0)::text AS used FROM classroom.files
+        `;
         if (Number(usage.used) + body.file.size > maxStoredBytes()) throw new HttpError(413, "พื้นที่จัดเก็บไฟล์เต็มแล้ว");
         await rename(tempPath, storedPath);
         renamed = true;
@@ -128,4 +138,23 @@ export const studentCourseworkRoutes = new Elysia({ prefix: "/api/student" })
       "cache-control": "private, no-store",
       "x-content-type-options": "nosniff",
     } });
-  });
+  })
+  .get("/files/:fileId/thumbnail", async ({ params, request }) => {
+    const actor = await requireStudent(request);
+    const [record] = await sql`SELECT f.thumbnail_size_bytes FROM classroom.files f
+      JOIN classroom.classrooms c ON c.id = f.classroom_id
+      JOIN classroom.assignments a ON a.id = f.assignment_id
+      WHERE f.id = ${params.fileId} AND c.archived_at IS NULL AND a.archived_at IS NULL
+        AND EXISTS (SELECT 1 FROM classroom.students s
+          WHERE s.account_id = ${actor.id} AND s.classroom_id = f.classroom_id AND s.archived_at IS NULL
+            AND (f.kind = 'worksheet' OR f.student_id = s.id))`;
+    if (!record || record.thumbnail_size_bytes === null) throw new HttpError(404, "ยังไม่มีภาพตัวอย่าง");
+    const path = await storedFilePath("thumbnails/" + params.fileId + ".png");
+    return new Response(Bun.file(path), { headers: { "content-type": "image/png", "cache-control": "private, no-store", "x-content-type-options": "nosniff" } });
+  })
+  .put("/files/:fileId/thumbnail", async ({ params, body, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireStudent(request);
+    await saveFileThumbnail(params.fileId, await validateThumbnail(body.file), "student", actor.id);
+    return { ok: true };
+  }, { body: t.Object({ file: t.File({ type: "image/png", minSize: 57, maxSize: "256k" }) }) });

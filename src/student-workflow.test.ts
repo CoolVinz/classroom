@@ -3,9 +3,29 @@ import { OAuth2Client } from "google-auth-library";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
+import { deflateSync } from "node:zlib";
 import { Elysia } from "elysia";
 
 const databaseUrl = process.env.CLASSROOM_TEST_DATABASE_URL;
+
+function thumbnailChunk(type: string, data: Buffer) {
+  const chunk = Buffer.alloc(data.length + 12);
+  chunk.writeUInt32BE(data.length, 0); chunk.write(type, 4); data.copy(chunk, 8);
+  let crc = 0xffffffff;
+  for (const byte of chunk.subarray(4, data.length + 8)) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+  }
+  chunk.writeUInt32BE((crc ^ 0xffffffff) >>> 0, data.length + 8);
+  return chunk;
+}
+
+function syntheticThumbnail() {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(256, 0); header.writeUInt32BE(192, 4); header[8] = 8; header[9] = 6;
+  const pixels = Buffer.alloc(192 * (256 * 4 + 1));
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), thumbnailChunk("IHDR", header), thumbnailChunk("IDAT", deflateSync(pixels)), thumbnailChunk("IEND", Buffer.alloc(0))]);
+}
 
 describe("student submission API", () => {
   if (!databaseUrl) {
@@ -376,6 +396,22 @@ describe("student submission API", () => {
       const teacherMissingWorksheet = await app.handle(new Request(`http://localhost/api/files/${teacherFile}/content`, { headers: teacherHeaders }));
       expect(teacherMissingWorksheet.status).toBe(404);
       expect(await teacherMissingWorksheet.json()).toMatchObject({ error: expect.stringContaining("ต้นฉบับ") });
+      const thumbnailBody = () => { const form = new FormData(); form.set("file", new File([syntheticThumbnail()], "preview.png", { type: "image/png" })); return form; };
+      const savedThumbnail = await app.handle(new Request(`http://localhost/api/files/${teacherFile}/thumbnail`, { method: "PUT", headers: teacherHeaders, body: thumbnailBody() }));
+      expect(savedThumbnail.status).toBe(200);
+      const teacherThumbnail = await app.handle(new Request(`http://localhost/api/files/${teacherFile}/thumbnail`, { headers: teacherHeaders }));
+      expect(teacherThumbnail.status).toBe(200);
+      expect(teacherThumbnail.headers.get("content-type")).toBe("image/png");
+      expect(await (await teacherThumbnail.arrayBuffer()).byteLength).toBeGreaterThan(100);
+      expect((await app.handle(new Request(`http://localhost/api/files/${teacherFile}/thumbnail`, { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).status).toBe(404);
+      expect((await app.handle(new Request(`http://localhost/api/student/files/${teacherFile}/thumbnail`, { headers: studentHeaders }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/student/files/${teacherFile}/thumbnail`, { method: "PUT", headers: studentHeaders, body: thumbnailBody() }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/files/${teacherFile}/thumbnail`, { headers: studentHeaders }))).status).toBe(401);
+      expect(await Bun.file(resolve(uploadDir, "thumbnails", teacherFile + ".png")).exists()).toBe(true);
+      const deleteWorksheet = await app.handle(new Request(`http://localhost/api/files/${teacherFile}`, { method: "DELETE", headers: teacherHeaders }));
+      expect(deleteWorksheet.status).toBe(200);
+      expect(await Bun.file(resolve(uploadDir, "thumbnails", teacherFile + ".png")).exists()).toBe(false);
+      expect((await app.handle(new Request(`http://localhost/api/files/${teacherFile}/thumbnail`, { headers: teacherHeaders }))).status).toBe(404);
       expect((await app.handle(new Request(`http://localhost/api/files/${teacherFile}/content`, { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).status).toBe(404);
       expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/students`, { headers: studentHeaders }))).status).toBe(401);
 
@@ -384,7 +420,7 @@ describe("student submission API", () => {
       process.env.UPLOAD_MAX_TOTAL_BYTES = "20";
       const rejectedUpload = await app.handle(new Request(`http://localhost/api/student/classrooms/${roomA}/assignments/${assignmentA}/files`, { method: "POST", headers: studentHeaders, body: form }));
       expect(rejectedUpload.status).toBe(413);
-      expect(await readdir(uploadDir)).toEqual([]);
+      expect(await readdir(uploadDir)).toEqual(["thumbnails"]);
       process.env.UPLOAD_MAX_TOTAL_BYTES = String(5 * 1024 * 1024);
       const upload = await app.handle(new Request(`http://localhost/api/student/classrooms/${roomA}/assignments/${assignmentA}/files`, { method: "POST", headers: studentHeaders, body: form }));
       expect(upload.status).toBe(200);
@@ -406,7 +442,80 @@ describe("student submission API", () => {
 
       const teacherFiles = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/assignments/${assignmentA}/files`, { headers: teacherHeaders }));
       expect(teacherFiles.status).toBe(200);
-      expect((await teacherFiles.json() as unknown[]).length).toBe(4);
+      expect((await teacherFiles.json() as unknown[]).length).toBe(3);
+      const assessmentsResponse = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/assignments/${assignmentA}/assessments`, { headers: teacherHeaders }));
+      expect(assessmentsResponse.status).toBe(200);
+      const assessments = await assessmentsResponse.json() as { maxScore: number | string; total: number; students: { studentId: string; submissionCount: number; latestFile: { id: string } | null }[] };
+      expect(assessments).toMatchObject({ maxScore: "100.00", total: 3 });
+      expect(assessments.students.find((item) => item.studentId === studentA)).toMatchObject({ submissionCount: 2, latestFile: { id: uploadedModel.id } });
+      const assessmentPath = `/api/classrooms/${roomA}/assignments/${assignmentA}/students/${studentA}/assessment`;
+      const assessmentRequest = (body: unknown) => app.handle(new Request(`http://localhost${assessmentPath}`, {
+        method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify(body),
+      }));
+      expect((await assessmentRequest({ score: 8.5, feedback: "stale", revision: 1, reviewedFileIds: [] })).status).toBe(409);
+      const firstDraft = await assessmentRequest({ score: 8.5, feedback: "โมเดลเรียบร้อย", revision: 0, reviewedFileIds: [uploaded.id, uploadedModel.id] });
+      expect(firstDraft.status).toBe(200);
+      expect(await firstDraft.json()).toMatchObject({ revision: 1 });
+      expect((await assessmentRequest({ score: 101, feedback: "", revision: 1, reviewedFileIds: [uploaded.id, uploadedModel.id] })).status).toBe(422);
+      expect((await assessmentRequest({ score: 8.555, feedback: "", revision: 1, reviewedFileIds: [uploaded.id, uploadedModel.id] })).status).toBe(422);
+      expect((await assessmentRequest({ score: 9, feedback: "", revision: 0, reviewedFileIds: [uploaded.id, uploadedModel.id] })).status).toBe(409);
+      const draftVisible = await app.handle(new Request("http://localhost/api/student/assignments", { headers: studentHeaders }));
+      const draftAssignments = await draftVisible.json() as { assignmentId: string; publishedScore: number | null; draftScore?: number; draftFeedback?: string }[];
+      expect(draftAssignments.find((item) => item.assignmentId === assignmentA)).toMatchObject({ publishedScore: null });
+      expect(draftAssignments.find((item) => item.assignmentId === assignmentA)).not.toHaveProperty("draftScore");
+      expect(draftAssignments.find((item) => item.assignmentId === assignmentA)).not.toHaveProperty("draftFeedback");
+      const publishPath = `/api/classrooms/${roomA}/assignments/${assignmentA}/students/${studentA}/assessment/publish`;
+      const publish = (revision: number) => app.handle(new Request(`http://localhost${publishPath}`, {
+        method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ revision }),
+      }));
+      expect((await publish(0)).status).toBe(409);
+      expect((await publish(1)).status).toBe(200);
+      const publishedView = await app.handle(new Request("http://localhost/api/student/assignments", { headers: studentHeaders }));
+      expect((await publishedView.json() as { assignmentId: string; publishedScore: number | string | null; publishedMaxScore: number | string | null; publishedFeedback: string | null }[]).find((item) => item.assignmentId === assignmentA)).toMatchObject({ publishedScore: "8.50", publishedMaxScore: "100.00", publishedFeedback: "โมเดลเรียบร้อย" });
+      const laterSubmissionForm = new FormData();
+      laterSubmissionForm.set("file", new File(["%PDF-1.7\nsecond draft"], "second.pdf", { type: "application/pdf" }));
+      const laterSubmissionResponse = await app.handle(new Request(`http://localhost/api/student/classrooms/${roomA}/assignments/${assignmentA}/files`, { method: "POST", headers: studentHeaders, body: laterSubmissionForm }));
+      const laterSubmission = await laterSubmissionResponse.json() as { id: string };
+      expect(laterSubmissionResponse.status).toBe(200);
+      const workAfterUpload = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/assignments/${assignmentA}/assessments`, { headers: teacherHeaders }));
+      const workRows = await workAfterUpload.json() as { students: { studentId: string; publishedHasNewWork: boolean }[] };
+      expect(workRows.students.find((item) => item.studentId === studentA)?.publishedHasNewWork).toBe(true);
+      const refreshedDraft = await assessmentRequest({ score: 9.25, feedback: "ตรวจไฟล์ล่าสุดแล้ว", revision: 1, reviewedFileIds: [uploaded.id, uploadedModel.id, laterSubmission.id] });
+      expect(refreshedDraft.status).toBe(200);
+      expect(await refreshedDraft.json()).toMatchObject({ revision: 2 });
+      const concurrentDrafts = await Promise.all([
+        assessmentRequest({ score: 9.25, feedback: "ฉบับ A", revision: 2, reviewedFileIds: [uploaded.id, uploadedModel.id, laterSubmission.id] }),
+        assessmentRequest({ score: 9.5, feedback: "ฉบับ B", revision: 2, reviewedFileIds: [uploaded.id, uploadedModel.id, laterSubmission.id] }),
+      ]);
+      expect(concurrentDrafts.map((response) => response.status).sort()).toEqual([200, 409]);
+      expect((await publish(3)).status).toBe(200);
+      const zeroScoreDraft = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/assignments/${assignmentA}/students/${studentB}/assessment`, {
+        method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" },
+        body: JSON.stringify({ score: 0, feedback: "ยังต้องฝึก", revision: 0, reviewedFileIds: [peerFile] }),
+      }));
+      expect(zeroScoreDraft.status).toBe(200);
+      const zeroScorePublish = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/assignments/${assignmentA}/students/${studentB}/assessment/publish`, {
+        method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ revision: 1 }),
+      }));
+      expect(zeroScorePublish.status).toBe(200);
+      const maxScoreBody = { ...teacherHeaders, "content-type": "application/json" };
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/assignments/${assignmentA}`, { method: "PATCH", headers: maxScoreBody, body: JSON.stringify({ maxScore: 8 }) }))).status).toBe(422);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/assignments/${assignmentA}`, { method: "PATCH", headers: maxScoreBody, body: JSON.stringify({ maxScore: 12 }) }))).status).toBe(200);
+      const changedMax = await app.handle(new Request("http://localhost/api/student/assignments", { headers: studentHeaders }));
+      const changedPublished = (await changedMax.json() as { assignmentId: string; publishedScore: number | string | null; publishedMaxScore: number | string | null }[]).find((item) => item.assignmentId === assignmentA)!;
+      expect([9.25, 9.5]).toContain(Number(changedPublished.publishedScore));
+      expect(changedPublished.publishedMaxScore).toBe("100.00");
+      expect((await publish(3)).status).toBe(200);
+      const republished = await app.handle(new Request("http://localhost/api/student/assignments", { headers: studentHeaders }));
+      expect((await republished.json() as { assignmentId: string; publishedMaxScore: number | string | null; newWork: boolean }[]).find((item) => item.assignmentId === assignmentA)).toMatchObject({ publishedMaxScore: "12.00", newWork: false });
+      const gradeRecord = (await sql`SELECT published_revision FROM classroom.assignment_assessments WHERE assignment_id = ${assignmentA} AND student_id = ${studentA}`)[0] as { published_revision: number };
+      const hiddenGrade = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/assignments/${assignmentA}/students/${studentA}/assessment/unpublish`, {
+        method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ revision: gradeRecord.published_revision }),
+      }));
+      expect(hiddenGrade.status).toBe(200);
+      expect((await app.handle(new Request("http://localhost/api/student/assignments", { headers: studentHeaders })).then((response) => response.json()) as { assignmentId: string; publishedScore: number | null }[]).find((item) => item.assignmentId === assignmentA)?.publishedScore).toBeNull();
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/assignments/${assignmentA}/assessments`, { headers: studentHeaders }))).status).toBe(401);
+      expect((await app.handle(new Request(`http://localhost${assessmentPath}`, { method: "PUT", headers: { ...studentHeaders, "content-type": "application/json" }, body: JSON.stringify({ score: 1, feedback: "", revision: 0, reviewedFileIds: [] }) }))).status).toBe(401);
       expect((await app.handle(new Request(`http://localhost/api/files/${uploaded.id}/content`, { headers: studentHeaders }))).status).toBe(401);
       expect((await app.handle(new Request(`http://localhost/api/files/${uploaded.id}`, { method: "DELETE", headers: studentHeaders }))).status).toBe(401);
 
@@ -435,10 +544,13 @@ describe("student submission API", () => {
       }));
       const storageName = randomUUID(); const removedFileId = randomUUID(); const missingFileId = randomUUID(); const missingStorageName = randomUUID();
       await Bun.write(resolve(uploadDir, storageName), "synthetic student model");
+      const removedThumbnail = syntheticThumbnail();
+      await mkdir(resolve(uploadDir, "thumbnails"), { recursive: true });
+      await Bun.write(resolve(uploadDir, "thumbnails", removedFileId + ".png"), removedThumbnail);
       await sql.begin(async (tx) => {
         await tx`INSERT INTO classroom.attendance (classroom_id, student_id, attendance_date, status) VALUES (${roomB}, ${studentC}, '2025-01-15', 'present')`;
-        await tx`INSERT INTO classroom.files (id, classroom_id, assignment_id, student_id, uploaded_by, kind, original_name, storage_name, media_type, size_bytes)
-          VALUES (${removedFileId}, ${roomB}, ${assignmentB}, ${studentC}, ${teacherId}, 'model', 'student.stl', ${storageName}, 'model/stl', 23)`;
+        await tx`INSERT INTO classroom.files (id, classroom_id, assignment_id, student_id, uploaded_by, kind, original_name, storage_name, media_type, size_bytes, thumbnail_size_bytes)
+          VALUES (${removedFileId}, ${roomB}, ${assignmentB}, ${studentC}, ${teacherId}, 'model', 'student.stl', ${storageName}, 'model/stl', 23, ${removedThumbnail.byteLength})`;
         await tx`INSERT INTO classroom.files (id, classroom_id, assignment_id, student_id, uploaded_by, kind, original_name, storage_name, media_type, size_bytes)
           VALUES (${missingFileId}, ${roomB}, ${assignmentB}, ${studentC}, ${teacherId}, 'model', 'missing.stl', ${missingStorageName}, 'model/stl', 1)`;
       });
@@ -451,6 +563,7 @@ describe("student submission API", () => {
       expect(await sql`SELECT student_id FROM classroom.attendance WHERE student_id = ${studentC}`).toHaveLength(1);
       expect(await sql`SELECT id FROM classroom.files WHERE id = ${removedFileId}`).toHaveLength(1);
       expect(await Bun.file(resolve(uploadDir, storageName)).exists()).toBe(true);
+      expect(await Bun.file(resolve(uploadDir, "thumbnails", removedFileId + ".png")).exists()).toBe(true);
       await rm(blockedTombstone, { recursive: true, force: true });
 
       const suffix = randomUUID().replaceAll("-", "");
@@ -463,7 +576,9 @@ describe("student submission API", () => {
       expect(await sql`SELECT id FROM classroom.students WHERE id = ${studentC}`).toHaveLength(1);
       expect(await sql`SELECT id FROM classroom.files WHERE id = ${removedFileId}`).toHaveLength(1);
       expect(await Bun.file(resolve(uploadDir, storageName)).exists()).toBe(true);
+      expect(await Bun.file(resolve(uploadDir, "thumbnails", removedFileId + ".png")).exists()).toBe(true);
       expect(await Bun.file(resolve(uploadDir, storageName + ".deleting")).exists()).toBe(false);
+      expect(await Bun.file(resolve(uploadDir, "thumbnails", removedFileId + ".png.deleting")).exists()).toBe(false);
       await sql.unsafe(`DROP TRIGGER ${deleteTriggerName} ON classroom.students`).simple();
       await sql.unsafe(`DROP FUNCTION classroom.${deleteFunctionName}()`).simple();
       deleteTriggerInstalled = false;
@@ -485,6 +600,7 @@ describe("student submission API", () => {
       const concurrentUploadData = concurrentUpload.status === 200 ? await concurrentUpload.json() as { id: string } : null;
       expect(await removedStudent.json()).toEqual({ ok: true, cleanupPending: false });
       expect(await Bun.file(resolve(uploadDir, storageName)).exists()).toBe(false);
+      expect(await Bun.file(resolve(uploadDir, "thumbnails", removedFileId + ".png")).exists()).toBe(false);
       expect(await sql`SELECT id FROM classroom.students WHERE id = ${studentC}`).toHaveLength(0);
       expect(await sql`SELECT student_id FROM classroom.attendance WHERE student_id = ${studentC}`).toHaveLength(0);
       expect(await sql`SELECT id FROM classroom.files WHERE id = ${removedFileId}`).toHaveLength(0);

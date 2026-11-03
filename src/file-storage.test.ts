@@ -2,7 +2,28 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { storedFilePath, validateStudentUpload, validateUpload } from "./file-storage";
+import { deflateSync } from "node:zlib";
+import { storedFilePath, validateStudentUpload, validateThumbnail, validateUpload } from "./file-storage";
+
+function pngChunk(type: string, data: Buffer) {
+  const chunk = Buffer.alloc(data.length + 12);
+  chunk.writeUInt32BE(data.length, 0); chunk.write(type, 4); data.copy(chunk, 8);
+  let crc = 0xffffffff;
+  for (const byte of chunk.subarray(4, data.length + 8)) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+  }
+  chunk.writeUInt32BE((crc ^ 0xffffffff) >>> 0, data.length + 8);
+  return chunk;
+}
+
+function thumbnailPng(width = 256, height = 192, compressed?: Buffer) {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4);
+  header[8] = 8; header[9] = 6;
+  const pixels = Buffer.alloc(height * (width * 4 + 1));
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), pngChunk("IHDR", header), pngChunk("IDAT", compressed ?? deflateSync(pixels)), pngChunk("IEND", Buffer.alloc(0))]);
+}
 
 describe("stored upload access", () => {
   test("returns a readable file, a clear missing-file 404, and a storage 503", async () => {
@@ -26,6 +47,15 @@ describe("stored upload access", () => {
 });
 
 describe("file upload validation", () => {
+  test("accepts bounded 256 by 192 PNG thumbnails and rejects other dimensions", async () => {
+    await expect(validateThumbnail(new File([thumbnailPng()], "thumb.png", { type: "image/png" }))).resolves.toBeInstanceOf(Uint8Array);
+    await expect(validateThumbnail(new File([thumbnailPng(512, 384)], "thumb.png", { type: "image/png" }))).rejects.toThrow("ไม่ถูกต้อง");
+    await expect(validateThumbnail(new File([thumbnailPng(256, 192, Buffer.from("not a zlib stream"))], "thumb.png", { type: "image/png" }))).rejects.toThrow("ไม่ถูกต้อง");
+    const brokenCrc = thumbnailPng(); brokenCrc[brokenCrc.length - 1] ^= 1;
+    await expect(validateThumbnail(new File([brokenCrc], "thumb.png", { type: "image/png" }))).rejects.toThrow("ไม่ถูกต้อง");
+    await expect(validateThumbnail(new File([new Uint8Array(256 * 1024 + 1)], "thumb.png", { type: "image/png" }))).rejects.toThrow("256 KB");
+  });
+
   test("accepts a PDF worksheet by its content signature", async () => {
     const file = new File(["%PDF-1.7\nworksheet"], "lesson.pdf", { type: "text/plain" });
     await expect(validateUpload(file, "worksheet")).resolves.toEqual({ mediaType: "application/pdf", originalName: "lesson.pdf" });

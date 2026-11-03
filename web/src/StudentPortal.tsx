@@ -1,11 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useState, type FormEvent } from "react";
 import { api } from "./api";
 import { StudentAttendance } from "./StudentAttendance";
+import { FileThumbnail } from "./FileThumbnail";
+import { generateThumbnail } from "./thumbnail-jobs";
 
 const ModelPreview = lazy(() => import("./ModelPreview"));
 export type StudentUser = { id: string; username: string; displayName: string; role: "student" };
-type Assignment = { assignmentId: string; classroomId: string; classroomName: string; title: string; instructions: string; submissionCount: number };
-type StudentFile = { id: string; kind: "worksheet" | "model" | "submission"; originalName: string; mediaType: string; sizeBytes: number | string; createdAt: string; studentSubmission: boolean };
+type Assignment = { assignmentId: string; classroomId: string; classroomName: string; title: string; instructions: string; submissionCount: number; publishedScore: number | string | null; publishedMaxScore: number | string | null; publishedFeedback: string | null; publishedAt: string | null; newWork: boolean };
+type StudentFile = { id: string; kind: "worksheet" | "model" | "submission"; originalName: string; mediaType: string; sizeBytes: number | string; createdAt: string; studentSubmission: boolean; thumbnailAvailable: boolean };
 const uploadTypes = ".pdf,.png,.jpg,.jpeg,.doc,.docx,.stl,.obj";
 
 export function StudentPortal({ user, logout }: { user: StudentUser; logout: () => void }) {
@@ -48,7 +50,9 @@ export function StudentPortal({ user, logout }: { user: StudentUser; logout: () 
     try {
       for (const file of picked) {
         const body = new FormData(); body.set("file", file);
-        await api(`/student/classrooms/${selected.classroomId}/assignments/${selected.assignmentId}/files`, { method: "POST", body });
+        const uploadedFile = await api<{ id: string; mediaType: string }>(`/student/classrooms/${selected.classroomId}/assignments/${selected.assignmentId}/files`, { method: "POST", body });
+        void generateThumbnail({ id: uploadedFile.id, originalName: file.name, mediaType: uploadedFile.mediaType },
+          "/api/student/files/" + uploadedFile.id + "/content", "/student/files/" + uploadedFile.id + "/thumbnail", new AbortController().signal, file).catch(() => {});
         uploaded++;
       }
       input.value = "";
@@ -67,6 +71,7 @@ export function StudentPortal({ user, logout }: { user: StudentUser; logout: () 
         {loading ? <p className="inline-loading"><i className="spinner"/>กำลังโหลดงาน…</p> : assignments.length ? <div className="assignment-list">{assignments.map((assignment) => <div className="assignment-row" key={assignment.assignmentId}><button className={"assignment-select " + (assignment.assignmentId === selectedId ? "selected" : "")} onClick={() => setSelectedId(assignment.assignmentId)}><strong>{assignment.title}</strong><small>{assignment.classroomName} · ส่งแล้ว {assignment.submissionCount} ไฟล์</small></button>{assignment.assignmentId === selectedId && <span className="assignment-marker">●</span>}</div>)}</div> : <p className="assignment-empty muted">ยังไม่มีงานที่เปิดอยู่</p>}
       </section>
       {selected && <section className="panel"><header className="panel-heading"><div><p className="eyebrow">{selected.classroomName}</p><h2>{selected.title}</h2>{selected.instructions && <p className="muted assignment-instructions">{selected.instructions}</p>}</div></header>
+        {selected.publishedScore !== null && selected.publishedScore !== undefined && <div className="student-assessment"><strong>คะแนน: {Number(selected.publishedScore)} / {Number(selected.publishedMaxScore)}</strong>{selected.publishedFeedback && <p>{selected.publishedFeedback}</p>}{selected.newWork && <small>มีไฟล์งานใหม่รอครูตรวจ</small>}</div>}
         <form className="work-upload" onSubmit={(event) => void upload(event)}><label className="work-file-input">เลือกไฟล์งาน<input name="studentFiles" type="file" accept={uploadTypes} multiple required/></label><button className="button button-primary" disabled={busy}>{busy ? "กำลังส่งงาน…" : "ส่งไฟล์"}</button><small>PDF, รูปภาพ, Word, STL หรือ OBJ · ไม่เกิน 50 MB ต่อไฟล์</small></form>
         <div className="student-submission-groups"><h3>ใบงานและคำชี้แจง</h3>{files.filter((file) => file.kind === "worksheet").length ? files.filter((file) => file.kind === "worksheet").map((file) => <FileRow key={file.id} file={file} onPreview={setPreview}/>) : <p className="muted">ครูยังไม่ได้แนบใบงาน</p>}<h3>งานที่ส่งแล้ว</h3>{files.filter((file) => file.kind !== "worksheet").length ? files.filter((file) => file.kind !== "worksheet").map((file) => <FileRow key={file.id} file={file} onPreview={setPreview}/>) : <p className="muted">ยังไม่ได้ส่งงานนี้</p>}</div>
       </section>}
@@ -76,10 +81,10 @@ export function StudentPortal({ user, logout }: { user: StudentUser; logout: () 
 }
 
 function FileRow({ file, onPreview }: { file: StudentFile; onPreview: (file: StudentFile) => void }) {
-  const model = file.kind === "model";
+  const model = file.mediaType.startsWith("model/");
   const icon = model ? "3D" : file.mediaType.startsWith("image/") ? "IMG" : file.mediaType.includes("word") ? "DOC" : "PDF";
   const content = "/api/student/files/" + file.id + "/content";
-  return <article className="work-file"><span className={"file-kind " + (model ? "model" : "")}>{icon}</span><div className="work-file-copy"><strong>{file.originalName}</strong><small>{file.studentSubmission ? "ส่งโดยคุณ · " : file.kind === "worksheet" ? "ไฟล์จากครู · " : "ครูอัปโหลดให้คุณ · "}{formatDate(file.createdAt)} · {formatBytes(Number(file.sizeBytes))}</small></div><div className="work-file-actions">{model && <button className="text-button" onClick={() => onPreview(file)}>แสดงตัวอย่าง</button>}<a className="text-button" href={content} target={file.mediaType.startsWith("image/") || file.mediaType === "application/pdf" ? "_blank" : undefined} rel="noreferrer" download={file.mediaType.startsWith("image/") || file.mediaType === "application/pdf" ? undefined : true}>{model ? "ดาวน์โหลด" : "เปิดไฟล์"}</a></div></article>;
+  return <article className="work-file"><FileThumbnail file={file} student onPreview={() => onPreview(file)}/><div className="work-file-copy"><strong>{file.originalName}</strong><small>{file.studentSubmission ? "ส่งโดยคุณ · " : file.kind === "worksheet" ? "ไฟล์จากครู · " : "ครูอัปโหลดให้คุณ · "}{formatDate(file.createdAt)} · {formatBytes(Number(file.sizeBytes))}</small></div><div className="work-file-actions">{model && <button className="text-button" onClick={() => onPreview(file)}>แสดงตัวอย่าง</button>}<a className="text-button" href={content} target={file.mediaType.startsWith("image/") || file.mediaType === "application/pdf" ? "_blank" : undefined} rel="noreferrer" download={file.mediaType.startsWith("image/") || file.mediaType === "application/pdf" ? undefined : true}>{model ? "ดาวน์โหลด" : "เปิดไฟล์"}</a></div></article>;
 }
 
 function formatDate(value: string) {

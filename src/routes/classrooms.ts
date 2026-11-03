@@ -5,7 +5,7 @@ import { sql } from "../db/client";
 import { requireActor, type Actor } from "../auth/session";
 import { HttpError } from "../http-error";
 import { bangkokToday, checkRequestOrigin, cleanText, normalizeEmail, studentEmailForCode, validCalendarDate } from "../security";
-import { uploadRoot } from "../file-storage";
+import { uploadRoot, uploadThumbnailPath } from "../file-storage";
 
 async function ownedClass(actor: Actor, classroomId: string, includeArchived = false) {
   const [room] = await sql<{ id: string; name: string; archived: boolean }[]>`
@@ -152,7 +152,7 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
   .delete("/classrooms/:classroomId/students/:studentId", async ({ params, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
-    const staged: { path: string; tombstone: string; storageName: string }[] = [];
+    const staged: { path: string; tombstone: string; fileId: string }[] = [];
     try {
       await sql.begin(async (tx) => {
         await tx`SELECT pg_advisory_xact_lock(870010022)`;
@@ -162,14 +162,16 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
           FOR UPDATE OF s
         `;
         if (!student) throw new HttpError(404, "ไม่พบนักเรียนนี้");
-        const files = await tx<{ storageName: string }[]>`
-          SELECT storage_name AS "storageName" FROM classroom.files
+        const files = await tx<{ id: string; storageName: string; hasThumbnail: boolean }[]>`
+          SELECT id, storage_name AS "storageName", thumbnail_size_bytes IS NOT NULL AS "hasThumbnail" FROM classroom.files
           WHERE classroom_id = ${params.classroomId} AND student_id = ${params.studentId} FOR UPDATE
         `;
         for (const file of files) {
-          const path = resolve(uploadRoot(), file.storageName);
-          try { await rename(path, path + ".deleting"); staged.push({ path, tombstone: path + ".deleting", storageName: file.storageName }); }
-          catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; }
+          const paths = [resolve(uploadRoot(), file.storageName), ...(file.hasThumbnail ? [uploadThumbnailPath(file.id)] : [])];
+          for (const path of paths) {
+            try { await rename(path, path + ".deleting"); staged.push({ path, tombstone: path + ".deleting", fileId: file.id }); }
+            catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; }
+          }
         }
         await tx`DELETE FROM classroom.attendance WHERE classroom_id = ${params.classroomId} AND student_id = ${params.studentId}`;
         await tx`DELETE FROM classroom.attendance_presence WHERE classroom_id = ${params.classroomId} AND student_id = ${params.studentId}`;
@@ -180,7 +182,7 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
     } catch (error) {
       for (const file of staged) {
         try {
-          const [record] = await sql`SELECT id FROM classroom.files WHERE storage_name = ${file.storageName}`;
+          const [record] = await sql`SELECT id FROM classroom.files WHERE id = ${file.fileId}`;
           if (record) await rename(file.tombstone, file.path).catch(() => {});
           else await rm(file.tombstone, { force: true }).catch(() => {});
         } catch { /* Startup reconciliation resolves staged files if the transaction result is unknown. */ }
