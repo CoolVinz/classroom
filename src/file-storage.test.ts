@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { deflateSync } from "node:zlib";
+import sharp from "sharp";
 import { storedFilePath, validateStudentUpload, validateThumbnail, validateUpload } from "./file-storage";
 
 function pngChunk(type: string, data: Buffer) {
@@ -47,8 +48,11 @@ describe("stored upload access", () => {
 });
 
 describe("file upload validation", () => {
-  test("accepts bounded 256 by 192 PNG thumbnails and rejects other dimensions", async () => {
-    await expect(validateThumbnail(new File([thumbnailPng()], "thumb.png", { type: "image/png" }))).resolves.toBeInstanceOf(Uint8Array);
+  test("converts bounded 256 by 192 PNG thumbnails to validated WebP", async () => {
+    const result = await validateThumbnail(new File([thumbnailPng()], "thumb.png", { type: "image/png" }));
+    expect(result).toBeInstanceOf(Uint8Array);
+    expect(result.byteLength).toBeLessThan(thumbnailPng().byteLength);
+    expect(await sharp(result).metadata()).toMatchObject({ format: "webp", width: 256, height: 192 });
     await expect(validateThumbnail(new File([thumbnailPng(512, 384)], "thumb.png", { type: "image/png" }))).rejects.toThrow("ไม่ถูกต้อง");
     await expect(validateThumbnail(new File([thumbnailPng(256, 192, Buffer.from("not a zlib stream"))], "thumb.png", { type: "image/png" }))).rejects.toThrow("ไม่ถูกต้อง");
     const brokenCrc = thumbnailPng(); brokenCrc[brokenCrc.length - 1] ^= 1;

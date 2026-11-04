@@ -337,12 +337,12 @@ export const courseworkRoutes = new Elysia({ prefix: "/api" })
   })
   .get("/files/:fileId/thumbnail", async ({ params, request }) => {
     const actor = await requireActor(request);
-    const [record] = await sql`SELECT f.thumbnail_size_bytes FROM classroom.files f
+    const [record] = await sql`SELECT f.thumbnail_size_bytes, f.thumbnail_media_type AS "thumbnailMediaType" FROM classroom.files f
       JOIN classroom.classrooms c ON c.id = f.classroom_id
       WHERE f.id = ${params.fileId} AND c.owner_id = ${actor.id}`;
-    if (!record || record.thumbnail_size_bytes === null) throw new HttpError(404, "ยังไม่มีภาพตัวอย่าง");
-    const path = await storedFilePath("thumbnails/" + params.fileId + ".png");
-    return new Response(Bun.file(path), { headers: { "content-type": "image/png", "cache-control": "private, no-store", "x-content-type-options": "nosniff" } });
+    if (!record || record.thumbnail_size_bytes === null || !record.thumbnailMediaType) throw new HttpError(404, "ยังไม่มีภาพตัวอย่าง");
+    const path = await storedFilePath("thumbnails/" + params.fileId + (record.thumbnailMediaType === "image/webp" ? ".webp" : ".png"));
+    return new Response(Bun.file(path), { headers: { "content-type": record.thumbnailMediaType, "cache-control": "private, no-store", "x-content-type-options": "nosniff" } });
   })
   .put("/files/:fileId/thumbnail", async ({ params, body, request }) => {
     checkRequestOrigin(request);
@@ -357,8 +357,8 @@ export const courseworkRoutes = new Elysia({ prefix: "/api" })
     try {
       const [record] = await sql.begin(async (tx) => {
         await tx`SELECT pg_advisory_xact_lock(870010022)`;
-        const [file] = await tx<{ storageName: string; thumbnail: boolean }[]>`
-          SELECT f.storage_name AS "storageName", f.thumbnail_size_bytes IS NOT NULL AS thumbnail FROM classroom.files f
+        const [file] = await tx<{ storageName: string; thumbnailMediaType: "image/png" | "image/webp" | null }[]>`
+          SELECT f.storage_name AS "storageName", f.thumbnail_media_type AS "thumbnailMediaType" FROM classroom.files f
           JOIN classroom.classrooms c ON c.id = f.classroom_id
           WHERE f.id = ${params.fileId} AND c.owner_id = ${actor.id} FOR UPDATE OF f
         `;
@@ -368,8 +368,8 @@ export const courseworkRoutes = new Elysia({ prefix: "/api" })
         staged.push({ path, tombstone });
         try { await rename(path, tombstone); }
         catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; }
-        if (file.thumbnail) {
-          const thumbnail = uploadThumbnailPath(params.fileId);
+        if (file.thumbnailMediaType) {
+          const thumbnail = uploadThumbnailPath(params.fileId, file.thumbnailMediaType);
           const thumbnailTombstone = thumbnail + ".deleting";
           staged.push({ path: thumbnail, tombstone: thumbnailTombstone });
           try { await rename(thumbnail, thumbnailTombstone); }

@@ -141,16 +141,16 @@ export const studentCourseworkRoutes = new Elysia({ prefix: "/api/student" })
   })
   .get("/files/:fileId/thumbnail", async ({ params, request }) => {
     const actor = await requireStudent(request);
-    const [record] = await sql`SELECT f.thumbnail_size_bytes FROM classroom.files f
+    const [record] = await sql`SELECT f.thumbnail_size_bytes, f.thumbnail_media_type AS "thumbnailMediaType" FROM classroom.files f
       JOIN classroom.classrooms c ON c.id = f.classroom_id
       JOIN classroom.assignments a ON a.id = f.assignment_id
       WHERE f.id = ${params.fileId} AND c.archived_at IS NULL AND a.archived_at IS NULL
         AND EXISTS (SELECT 1 FROM classroom.students s
           WHERE s.account_id = ${actor.id} AND s.classroom_id = f.classroom_id AND s.archived_at IS NULL
             AND (f.kind = 'worksheet' OR f.student_id = s.id))`;
-    if (!record || record.thumbnail_size_bytes === null) throw new HttpError(404, "ยังไม่มีภาพตัวอย่าง");
-    const path = await storedFilePath("thumbnails/" + params.fileId + ".png");
-    return new Response(Bun.file(path), { headers: { "content-type": "image/png", "cache-control": "private, no-store", "x-content-type-options": "nosniff" } });
+    if (!record || record.thumbnail_size_bytes === null || !record.thumbnailMediaType) throw new HttpError(404, "ยังไม่มีภาพตัวอย่าง");
+    const path = await storedFilePath("thumbnails/" + params.fileId + (record.thumbnailMediaType === "image/webp" ? ".webp" : ".png"));
+    return new Response(Bun.file(path), { headers: { "content-type": record.thumbnailMediaType, "cache-control": "private, no-store", "x-content-type-options": "nosniff" } });
   })
   .put("/files/:fileId/thumbnail", async ({ params, body, request }) => {
     checkRequestOrigin(request);

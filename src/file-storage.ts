@@ -2,6 +2,7 @@ import { access, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { resolve } from "node:path";
 import { inflateSync } from "node:zlib";
+import sharp from "sharp";
 import { HttpError } from "./http-error";
 
 export type UploadKind = "worksheet" | "model";
@@ -25,7 +26,7 @@ function positiveLimit(name: string, fallback: number) {
 export const maxUploadBytes = () => positiveLimit("UPLOAD_MAX_FILE_BYTES", 50 * 1024 * 1024);
 export const maxStoredBytes = () => positiveLimit("UPLOAD_MAX_TOTAL_BYTES", 5 * 1024 * 1024 * 1024);
 export const uploadRoot = () => resolve(process.env.UPLOAD_DIR ?? (process.env.NODE_ENV === "production" ? "/app/uploads" : "./uploads"));
-export const uploadThumbnailPath = (fileId: string) => resolve(uploadRoot(), "thumbnails", fileId + ".png");
+export const uploadThumbnailPath = (fileId: string, mediaType: "image/png" | "image/webp") => resolve(uploadRoot(), "thumbnails", fileId + (mediaType === "image/webp" ? ".webp" : ".png"));
 
 function pngCrc32(bytes: Uint8Array) {
   let crc = 0xffffffff;
@@ -82,22 +83,29 @@ export async function validateThumbnail(file: File) {
     if (pixels.length !== 192 * (256 * 4 + 1)) throw new Error("invalid dimensions");
     for (let row = 0; row < 192; row++) if (pixels[row * (256 * 4 + 1)] > 4) throw new Error("invalid scanline");
   } catch { throw new HttpError(422, "ภาพตัวอย่างไม่ถูกต้อง"); }
-  return bytes;
+  try {
+    const webp = await sharp(bytes, { failOn: "error", limitInputPixels: 256 * 192 }).webp({ quality: 80 }).toBuffer();
+    const metadata = await sharp(webp).metadata();
+    if (metadata.format !== "webp" || metadata.width !== 256 || metadata.height !== 192) throw new Error("invalid preview");
+    return webp;
+  } catch {
+    throw new HttpError(422, "ภาพตัวอย่างไม่ถูกต้อง");
+  }
 }
 
 export async function saveFileThumbnail(fileId: string, bytes: Uint8Array, role: "teacher" | "student", accountId: string) {
   const root = uploadRoot();
   const folder = resolve(root, "thumbnails");
   await mkdir(folder, { recursive: true, mode: 0o750 });
-  const path = uploadThumbnailPath(fileId);
+  const path = uploadThumbnailPath(fileId, "image/webp");
   const temporary = path + ".upload";
   let renamed = false;
   const { sql } = await import("./db/client");
   try {
     await sql.begin(async (tx) => {
       await tx`SELECT pg_advisory_xact_lock(870010022)`;
-      const [file] = await tx<{ id: string; thumbnailSizeBytes: number | null }[]>`
-        SELECT f.id, f.thumbnail_size_bytes AS "thumbnailSizeBytes"
+      const [file] = await tx<{ id: string; thumbnailSizeBytes: number | null; thumbnailMediaType: "image/png" | "image/webp" | null }[]>`
+        SELECT f.id, f.thumbnail_size_bytes AS "thumbnailSizeBytes", f.thumbnail_media_type AS "thumbnailMediaType"
         FROM classroom.files f
         WHERE f.id = ${fileId} AND (
           (${role} = 'teacher' AND EXISTS (
@@ -114,10 +122,11 @@ export async function saveFileThumbnail(fileId: string, bytes: Uint8Array, role:
       `;
       if (!file) throw new HttpError(404, "ไม่พบไฟล์นี้");
       if (file.thumbnailSizeBytes !== null) {
-        try { await storedFilePath("thumbnails/" + fileId + ".png"); return; }
+        const mediaType = file.thumbnailMediaType ?? "image/png";
+        try { await storedFilePath("thumbnails/" + fileId + (mediaType === "image/webp" ? ".webp" : ".png")); return; }
         catch (error) {
           if (!(error instanceof HttpError) || error.status !== 404) throw error;
-          await tx`UPDATE classroom.files SET thumbnail_size_bytes = NULL WHERE id = ${fileId}`;
+          await tx`UPDATE classroom.files SET thumbnail_size_bytes = NULL, thumbnail_media_type = NULL WHERE id = ${fileId}`;
         }
       }
       const [usage] = await tx<{ used: string }[]>`
@@ -127,14 +136,14 @@ export async function saveFileThumbnail(fileId: string, bytes: Uint8Array, role:
       await Bun.write(temporary, bytes);
       await rename(temporary, path);
       renamed = true;
-      await tx`UPDATE classroom.files SET thumbnail_size_bytes = ${bytes.byteLength} WHERE id = ${fileId}`;
+      await tx`UPDATE classroom.files SET thumbnail_size_bytes = ${bytes.byteLength}, thumbnail_media_type = 'image/webp' WHERE id = ${fileId}`;
     });
   } catch (error) {
     await rm(temporary, { force: true }).catch(() => {});
     if (renamed) {
       try {
-        const [record] = await sql`SELECT thumbnail_size_bytes FROM classroom.files WHERE id = ${fileId}`;
-        if (!record || record.thumbnail_size_bytes === null) await rm(path, { force: true });
+        const [record] = await sql`SELECT thumbnail_media_type FROM classroom.files WHERE id = ${fileId}`;
+        if (!record || record.thumbnail_media_type !== "image/webp") await rm(path, { force: true });
       } catch { /* Startup reconciliation removes orphaned previews when the commit result is unknown. */ }
     }
     throw error;
@@ -170,11 +179,11 @@ export async function ensureUploadRoot() {
   await mkdir(thumbnails, { recursive: true, mode: 0o750 });
   const entries = await readdir(root, { withFileTypes: true });
   const { sql } = await import("./db/client");
-  const records = await sql<{ storageName: string; id: string; thumbnailSizeBytes: number | null }[]>`
-    SELECT storage_name AS "storageName", id, thumbnail_size_bytes AS "thumbnailSizeBytes" FROM classroom.files
+  const records = await sql<{ storageName: string; id: string; thumbnailSizeBytes: number | null; thumbnailMediaType: "image/png" | "image/webp" | null }[]>`
+    SELECT storage_name AS "storageName", id, thumbnail_size_bytes AS "thumbnailSizeBytes", thumbnail_media_type AS "thumbnailMediaType" FROM classroom.files
   `;
   const referenced = new Set(records.map((record) => record.storageName));
-  const referencedThumbnails = new Set(records.filter((record) => record.thumbnailSizeBytes !== null).map((record) => record.id + ".png"));
+  const referencedThumbnails = new Set(records.filter((record) => record.thumbnailSizeBytes !== null && record.thumbnailMediaType).map((record) => record.id + (record.thumbnailMediaType === "image/webp" ? ".webp" : ".png")));
   const expired = Date.now() - 24 * 60 * 60 * 1000;
   for (const entry of entries) {
     if (!entry.isFile()) continue;
@@ -196,13 +205,13 @@ export async function ensureUploadRoot() {
     const path = resolve(thumbnails, entry.name);
     const fileStat = await stat(path);
     if (fileStat.mtimeMs > expired) continue;
-    const deleting = entry.name.match(/^([0-9a-f-]{36})\.png\.deleting$/);
+    const deleting = entry.name.match(/^([0-9a-f-]{36}\.(?:png|webp))\.deleting$/);
     if (deleting) {
-      const name = deleting[1] + ".png";
+      const name = deleting[1];
       if (referencedThumbnails.has(name)) {
         try { await access(resolve(thumbnails, name)); } catch { await rename(path, resolve(thumbnails, name)); }
       } else await rm(path, { force: true });
-    } else if (/^[0-9a-f-]{36}(?:\.png(?:\.upload)?)?$/.test(entry.name) && !referencedThumbnails.has(entry.name)) {
+    } else if (/^[0-9a-f-]{36}\.(?:png|webp)(?:\.upload)?$/.test(entry.name) && !referencedThumbnails.has(entry.name)) {
       await rm(path, { force: true });
     }
   }

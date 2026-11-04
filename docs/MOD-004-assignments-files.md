@@ -22,8 +22,9 @@ Each assignment has an editable maximum score (default 100). Scores allow zero a
 - Production storage defaults to `/app/uploads`; development defaults to `./uploads`. Container storage must be mounted persistently and backed up separately.
 - Content requests check the configured upload directory and file before streaming. Authorized requests receive a clear `404` when an original is missing and a safe `503` when storage is unavailable; existing teacher/student authorization still runs first.
 - The preview uses neutral geometry and accepts up to 500,000 triangles, with a 10-second parse limit. Complex models remain downloadable.
-- Browser-generated 256 × 192 PNG thumbnails for STL/OBJ and PNG/JPEG files are saved beside originals in persistent storage and reused directly on later visits. Missing legacy thumbnails are generated lazily when visible; PDF and Word files use document icons. Model thumbnails render one at a time and open the interactive viewer when clicked. A failed thumbnail does not block upload or download.
-- Thumbnail read/write routes enforce the same classroom ownership and active student membership as original files. The server validates PNG checksums and decoded dimensions, and limits each thumbnail to 256 KiB. Thumbnail bytes count toward the total storage quota.
+- Browser-generated 256 × 192 previews for STL/OBJ and PNG/JPEG files are saved beside originals and reused directly on later visits. New previews are stored as quality-80 WebP; existing PNG previews remain readable. Missing previews are generated lazily when visible; PDF and Word files use document icons. Model thumbnails render one at a time and open the interactive viewer when clicked. A failed thumbnail does not block upload or download.
+- Thumbnail read/write routes enforce the same classroom ownership and active student membership as original files. The server validates PNG checksums and decoded dimensions, limits incoming images to 256 KiB, and converts them to WebP with sharp. Thumbnail bytes count toward the total storage quota.
+- Saved thumbnail image URLs use the authenticated `/api` routes directly; a saved model preview is displayed without fetching or rendering its original model again.
 - Thumbnails share the `/app/uploads/thumbnails` persistent volume. File and student removal stage thumbnails with originals, restore them on database rollback, and let startup reconciliation finish interrupted cleanup.
 - Assignment archival hides work from students while preserving associated files. Earlier models and submissions are never replaced by later uploads.
 - Removing a student from one classroom removes their files only in that classroom; shared Google accounts and records in other classes remain. Individual-file removal and student removal coordinate with uploads, move stored content to `.deleting` before database commit, restore staged content on rollback, and unlink after commit. Missing physical files do not block record deletion.
@@ -46,7 +47,7 @@ Interactive model preview: web/src/ModelPreview.tsx
 Teacher assignments, files, and assessments: src/routes/coursework.ts
 Student submissions and published results: src/routes/student-coursework.ts, web/src/StudentPortal.tsx
 Upload and thumbnail validation/storage: src/file-storage.ts
-Database: src/db/migrations/002_assignments_files.sql, src/db/migrations/003_student_submissions.sql, src/db/migrations/007_thumbnails_assessments.sql
+Database: src/db/migrations/002_assignments_files.sql, src/db/migrations/003_student_submissions.sql, src/db/migrations/007_thumbnails_assessments.sql, src/db/migrations/008_thumbnail_media_type.sql
 Migration runner: src/db/bootstrap.ts
 Tests: web/src/model-view.test.ts, src/file-storage.test.ts, src/student-workflow.test.ts (PostgreSQL integration)
 ```

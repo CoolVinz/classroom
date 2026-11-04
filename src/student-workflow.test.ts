@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { OAuth2Client } from "google-auth-library";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readdir, rm } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, utimes } from "node:fs/promises";
 import { resolve } from "node:path";
 import { deflateSync } from "node:zlib";
 import { Elysia } from "elysia";
@@ -52,6 +52,7 @@ describe("student submission API", () => {
       import("./routes/coursework"), import("./routes/student-coursework"), import("./routes/attendance-schedule"), import("./routes/student-attendance"),
       import("./error-handler"),
     ]);
+    const { ensureUploadRoot } = await import("./file-storage");
     const app = new Elysia().onError(handleAppError).use(authRoutes).use(studentAuthRoutes).use(classroomRoutes).use(attendanceScheduleRoutes).use(courseworkRoutes).use(studentCourseworkRoutes).use(studentAttendanceRoutes);
     const teacherId = randomUUID(); const accountId = randomUUID();
     const roomA = randomUUID(); const roomB = randomUUID(); const emptyRoom = randomUUID();
@@ -401,16 +402,26 @@ describe("student submission API", () => {
       expect(savedThumbnail.status).toBe(200);
       const teacherThumbnail = await app.handle(new Request(`http://localhost/api/files/${teacherFile}/thumbnail`, { headers: teacherHeaders }));
       expect(teacherThumbnail.status).toBe(200);
-      expect(teacherThumbnail.headers.get("content-type")).toBe("image/png");
-      expect(await (await teacherThumbnail.arrayBuffer()).byteLength).toBeGreaterThan(100);
+      expect(teacherThumbnail.headers.get("content-type")).toBe("image/webp");
+      expect(await (await teacherThumbnail.arrayBuffer()).byteLength).toBeGreaterThan(0);
+      expect(await Bun.file(resolve(uploadDir, "thumbnails", teacherFile + ".webp")).exists()).toBe(true);
+      expect((await app.handle(new Request(`http://localhost/api/files/${teacherFile}/content`, { headers: teacherHeaders }))).status).toBe(404);
+      const interruptedThumbnail = resolve(uploadDir, "thumbnails", teacherFile + ".webp.deleting");
+      await rename(resolve(uploadDir, "thumbnails", teacherFile + ".webp"), interruptedThumbnail);
+      const oldTime = new Date(Date.now() - 48 * 60 * 60 * 1000);
+      await utimes(interruptedThumbnail, oldTime, oldTime);
+      await ensureUploadRoot();
+      expect(await Bun.file(resolve(uploadDir, "thumbnails", teacherFile + ".webp")).exists()).toBe(true);
       expect((await app.handle(new Request(`http://localhost/api/files/${teacherFile}/thumbnail`, { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).status).toBe(404);
-      expect((await app.handle(new Request(`http://localhost/api/student/files/${teacherFile}/thumbnail`, { headers: studentHeaders }))).status).toBe(200);
+      const studentThumbnail = await app.handle(new Request(`http://localhost/api/student/files/${teacherFile}/thumbnail`, { headers: studentHeaders }));
+      expect(studentThumbnail.status).toBe(200);
+      expect(studentThumbnail.headers.get("content-type")).toBe("image/webp");
       expect((await app.handle(new Request(`http://localhost/api/student/files/${teacherFile}/thumbnail`, { method: "PUT", headers: studentHeaders, body: thumbnailBody() }))).status).toBe(200);
       expect((await app.handle(new Request(`http://localhost/api/files/${teacherFile}/thumbnail`, { headers: studentHeaders }))).status).toBe(401);
-      expect(await Bun.file(resolve(uploadDir, "thumbnails", teacherFile + ".png")).exists()).toBe(true);
+      expect(await Bun.file(resolve(uploadDir, "thumbnails", teacherFile + ".webp")).exists()).toBe(true);
       const deleteWorksheet = await app.handle(new Request(`http://localhost/api/files/${teacherFile}`, { method: "DELETE", headers: teacherHeaders }));
       expect(deleteWorksheet.status).toBe(200);
-      expect(await Bun.file(resolve(uploadDir, "thumbnails", teacherFile + ".png")).exists()).toBe(false);
+      expect(await Bun.file(resolve(uploadDir, "thumbnails", teacherFile + ".webp")).exists()).toBe(false);
       expect((await app.handle(new Request(`http://localhost/api/files/${teacherFile}/thumbnail`, { headers: teacherHeaders }))).status).toBe(404);
       expect((await app.handle(new Request(`http://localhost/api/files/${teacherFile}/content`, { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).status).toBe(404);
       expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/students`, { headers: studentHeaders }))).status).toBe(401);
@@ -549,11 +560,14 @@ describe("student submission API", () => {
       await Bun.write(resolve(uploadDir, "thumbnails", removedFileId + ".png"), removedThumbnail);
       await sql.begin(async (tx) => {
         await tx`INSERT INTO classroom.attendance (classroom_id, student_id, attendance_date, status) VALUES (${roomB}, ${studentC}, '2025-01-15', 'present')`;
-        await tx`INSERT INTO classroom.files (id, classroom_id, assignment_id, student_id, uploaded_by, kind, original_name, storage_name, media_type, size_bytes, thumbnail_size_bytes)
-          VALUES (${removedFileId}, ${roomB}, ${assignmentB}, ${studentC}, ${teacherId}, 'model', 'student.stl', ${storageName}, 'model/stl', 23, ${removedThumbnail.byteLength})`;
+        await tx`INSERT INTO classroom.files (id, classroom_id, assignment_id, student_id, uploaded_by, kind, original_name, storage_name, media_type, size_bytes, thumbnail_size_bytes, thumbnail_media_type)
+          VALUES (${removedFileId}, ${roomB}, ${assignmentB}, ${studentC}, ${teacherId}, 'model', 'student.stl', ${storageName}, 'model/stl', 23, ${removedThumbnail.byteLength}, 'image/png')`;
         await tx`INSERT INTO classroom.files (id, classroom_id, assignment_id, student_id, uploaded_by, kind, original_name, storage_name, media_type, size_bytes)
           VALUES (${missingFileId}, ${roomB}, ${assignmentB}, ${studentC}, ${teacherId}, 'model', 'missing.stl', ${missingStorageName}, 'model/stl', 1)`;
       });
+      const legacyThumbnail = await app.handle(new Request(`http://localhost/api/files/${removedFileId}/thumbnail`, { headers: teacherHeaders }));
+      expect(legacyThumbnail.status).toBe(200);
+      expect(legacyThumbnail.headers.get("content-type")).toBe("image/png");
       const blockedTombstone = resolve(uploadDir, storageName + ".deleting");
       await mkdir(blockedTombstone);
       await Bun.write(resolve(blockedTombstone, "keep"), "block the staged rename");

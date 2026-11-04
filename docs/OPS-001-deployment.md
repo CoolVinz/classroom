@@ -18,7 +18,7 @@
 - The 2026-11-02 production audit found 70 file metadata records but an empty upload directory and no previous Classroom container or upload volume. The PostgreSQL backup preserves metadata only; missing originals must be re-uploaded. Do not delete those records automatically.
 - Persistent volumes survive container replacement but are not backups. Back up uploaded files off the VPS as well as PostgreSQL.
 - Before attaching a volume to an existing deployment, copy recoverable files from the running container into it under their existing storage UUIDs. A new empty mount hides the old container directory; mounting does not recover missing data.
-- The app applies numbered tracked migrations at startup. Migration `005_classroom_student_numbers.sql` adds classroom numbering; `006_scheduled_attendance.sql` adds timetable, dated lessons, attendance provenance, and visible-time records; `007_thumbnails_assessments.sql` adds saved-thumbnail metadata, assignment maximum scores, and private/published assessments. If `classroom` contains untracked objects, startup stops for inspection.
+- The app applies numbered tracked migrations at startup. Migration `005_classroom_student_numbers.sql` adds classroom numbering; `006_scheduled_attendance.sql` adds timetable, dated lessons, attendance provenance, and visible-time records; `007_thumbnails_assessments.sql` adds saved-thumbnail metadata, assignment maximum scores, and private/published assessments; `008_thumbnail_media_type.sql` records PNG/WebP thumbnail formats while retaining existing PNG files. If `classroom` contains untracked objects, startup stops for inspection.
 
 ## Runtime environment
 
@@ -58,7 +58,7 @@ OWNER_PASSWORD (first-owner setup only)
 
 ## Deploy and initialize
 
-Back up PostgreSQL and the upload volume before release because the app applies migrations on startup. Migration `007_thumbnails_assessments.sql` gives existing assignments a maximum score of 100 and leaves historical files without thumbnails; they are generated lazily when visible. After deployment, verify `/health/ready`, confirm migrations through `007_thumbnails_assessments` are tracked, and test teacher marking, student result privacy, and thumbnail persistence. Uploaded file contents need their own off-server backup. See [README deployment instructions](../README.md).
+Back up PostgreSQL and the upload volume before release because the app applies migrations on startup. Migration `007_thumbnails_assessments.sql` gives existing assignments a maximum score of 100 and leaves historical files without thumbnails; they are generated lazily when visible. Migration `008_thumbnail_media_type.sql` backfills existing saved previews as PNG without rewriting their files. After deployment, verify `/health/ready`, confirm migrations through `008_thumbnail_media_type` are tracked, and test teacher marking, student result privacy, and PNG/WebP thumbnail persistence. Uploaded file contents need their own off-server backup. See [README deployment instructions](../README.md).
 
 ## Open questions
 

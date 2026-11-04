@@ -162,12 +162,12 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
           FOR UPDATE OF s
         `;
         if (!student) throw new HttpError(404, "ไม่พบนักเรียนนี้");
-        const files = await tx<{ id: string; storageName: string; hasThumbnail: boolean }[]>`
-          SELECT id, storage_name AS "storageName", thumbnail_size_bytes IS NOT NULL AS "hasThumbnail" FROM classroom.files
+        const files = await tx<{ id: string; storageName: string; thumbnailMediaType: "image/png" | "image/webp" | null }[]>`
+          SELECT id, storage_name AS "storageName", thumbnail_media_type AS "thumbnailMediaType" FROM classroom.files
           WHERE classroom_id = ${params.classroomId} AND student_id = ${params.studentId} FOR UPDATE
         `;
         for (const file of files) {
-          const paths = [resolve(uploadRoot(), file.storageName), ...(file.hasThumbnail ? [uploadThumbnailPath(file.id)] : [])];
+          const paths = [resolve(uploadRoot(), file.storageName), ...(file.thumbnailMediaType ? [uploadThumbnailPath(file.id, file.thumbnailMediaType)] : [])];
           for (const path of paths) {
             try { await rename(path, path + ".deleting"); staged.push({ path, tombstone: path + ".deleting", fileId: file.id }); }
             catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; }
