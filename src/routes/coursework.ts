@@ -6,7 +6,7 @@ import { sql } from "../db/client";
 import { requireActor } from "../auth/session";
 import { HttpError } from "../http-error";
 import { checkRequestOrigin, cleanText, normalizeEmail, studentEmailForCode } from "../security";
-import { maxStoredBytes, saveFileThumbnail, storedFilePath, uploadRoot, uploadThumbnailPath, validateThumbnail, validateUpload, type UploadKind } from "../file-storage";
+import { deleteStoredFile, maxStoredBytes, saveFileThumbnail, storedFilePath, uploadRoot, validateThumbnail, validateUpload, type UploadKind } from "../file-storage";
 
 async function ownedClassroom(classroomId: string, ownerId: string, includeArchived = false) {
   const [room] = await sql<{ id: string }[]>`
@@ -41,7 +41,7 @@ export const courseworkRoutes = new Elysia({ prefix: "/api" })
     await ownedClassroom(params.classroomId, actor.id);
     return sql`
       SELECT a.id, a.title, a.instructions, a.max_score AS "maxScore", a.archived_at IS NOT NULL AS archived,
-        a.created_at AS "createdAt", COUNT(f.id)::int AS "fileCount"
+        a.created_at AS "createdAt", COUNT(f.id) FILTER (WHERE f.kind <> 'working')::int AS "fileCount"
       FROM classroom.assignments a
       LEFT JOIN classroom.files f ON f.assignment_id = a.id
       WHERE a.classroom_id = ${params.classroomId}
@@ -263,7 +263,7 @@ export const courseworkRoutes = new Elysia({ prefix: "/api" })
         AND (${query.kind ?? null}::text IS NULL OR f.kind = ${query.kind ?? null})
       ORDER BY f.created_at DESC
     `;
-  }, { query: t.Object({ studentId: t.Optional(t.String({ format: "uuid" })), kind: t.Optional(t.Union([t.Literal("worksheet"), t.Literal("model"), t.Literal("submission")])) }) })
+  }, { query: t.Object({ studentId: t.Optional(t.String({ format: "uuid" })), kind: t.Optional(t.Union([t.Literal("worksheet"), t.Literal("model"), t.Literal("submission"), t.Literal("working")])) }) })
   .post("/classrooms/:classroomId/files", async ({ params, body, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
@@ -353,45 +353,7 @@ export const courseworkRoutes = new Elysia({ prefix: "/api" })
   .delete("/files/:fileId", async ({ params, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
-    const staged: { path: string; tombstone: string }[] = [];
-    try {
-      const [record] = await sql.begin(async (tx) => {
-        await tx`SELECT pg_advisory_xact_lock(870010022)`;
-        const [file] = await tx<{ storageName: string; thumbnailMediaType: "image/png" | "image/webp" | null }[]>`
-          SELECT f.storage_name AS "storageName", f.thumbnail_media_type AS "thumbnailMediaType" FROM classroom.files f
-          JOIN classroom.classrooms c ON c.id = f.classroom_id
-          WHERE f.id = ${params.fileId} AND c.owner_id = ${actor.id} FOR UPDATE OF f
-        `;
-        if (!file) throw new HttpError(404, "ไม่พบไฟล์นี้");
-        const path = resolve(uploadRoot(), file.storageName);
-        const tombstone = path + ".deleting";
-        staged.push({ path, tombstone });
-        try { await rename(path, tombstone); }
-        catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; }
-        if (file.thumbnailMediaType) {
-          const thumbnail = uploadThumbnailPath(params.fileId, file.thumbnailMediaType);
-          const thumbnailTombstone = thumbnail + ".deleting";
-          staged.push({ path: thumbnail, tombstone: thumbnailTombstone });
-          try { await rename(thumbnail, thumbnailTombstone); }
-          catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; }
-        }
-        await tx`DELETE FROM classroom.files WHERE id = ${params.fileId}`;
-        return [file];
-      });
-      if (!record) throw new HttpError(404, "ไม่พบไฟล์นี้");
-    } catch (error) {
-      try {
-        const [record] = await sql`SELECT id FROM classroom.files WHERE id = ${params.fileId}`;
-        for (const file of staged) {
-          if (record) await rename(file.tombstone, file.path).catch(() => {});
-          else await rm(file.tombstone, { force: true }).catch(() => {});
-        }
-      } catch { /* Startup reconciliation resolves staged files if the transaction result is unknown. */ }
-      throw error;
-    }
-    const cleanup = await Promise.all(staged.map((file) => rm(file.tombstone, { force: true }).then(() => false, () => true)));
-    const cleanupPending = cleanup.some(Boolean);
-    return { ok: true, cleanupPending };
+    return deleteStoredFile(params.fileId, { teacherId: actor.id });
   })
   .post("/classrooms/:classroomId/roster/import", async ({ params, body, request }) => {
     checkRequestOrigin(request);

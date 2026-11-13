@@ -62,6 +62,7 @@ describe("student submission API", () => {
     let teacherToken = ""; let studentToken = ""; let otherTeacherToken = "";
     const otherTeacherId = randomUUID();
     let deleteTriggerName = ""; let deleteFunctionName = ""; let deleteTriggerInstalled = false;
+    let workingTriggerName = ""; let workingFunctionName = ""; let workingTriggerInstalled = false;
     let peerAccountId: string | null = null;
     const accountEmail = "student-" + accountId.slice(0, 8) + "@banjan.ac.th";
     const peerEmail = "peer-" + accountId.slice(0, 8) + "@banjan.ac.th";
@@ -441,6 +442,78 @@ describe("student submission API", () => {
       const modelUpload = await app.handle(new Request(`http://localhost/api/student/classrooms/${roomA}/assignments/${assignmentA}/files`, { method: "POST", headers: studentHeaders, body: modelForm }));
       expect(modelUpload.status).toBe(200);
       const uploadedModel = await modelUpload.json() as { id: string };
+
+      const workingPath = `/api/student/classrooms/${roomA}/assignments/${assignmentA}/working-file`;
+      const legacyBlend = Buffer.from("BLENDER-v300");
+      const workingForm = (name: string, bytes: Buffer, replaceFileId?: string) => {
+        const form = new FormData(); form.set("file", new File([Uint8Array.from(bytes)], name, { type: "application/octet-stream" }));
+        if (replaceFileId) form.set("replaceFileId", replaceFileId);
+        return form;
+      };
+      const rejectedBlendSubmission = await app.handle(new Request(`http://localhost/api/student/classrooms/${roomA}/assignments/${assignmentA}/files`, {
+        method: "POST", headers: studentHeaders, body: workingForm("scene.blend", legacyBlend),
+      }));
+      expect(rejectedBlendSubmission.status).toBe(422);
+      const firstWorking = await app.handle(new Request(`http://localhost${workingPath}`, { method: "PUT", headers: studentHeaders, body: workingForm("scene.blend", legacyBlend) }));
+      expect(firstWorking.status).toBe(200);
+      const firstWorkingData = await firstWorking.json() as { id: string; originalName: string; sizeBytes: number; cleanupPending: boolean };
+      expect(firstWorkingData).toMatchObject({ originalName: "scene.blend", sizeBytes: legacyBlend.byteLength, cleanupPending: false });
+      const peerFiles = await app.handle(new Request(`http://localhost/api/student/classrooms/${roomA}/assignments/${assignmentA}/files`, { headers: { cookie: peerSessionCookie } }));
+      expect((await peerFiles.json() as { id: string }[]).some((file) => file.id === firstWorkingData.id)).toBe(false);
+      expect((await app.handle(new Request(`http://localhost/api/student/files/${firstWorkingData.id}/content`, { headers: { cookie: peerSessionCookie } }))).status).toBe(404);
+      expect((await app.handle(new Request(`http://localhost/api/student/files/${firstWorkingData.id}`, { method: "DELETE", headers: { cookie: peerSessionCookie, origin: "http://localhost:3000" } }))).status).toBe(404);
+      const ownFiles = await app.handle(new Request(`http://localhost/api/student/classrooms/${roomA}/assignments/${assignmentA}/files`, { headers: studentHeaders }));
+      expect((await ownFiles.json() as { id: string; kind: string; studentSubmission: boolean; thumbnailAvailable: boolean }[]).find((file) => file.id === firstWorkingData.id))
+        .toMatchObject({ kind: "working", studentSubmission: false, thumbnailAvailable: false });
+      const workingRead = await app.handle(new Request(`http://localhost/api/student/files/${firstWorkingData.id}/content`, { headers: studentHeaders }));
+      expect(workingRead.status).toBe(200);
+      expect(Buffer.from(await workingRead.arrayBuffer())).toEqual(legacyBlend);
+      expect((await app.handle(new Request(`http://localhost/api/files/${firstWorkingData.id}/content`, { headers: teacherHeaders }))).status).toBe(200);
+      const workingInTeacherList = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/assignments/${assignmentA}/files?studentId=${studentA}`, { headers: teacherHeaders }));
+      expect((await workingInTeacherList.json() as { id: string; kind: string; studentSubmission: boolean }[]).find((file) => file.id === firstWorkingData.id)).toMatchObject({ kind: "working", studentSubmission: false });
+      const assignmentWithWorking = await app.handle(new Request("http://localhost/api/student/assignments", { headers: studentHeaders }));
+      expect((await assignmentWithWorking.json() as { assignmentId: string; submissionCount: number }[]).find((item) => item.assignmentId === assignmentA)?.submissionCount).toBe(2);
+
+      const workingSuffix = randomUUID().replaceAll("-", "");
+      workingTriggerName = `test_working_rollback_${workingSuffix}`; workingFunctionName = `test_working_rollback_fn_${workingSuffix}`;
+      await sql.unsafe(`CREATE FUNCTION classroom.${workingFunctionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.kind = 'working' AND NEW.original_name = 'fail.blend' THEN RAISE EXCEPTION 'forced working file rollback'; END IF; RETURN NEW; END $$`).simple();
+      await sql.unsafe(`CREATE TRIGGER ${workingTriggerName} BEFORE INSERT ON classroom.files FOR EACH ROW EXECUTE FUNCTION classroom.${workingFunctionName}()`).simple();
+      workingTriggerInstalled = true;
+      const beforeFailedReplacement = (await readdir(uploadDir)).sort();
+      const failedReplacement = await app.handle(new Request(`http://localhost${workingPath}`, { method: "PUT", headers: studentHeaders, body: workingForm("fail.blend", Buffer.from("BLENDER-v301"), firstWorkingData.id) }));
+      expect(failedReplacement.status).toBe(500);
+      const afterFailedReplacement = await sql<{ id: string; storageName: string }[]>`SELECT id, storage_name AS "storageName" FROM classroom.files WHERE kind = 'working' AND assignment_id = ${assignmentA} AND student_id = ${studentA}`;
+      expect([...afterFailedReplacement]).toEqual([{ id: firstWorkingData.id, storageName: firstWorkingData.id }]);
+      expect(await Bun.file(resolve(uploadDir, firstWorkingData.id)).exists()).toBe(true);
+      expect((await readdir(uploadDir)).sort()).toEqual(beforeFailedReplacement);
+      await sql.unsafe(`DROP TRIGGER ${workingTriggerName} ON classroom.files`).simple();
+      await sql.unsafe(`DROP FUNCTION classroom.${workingFunctionName}()`).simple();
+      workingTriggerInstalled = false;
+
+      const currentBlend = Buffer.from("BLENDER17-01v0502");
+      const replaced = await app.handle(new Request(`http://localhost${workingPath}`, { method: "PUT", headers: studentHeaders, body: workingForm("scene-new.blend", currentBlend, firstWorkingData.id) }));
+      expect(replaced.status).toBe(200);
+      const replacedData = await replaced.json() as { id: string };
+      expect(replacedData.id).not.toBe(firstWorkingData.id);
+      expect((await app.handle(new Request(`http://localhost/api/student/files/${firstWorkingData.id}/content`, { headers: studentHeaders }))).status).toBe(404);
+      const staleReplacement = await app.handle(new Request(`http://localhost${workingPath}`, { method: "PUT", headers: studentHeaders, body: workingForm("stale.blend", legacyBlend, firstWorkingData.id) }));
+      expect(staleReplacement.status).toBe(409);
+      const [concurrentWorkingA, concurrentWorkingB] = await Promise.all([
+        app.handle(new Request(`http://localhost${workingPath}`, { method: "PUT", headers: studentHeaders, body: workingForm("race-a.blend", legacyBlend, replacedData.id) })),
+        app.handle(new Request(`http://localhost${workingPath}`, { method: "PUT", headers: studentHeaders, body: workingForm("race-b.blend", legacyBlend, replacedData.id) })),
+      ]);
+      expect([concurrentWorkingA.status, concurrentWorkingB.status].sort()).toEqual([200, 409]);
+      const concurrentWorkingSuccess = concurrentWorkingA.status === 200 ? concurrentWorkingA : concurrentWorkingB;
+      const finalWorking = await concurrentWorkingSuccess.json() as { id: string };
+      const teacherWorkingRead = await app.handle(new Request(`http://localhost/api/files/${finalWorking.id}/content`, { headers: teacherHeaders }));
+      expect(teacherWorkingRead.status).toBe(200);
+      expect(Buffer.from(await teacherWorkingRead.arrayBuffer())).toEqual(legacyBlend);
+      expect((await app.handle(new Request(`http://localhost/api/student/files/${finalWorking.id}`, { method: "DELETE", headers: teacherHeaders }))).status).toBe(401);
+      const removeWorking = await app.handle(new Request(`http://localhost/api/student/files/${finalWorking.id}`, { method: "DELETE", headers: studentHeaders }));
+      expect(removeWorking.status).toBe(200);
+      expect(await removeWorking.json()).toEqual({ ok: true, cleanupPending: false });
+      expect((await app.handle(new Request(`http://localhost/api/student/files/${finalWorking.id}/content`, { headers: studentHeaders }))).status).toBe(404);
+
       const stored = await sql<{ kind: string; studentId: string; submittedBy: string }[]>`
         SELECT kind, student_id AS "studentId", submitted_by_account_id AS "submittedBy" FROM classroom.files WHERE id = ${uploaded.id}
       `;
@@ -625,6 +698,10 @@ describe("student submission API", () => {
       const membershipsAfterRemoval = await app.handle(new Request("http://localhost/api/student/assignments", { headers: studentHeaders }));
       expect((await membershipsAfterRemoval.json() as { assignmentId: string }[]).map((item) => item.assignmentId)).toEqual([assignmentA]);
     } finally {
+      if (workingTriggerInstalled) {
+        await sql.unsafe(`DROP TRIGGER IF EXISTS ${workingTriggerName} ON classroom.files`).simple().catch(() => {});
+        await sql.unsafe(`DROP FUNCTION IF EXISTS classroom.${workingFunctionName}()`).simple().catch(() => {});
+      }
       if (deleteTriggerInstalled) {
         await sql.unsafe(`DROP TRIGGER IF EXISTS ${deleteTriggerName} ON classroom.students`).simple().catch(() => {});
         await sql.unsafe(`DROP FUNCTION IF EXISTS classroom.${deleteFunctionName}()`).simple().catch(() => {});

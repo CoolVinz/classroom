@@ -2,9 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { deflateSync } from "node:zlib";
+import { deflateSync, gzipSync } from "node:zlib";
 import sharp from "sharp";
-import { storedFilePath, validateStudentUpload, validateThumbnail, validateUpload } from "./file-storage";
+import { storedFilePath, validateStudentUpload, validateThumbnail, validateUpload, validateWorkingFile } from "./file-storage";
 
 function pngChunk(type: string, data: Buffer) {
   const chunk = Buffer.alloc(data.length + 12);
@@ -88,12 +88,28 @@ describe("file upload validation", () => {
     expect(pdf.kind).toBe("worksheet");
     expect(model.kind).toBe("model");
     await expect(validateStudentUpload(new File(["nope"], "run.exe"))).rejects.toThrow("ไม่รองรับ");
+    await expect(validateStudentUpload(new File(["BLENDER-v300"], "work.blend"))).rejects.toThrow("ไม่รองรับ");
+  });
+
+  test("validates legacy, current, and gzip-compressed Blender working files", async () => {
+    const legacy = Buffer.from("BLENDER-v300");
+    const current = Buffer.from("BLENDER17-01v0502");
+    await expect(validateWorkingFile(new File([legacy], "scene.blend"))).resolves.toMatchObject({ mediaType: "application/octet-stream" });
+    await expect(validateWorkingFile(new File([current], "scene.blend"))).resolves.toMatchObject({ originalName: "scene.blend" });
+    await expect(validateWorkingFile(new File([gzipSync(current)], "scene.blend"))).resolves.toMatchObject({ originalName: "scene.blend" });
+    const zstdCompress = (Bun as typeof Bun & { zstdCompressSync?: (bytes: Uint8Array) => Uint8Array }).zstdCompressSync;
+    if (zstdCompress) await expect(validateWorkingFile(new File([Uint8Array.from(zstdCompress(current))], "scene.blend"))).resolves.toMatchObject({ originalName: "scene.blend" });
+    await expect(validateWorkingFile(new File([gzipSync(Buffer.from("not a Blender file"))], "scene.blend"))).rejects.toThrow("Blender");
+    await expect(validateWorkingFile(new File([current], "scene.stl"))).rejects.toThrow(".blend");
   });
 
   test("enforces an explicitly configured upload limit", async () => {
     const oldLimit = process.env.UPLOAD_MAX_FILE_BYTES;
     process.env.UPLOAD_MAX_FILE_BYTES = "4";
-    try { await expect(validateUpload(new File(["12345"], "lesson.pdf"), "worksheet")).rejects.toThrow("ไม่เกิน"); }
+    try {
+      await expect(validateUpload(new File(["12345"], "lesson.pdf"), "worksheet")).rejects.toThrow("ไม่เกิน");
+      await expect(validateWorkingFile(new File(["BLENDER-v300"], "scene.blend"))).rejects.toThrow("ไม่เกิน");
+    }
     finally { if (oldLimit === undefined) delete process.env.UPLOAD_MAX_FILE_BYTES; else process.env.UPLOAD_MAX_FILE_BYTES = oldLimit; }
   });
 });

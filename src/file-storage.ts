@@ -1,7 +1,8 @@
 import { access, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { constants } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import { inflateSync } from "node:zlib";
+import { createGunzip, inflateSync } from "node:zlib";
 import sharp from "sharp";
 import { HttpError } from "./http-error";
 
@@ -107,7 +108,7 @@ export async function saveFileThumbnail(fileId: string, bytes: Uint8Array, role:
       const [file] = await tx<{ id: string; thumbnailSizeBytes: number | null; thumbnailMediaType: "image/png" | "image/webp" | null }[]>`
         SELECT f.id, f.thumbnail_size_bytes AS "thumbnailSizeBytes", f.thumbnail_media_type AS "thumbnailMediaType"
         FROM classroom.files f
-        WHERE f.id = ${fileId} AND (
+        WHERE f.id = ${fileId} AND f.kind <> 'working' AND (
           (${role} = 'teacher' AND EXISTS (
             SELECT 1 FROM classroom.classrooms c WHERE c.id = f.classroom_id AND c.owner_id = ${accountId}
           )) OR (${role} = 'student' AND EXISTS (
@@ -263,4 +264,205 @@ async function isObj(file: File) {
     if (vertex && face) return true;
   }
   return false;
+}
+
+function blenderHeader(bytes: Uint8Array) {
+  const prefix = new TextDecoder().decode(bytes.subarray(0, 7));
+  if (prefix !== "BLENDER") return false;
+  if ((bytes[7] === 45 || bytes[7] === 95) && (bytes[8] === 118 || bytes[8] === 86)) {
+    return bytes.length >= 12 && /^\d{3}$/.test(new TextDecoder().decode(bytes.subarray(9, 12)));
+  }
+  return bytes.length >= 17 && new TextDecoder().decode(bytes.subarray(7, 13)) === "17-01v"
+    && /^\d{4}$/.test(new TextDecoder().decode(bytes.subarray(13, 17)));
+}
+
+type DecompressStream = {
+  on(event: "data", listener: (chunk: Buffer) => void): void;
+  on(event: "error", listener: (error: Error) => void): void;
+  on(event: "end", listener: () => void): void;
+  end(bytes: Uint8Array): void;
+  destroy(): void;
+};
+
+async function compressedBlenderHeader(bytes: Uint8Array, compression: "gzip" | "zstd") {
+  let stream: DecompressStream;
+  if (compression === "gzip") stream = createGunzip({ chunkSize: 64 * 1024 });
+  else {
+    const zstd = (await import("node:zlib") as unknown as {
+      createZstdDecompress?: (options: { chunkSize: number }) => DecompressStream;
+    }).createZstdDecompress;
+    if (!zstd) throw new HttpError(422, "รันไทม์นี้ยังไม่รองรับไฟล์ Blender แบบ Zstandard");
+    stream = zstd({ chunkSize: 64 * 1024 });
+  }
+
+  return new Promise<boolean>((resolveHeader) => {
+    let header = Buffer.alloc(0);
+    let finished = false;
+    const timeout = setTimeout(() => finish(false), 2000);
+    const finish = (valid: boolean) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      stream.destroy();
+      resolveHeader(valid);
+    };
+    stream.on("data", (chunk) => {
+      header = Buffer.concat([header, chunk.subarray(0, 17 - header.length)]);
+      if (blenderHeader(header)) finish(true);
+      else if (header.length >= 17) finish(false);
+    });
+    stream.on("error", () => finish(false));
+    stream.on("end", () => finish(blenderHeader(header)));
+    stream.end(bytes);
+  });
+}
+
+export async function validateWorkingFile(file: File) {
+  if (file.size < 1 || file.size > maxUploadBytes()) {
+    throw new HttpError(413, "ไฟล์ต้องมีขนาดไม่เกิน " + Math.floor(maxUploadBytes() / (1024 * 1024)) + " MB");
+  }
+  if (file.name.split(".").pop()?.toLowerCase() !== "blend") throw new HttpError(422, "รองรับเฉพาะไฟล์ Blender .blend");
+
+  const prefix = new Uint8Array(await file.slice(0, 17).arrayBuffer());
+  let valid = blenderHeader(prefix);
+  if (!valid) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (bytes[0] === 0x1f && bytes[1] === 0x8b) valid = await compressedBlenderHeader(bytes, "gzip");
+    else if (bytes[0] === 0x28 && bytes[1] === 0xb5 && bytes[2] === 0x2f && bytes[3] === 0xfd) {
+      valid = await compressedBlenderHeader(bytes, "zstd");
+    }
+  }
+  if (!valid) throw new HttpError(422, "ไฟล์ Blender ไม่ถูกต้อง");
+  const originalName = file.name.replace(/[\\/\0-\x1f\x7f]/g, "_").trim().slice(-255);
+  if (!originalName) throw new HttpError(422, "กรุณาตรวจสอบชื่อไฟล์");
+  return { mediaType: "application/octet-stream", originalName };
+}
+
+export async function saveStudentWorkingFile(input: {
+  classroomId: string; assignmentId: string; studentId: string; accountId: string;
+  file: File; originalName: string; expectedFileId: string | null;
+}) {
+  const root = uploadRoot();
+  await mkdir(root, { recursive: true, mode: 0o750 });
+  const id = randomUUID();
+  const storageName = id;
+  const temporary = resolve(root, id + ".upload");
+  const path = resolve(root, storageName);
+  const { sql } = await import("./db/client");
+  let renamedNew = false;
+  let oldTombstone: string | null = null;
+  let oldStorageName: string | null = null;
+  try {
+    await Bun.write(temporary, input.file);
+    const [result] = await sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(870010022)`;
+      const [membership] = await tx<{ id: string }[]>`
+        SELECT s.id FROM classroom.students s
+        JOIN classroom.classrooms c ON c.id = s.classroom_id
+        JOIN classroom.assignments a ON a.classroom_id = c.id
+        WHERE s.id = ${input.studentId} AND s.account_id = ${input.accountId}
+          AND s.classroom_id = ${input.classroomId} AND s.archived_at IS NULL
+          AND c.archived_at IS NULL AND a.id = ${input.assignmentId} AND a.archived_at IS NULL
+        FOR SHARE OF s, c, a
+      `;
+      if (!membership) throw new HttpError(404, "ไม่พบงานนี้");
+      const [existing] = await tx<{ id: string; storageName: string; sizeBytes: number; thumbnailSizeBytes: number | null }[]>`
+        SELECT id, storage_name AS "storageName", size_bytes AS "sizeBytes", thumbnail_size_bytes AS "thumbnailSizeBytes"
+        FROM classroom.files WHERE classroom_id = ${input.classroomId} AND assignment_id = ${input.assignmentId}
+          AND student_id = ${input.studentId} AND kind = 'working' FOR UPDATE
+      `;
+      if ((existing?.id ?? null) !== input.expectedFileId) throw new HttpError(409, "ไฟล์ทำงานเปลี่ยนไปแล้ว กรุณาโหลดข้อมูลใหม่");
+      const [usage] = await tx<{ used: string }[]>`
+        SELECT COALESCE(SUM(size_bytes + COALESCE(thumbnail_size_bytes, 0)), 0)::text AS used FROM classroom.files
+      `;
+      const currentSize = Number(existing?.sizeBytes ?? 0) + Number(existing?.thumbnailSizeBytes ?? 0);
+      if (Number(usage.used) - currentSize + input.file.size > maxStoredBytes()) {
+        throw new HttpError(413, "พื้นที่จัดเก็บไฟล์เต็มแล้ว");
+      }
+
+      await rename(temporary, path);
+      renamedNew = true;
+      if (existing) {
+        oldStorageName = existing.storageName;
+        const oldPath = resolve(root, existing.storageName);
+        oldTombstone = oldPath + ".deleting";
+        try { await rename(oldPath, oldTombstone); }
+        catch (error) {
+          if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
+          oldTombstone = null;
+        }
+        await tx`DELETE FROM classroom.files WHERE id = ${existing.id}`;
+      }
+      await tx`
+        INSERT INTO classroom.files
+          (id, classroom_id, assignment_id, student_id, submitted_by_account_id, uploaded_by,
+            kind, original_name, storage_name, media_type, size_bytes)
+        VALUES (${id}, ${input.classroomId}, ${input.assignmentId}, ${input.studentId},
+          NULL, NULL, 'working', ${input.originalName}, ${storageName}, 'application/octet-stream', ${input.file.size})
+      `;
+      return [{ id, originalName: input.originalName, mediaType: "application/octet-stream", sizeBytes: input.file.size }];
+    });
+    const cleanupPending = oldTombstone ? await rm(oldTombstone, { force: true }).then(() => false, () => true) : false;
+    return { ...result, cleanupPending };
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => {});
+    try {
+      const records = await sql<{ id: string }[]>`SELECT id FROM classroom.files WHERE id = ${id} OR id = ${input.expectedFileId}`;
+      const newRecord = records.some((record) => record.id === id);
+      const oldRecord = input.expectedFileId !== null && records.some((record) => record.id === input.expectedFileId);
+      if (oldTombstone) {
+        if (oldRecord && oldStorageName) await rename(oldTombstone, resolve(root, oldStorageName)).catch(() => {});
+        else await rm(oldTombstone, { force: true }).catch(() => {});
+      }
+      if (renamedNew && !newRecord) await rm(path, { force: true }).catch(() => {});
+    } catch { /* Startup reconciliation restores referenced tombstones and removes orphaned uploads. */ }
+    throw error;
+  }
+}
+
+export async function deleteStoredFile(fileId: string, scope: { teacherId: string } | { studentAccountId: string }) {
+  const root = uploadRoot();
+  const teacherId = "teacherId" in scope ? scope.teacherId : null;
+  const studentAccountId = "studentAccountId" in scope ? scope.studentAccountId : null;
+  const staged: { path: string; tombstone: string }[] = [];
+  const { sql } = await import("./db/client");
+  try {
+    await sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(870010022)`;
+      const [file] = await tx<{ storageName: string; thumbnailMediaType: "image/png" | "image/webp" | null }[]>`
+        SELECT f.storage_name AS "storageName", f.thumbnail_media_type AS "thumbnailMediaType"
+        FROM classroom.files f JOIN classroom.classrooms c ON c.id = f.classroom_id
+        WHERE f.id = ${fileId} AND (
+          (${teacherId}::uuid IS NOT NULL AND c.owner_id = ${teacherId})
+          OR (${studentAccountId}::uuid IS NOT NULL AND f.kind = 'working'
+            AND c.archived_at IS NULL
+            AND EXISTS (SELECT 1 FROM classroom.students s JOIN classroom.assignments a ON a.id = f.assignment_id
+              WHERE s.id = f.student_id AND s.account_id = ${studentAccountId}
+                AND s.classroom_id = f.classroom_id AND s.archived_at IS NULL AND a.archived_at IS NULL))
+        ) FOR UPDATE OF f
+      `;
+      if (!file) throw new HttpError(404, "ไม่พบไฟล์นี้");
+      const paths = [resolve(root, file.storageName), ...(file.thumbnailMediaType ? [uploadThumbnailPath(fileId, file.thumbnailMediaType)] : [])];
+      for (const path of paths) {
+        const tombstone = path + ".deleting";
+        staged.push({ path, tombstone });
+        try { await rename(path, tombstone); }
+        catch (error) {
+          if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
+        }
+      }
+      await tx`DELETE FROM classroom.files WHERE id = ${fileId}`;
+    });
+  } catch (error) {
+    try {
+      const [record] = await sql`SELECT id FROM classroom.files WHERE id = ${fileId}`;
+      for (const file of staged) {
+        if (record) await rename(file.tombstone, file.path).catch(() => {});
+        else await rm(file.tombstone, { force: true }).catch(() => {});
+      }
+    } catch { /* Startup reconciliation resolves staged files if the transaction result is unknown. */ }
+    throw error;
+  }
+  const cleanup = await Promise.all(staged.map((file) => rm(file.tombstone, { force: true }).then(() => false, () => true)));
+  return { ok: true, cleanupPending: cleanup.some(Boolean) };
 }

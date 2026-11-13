@@ -7,7 +7,7 @@ import { generateThumbnail } from "./thumbnail-jobs";
 const ModelPreview = lazy(() => import("./ModelPreview"));
 export type StudentUser = { id: string; username: string; displayName: string; role: "student" };
 type Assignment = { assignmentId: string; classroomId: string; classroomName: string; title: string; instructions: string; submissionCount: number; publishedScore: number | string | null; publishedMaxScore: number | string | null; publishedFeedback: string | null; publishedAt: string | null; newWork: boolean };
-type StudentFile = { id: string; kind: "worksheet" | "model" | "submission"; originalName: string; mediaType: string; sizeBytes: number | string; createdAt: string; studentSubmission: boolean; thumbnailAvailable: boolean };
+type StudentFile = { id: string; kind: "worksheet" | "model" | "submission" | "working"; originalName: string; mediaType: string; sizeBytes: number | string; createdAt: string; studentSubmission: boolean; thumbnailAvailable: boolean };
 const uploadTypes = ".pdf,.png,.jpg,.jpeg,.doc,.docx,.stl,.obj";
 
 export function StudentPortal({ user, logout }: { user: StudentUser; logout: () => void }) {
@@ -19,6 +19,9 @@ export function StudentPortal({ user, logout }: { user: StudentUser; logout: () 
   const [error, setError] = useState("");
   const [preview, setPreview] = useState<StudentFile | null>(null);
   const selected = assignments.find((item) => item.assignmentId === selectedId) ?? null;
+  const workingFile = files.find((file) => file.kind === "working");
+  const worksheets = files.filter((file): file is StudentFile & { kind: "worksheet" } => file.kind === "worksheet");
+  const submissions = files.filter((file): file is StudentFile & { kind: "model" | "submission" } => file.kind === "model" || file.kind === "submission");
 
   const loadAssignments = useCallback(async () => {
     try {
@@ -62,6 +65,35 @@ export function StudentPortal({ user, logout }: { user: StudentUser; logout: () 
     } finally { setBusy(false); await loadFiles(); await loadAssignments(); }
   }
 
+  async function saveWorkingFile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selected) return;
+    const form = event.currentTarget;
+    const input = form.elements.namedItem("workingFile") as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    if (workingFile && !window.confirm(`แทนที่ไฟล์ทำงาน “${workingFile.originalName}” หรือไม่? ไฟล์เดิมจะถูกลบถาวร`)) return;
+    setBusy(true); setError("");
+    try {
+      const body = new FormData(); body.set("file", file);
+      if (workingFile) body.set("replaceFileId", workingFile.id);
+      const result = await api<{ cleanupPending: boolean }>(`/student/classrooms/${selected.classroomId}/assignments/${selected.assignmentId}/working-file`, { method: "PUT", body });
+      input.value = "";
+      if (result.cleanupPending) setError("บันทึกไฟล์ใหม่แล้ว แต่ยังลบไฟล์เดิมจากพื้นที่จัดเก็บไม่สำเร็จ");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "บันทึกไฟล์ทำงานไม่สำเร็จ"); }
+    finally { setBusy(false); await loadFiles(); }
+  }
+
+  async function removeWorkingFile() {
+    if (!workingFile || !window.confirm(`ลบไฟล์ทำงาน “${workingFile.originalName}” ถาวรหรือไม่? ไฟล์นี้จะไม่สามารถกู้คืนได้`)) return;
+    setBusy(true); setError("");
+    try {
+      const result = await api<{ cleanupPending: boolean }>(`/student/files/${workingFile.id}`, { method: "DELETE" });
+      if (result.cleanupPending) setError("ลบข้อมูลไฟล์แล้ว แต่ยังลบไฟล์ออกจากพื้นที่จัดเก็บไม่สำเร็จ");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "ลบไฟล์ทำงานไม่สำเร็จ"); }
+    finally { setBusy(false); await loadFiles(); }
+  }
+
   return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark">ค</div><div><strong>ห้องเรียน</strong><span>พื้นที่นักเรียน</span></div></div><div className="sidebar-bottom"><div className="profile"><div className="avatar">{user.displayName.slice(0, 1)}</div><div className="profile-copy"><strong>{user.displayName}</strong><span>นักเรียน</span></div><button className="icon-button" onClick={logout} aria-label="ออกจากระบบ" title="ออกจากระบบ">↗</button></div></div></aside>
     <main className="main-area"><header className="topbar"><div className="breadcrumb">ห้องเรียน <span>/</span> งานของฉัน</div></header><div className="page-content">
       {error && <div className="notice" role="alert">{error}<button onClick={() => setError("")} aria-label="ปิด">×</button></div>}
@@ -73,14 +105,15 @@ export function StudentPortal({ user, logout }: { user: StudentUser; logout: () 
       {selected && <section className="panel"><header className="panel-heading"><div><p className="eyebrow">{selected.classroomName}</p><h2>{selected.title}</h2>{selected.instructions && <p className="muted assignment-instructions">{selected.instructions}</p>}</div></header>
         {selected.publishedScore !== null && selected.publishedScore !== undefined && <div className="student-assessment"><strong>คะแนน: {Number(selected.publishedScore)} / {Number(selected.publishedMaxScore)}</strong>{selected.publishedFeedback && <p>{selected.publishedFeedback}</p>}{selected.newWork && <small>มีไฟล์งานใหม่รอครูตรวจ</small>}</div>}
         <form className="work-upload" onSubmit={(event) => void upload(event)}><label className="work-file-input">เลือกไฟล์งาน<input name="studentFiles" type="file" accept={uploadTypes} multiple required/></label><button className="button button-primary" disabled={busy}>{busy ? "กำลังส่งงาน…" : "ส่งไฟล์"}</button><small>PDF, รูปภาพ, Word, STL หรือ OBJ · ไม่เกิน 50 MB ต่อไฟล์</small></form>
-        <div className="student-submission-groups"><h3>ใบงานและคำชี้แจง</h3>{files.filter((file) => file.kind === "worksheet").length ? files.filter((file) => file.kind === "worksheet").map((file) => <FileRow key={file.id} file={file} onPreview={setPreview}/>) : <p className="muted">ครูยังไม่ได้แนบใบงาน</p>}<h3>งานที่ส่งแล้ว</h3>{files.filter((file) => file.kind !== "worksheet").length ? files.filter((file) => file.kind !== "worksheet").map((file) => <FileRow key={file.id} file={file} onPreview={setPreview}/>) : <p className="muted">ยังไม่ได้ส่งงานนี้</p>}</div>
+        <section className="student-submission-groups"><h3>ไฟล์ทำงาน Blender — ยังไม่ใช่การส่งงาน</h3><p className="muted">ดาวน์โหลดมาแก้ไขใน Blender แล้วอัปโหลดไฟล์ใหม่เพื่อแทนที่ไฟล์เดิม · ก่อนย้ายไปใช้คอมพิวเตอร์เครื่องอื่น ให้เลือก File → External Data → Pack Resources เพื่อรวม texture ไว้ในไฟล์</p>{workingFile ? <article className="work-file"><span className="file-kind">BLEND</span><div className="work-file-copy"><strong>{workingFile.originalName}</strong><small>บันทึก {formatDate(workingFile.createdAt)} · {formatBytes(Number(workingFile.sizeBytes))}</small></div><div className="work-file-actions"><a className="text-button" href={`/api/student/files/${workingFile.id}/content`} download>ดาวน์โหลด</a><button className="text-button subdued" type="button" disabled={busy} onClick={() => void removeWorkingFile()}>ลบ</button></div></article> : <p className="muted">ยังไม่มีไฟล์ทำงานที่บันทึกไว้</p>}<form className="work-upload" onSubmit={(event) => void saveWorkingFile(event)}><label className="work-file-input">{workingFile ? "เลือกไฟล์ Blender ใหม่เพื่อแทนที่" : "เลือกไฟล์ Blender"}<input name="workingFile" type="file" accept=".blend" required/></label><button className="button button-quiet" disabled={busy}>{workingFile ? "แทนที่ไฟล์ทำงาน" : "บันทึกไฟล์ทำงาน"}</button><small>ไฟล์ .blend · ไม่เกิน 50 MB · ไม่รวมในจำนวนงานที่ส่ง</small></form></section>
+        <div className="student-submission-groups"><h3>ใบงานและคำชี้แจง</h3>{worksheets.length ? worksheets.map((file) => <FileRow key={file.id} file={file} onPreview={setPreview}/>) : <p className="muted">ครูยังไม่ได้แนบใบงาน</p>}<h3>งานที่ส่งแล้ว</h3>{submissions.length ? submissions.map((file) => <FileRow key={file.id} file={file} onPreview={setPreview}/>) : <p className="muted">ยังไม่ได้ส่งงานนี้</p>}</div>
       </section>}
     </div></main>
     {preview && <Suspense fallback={<div className="loading"><span className="spinner"/>กำลังเปิดตัวแสดงโมเดล…</div>}><ModelPreview file={preview} contentPath={"/api/student/files/" + preview.id + "/content"} close={() => setPreview(null)}/></Suspense>}
   </div>;
 }
 
-function FileRow({ file, onPreview }: { file: StudentFile; onPreview: (file: StudentFile) => void }) {
+function FileRow({ file, onPreview }: { file: StudentFile & { kind: "worksheet" | "model" | "submission" }; onPreview: (file: StudentFile) => void }) {
   const model = file.mediaType.startsWith("model/");
   const icon = model ? "3D" : file.mediaType.startsWith("image/") ? "IMG" : file.mediaType.includes("word") ? "DOC" : "PDF";
   const content = "/api/student/files/" + file.id + "/content";

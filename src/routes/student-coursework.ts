@@ -6,7 +6,7 @@ import { requireStudent } from "../auth/session";
 import { sql } from "../db/client";
 import { HttpError } from "../http-error";
 import { checkRequestOrigin } from "../security";
-import { maxStoredBytes, saveFileThumbnail, storedFilePath, uploadRoot, uploadThumbnailPath, validateStudentUpload, validateThumbnail } from "../file-storage";
+import { deleteStoredFile, maxStoredBytes, saveFileThumbnail, saveStudentWorkingFile, storedFilePath, uploadRoot, uploadThumbnailPath, validateStudentUpload, validateThumbnail, validateWorkingFile } from "../file-storage";
 
 async function activeMembership(classroomId: string, assignmentId: string, accountId: string) {
   const [membership] = await sql<{ studentId: string }[]>`
@@ -32,7 +32,8 @@ export const studentCourseworkRoutes = new Elysia({ prefix: "/api/student" })
         q.published_max_score AS "publishedMaxScore", q.published_feedback AS "publishedFeedback",
         q.published_at AS "publishedAt",
         (SELECT COUNT(*)::int FROM classroom.files f WHERE f.assignment_id = a.id
-          AND f.student_id = s.id AND f.submitted_by_account_id = ${actor.id}) AS "submissionCount",
+          AND f.student_id = s.id AND f.submitted_by_account_id = ${actor.id}
+          AND f.kind IN ('model', 'submission')) AS "submissionCount",
         EXISTS (SELECT 1 FROM classroom.files newer
           WHERE newer.assignment_id = a.id AND newer.student_id = s.id
             AND newer.kind IN ('model', 'submission')
@@ -53,13 +54,28 @@ export const studentCourseworkRoutes = new Elysia({ prefix: "/api/student" })
       SELECT f.id, f.assignment_id AS "assignmentId", f.student_id AS "studentId",
         f.kind, f.original_name AS "originalName", f.media_type AS "mediaType",
         f.size_bytes AS "sizeBytes", f.created_at AS "createdAt",
-        f.submitted_by_account_id = ${actor.id} AS "studentSubmission",
+        (f.kind IN ('model', 'submission') AND f.submitted_by_account_id = ${actor.id}) AS "studentSubmission",
         f.thumbnail_size_bytes IS NOT NULL AS "thumbnailAvailable"
       FROM classroom.files f
       WHERE f.classroom_id = ${params.classroomId} AND f.assignment_id = ${params.assignmentId}
         AND (f.kind = 'worksheet' OR f.student_id = ${studentId})
       ORDER BY f.created_at DESC
     `;
+  })
+  .put("/classrooms/:classroomId/assignments/:assignmentId/working-file", async ({ params, body, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireStudent(request);
+    const valid = await validateWorkingFile(body.file);
+    const studentId = await activeMembership(params.classroomId, params.assignmentId, actor.id);
+    return saveStudentWorkingFile({
+      classroomId: params.classroomId, assignmentId: params.assignmentId, studentId, accountId: actor.id,
+      file: body.file, originalName: basename(valid.originalName), expectedFileId: body.replaceFileId ?? null,
+    });
+  }, { body: t.Object({ file: t.File(), replaceFileId: t.Optional(t.Nullable(t.String({ format: "uuid" }))) }) })
+  .delete("/files/:fileId", async ({ params, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireStudent(request);
+    return deleteStoredFile(params.fileId, { studentAccountId: actor.id });
   })
   .post("/classrooms/:classroomId/assignments/:assignmentId/files", async ({ params, body, request }) => {
     checkRequestOrigin(request);

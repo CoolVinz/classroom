@@ -3,20 +3,21 @@ import { api } from "./api";
 import { FileThumbnail } from "./FileThumbnail";
 
 type WorkFile = {
-  id: string; studentId: string; studentName: string; kind: "model" | "submission";
+  id: string; studentId: string; studentName: string; kind: "model" | "submission" | "working";
   originalName: string; mediaType: string; sizeBytes: number | string; createdAt: string;
   studentSubmission: boolean; thumbnailAvailable: boolean;
 };
+type AssessedWorkFile = Omit<WorkFile, "kind"> & { kind: "model" | "submission" };
 type AssessmentStudent = {
   studentId: string; studentName: string; studentCode: string | null; studentNumber: number | null; archived: boolean;
-  submissionCount: number; latestFile: WorkFile | null;
+  submissionCount: number; latestFile: AssessedWorkFile | null;
   draftScore: number | string | null; draftFeedback: string; draftRevision: number; draftUpdatedAt: string | null;
   draftHasNewWork: boolean; publishedScore: number | string | null; publishedMaxScore: number | string | null;
   publishedFeedback: string | null; publishedRevision: number | null; publishedAt: string | null; publishedHasNewWork: boolean;
 };
 type Props = {
   classroomId: string; assignmentId: string; maxScore: number | string;
-  onPreview: (file: WorkFile) => void; onFilesChanged: () => void; refresh: number;
+  onPreview: (file: AssessedWorkFile) => void; onFilesChanged: () => void; refresh: number;
 };
 
 export function AssignmentAssessment({ classroomId, assignmentId, maxScore, onPreview, onFilesChanged, refresh }: Props) {
@@ -67,7 +68,7 @@ export function AssignmentAssessment({ classroomId, assignmentId, maxScore, onPr
     setBusy(true); setError("");
     try {
       await api(`/classrooms/${classroomId}/assignments/${assignmentId}/students/${selected.studentId}/assessment`, {
-        method: "PUT", body: JSON.stringify({ score: Number(score), feedback, revision: selected.draftRevision, reviewedFileIds: files.map((file) => file.id) }),
+        method: "PUT", body: JSON.stringify({ score: Number(score), feedback, revision: selected.draftRevision, reviewedFileIds: files.filter((file) => file.kind === "model" || file.kind === "submission").map((file) => file.id) }),
       });
       setReload((value) => value + 1); onFilesChanged();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "บันทึกคะแนนไม่สำเร็จ"); }
@@ -112,6 +113,8 @@ export function AssignmentAssessment({ classroomId, assignmentId, maxScore, onPr
     {items.length ? <div className="assessment-list">{items.map((student) => {
       const status = student.draftHasNewWork || student.publishedHasNewWork ? "มีงานใหม่รอตรวจ" : student.draftUpdatedAt ? "ฉบับร่าง" : student.publishedAt ? "เผยแพร่แล้ว" : student.submissionCount ? "รอตรวจ" : "ยังไม่ส่ง";
       const isExpanded = expanded === student.studentId;
+      const workingFile = files.find((file) => file.kind === "working");
+      const assessedFiles = files.filter((file): file is AssessedWorkFile => file.kind === "model" || file.kind === "submission");
       return <article className="assessment-student" key={student.studentId}>
         <div className="assessment-summary">
           <button className="assessment-toggle" type="button" aria-expanded={isExpanded} onClick={() => {
@@ -123,10 +126,13 @@ export function AssignmentAssessment({ classroomId, assignmentId, maxScore, onPr
           <span className={"assessment-state " + (student.draftHasNewWork || student.publishedHasNewWork ? "needs-review" : "")}>{status}</span>
         </div>
         {isExpanded && <div className="assessment-detail">
-          {filesLoading ? <p className="inline-loading"><i className="spinner"/>กำลังโหลดไฟล์…</p> : files.length ? <div className="work-file-list">{files.map((file) => <article className="work-file" key={file.id}>
+          {filesLoading ? <p className="inline-loading"><i className="spinner"/>กำลังโหลดไฟล์…</p> : <>
+          {workingFile && <><h4>ไฟล์ทำงาน Blender — ยังไม่ใช่การส่งงาน</h4><article className="work-file"><span className="file-kind">BLEND</span><div className="work-file-copy"><strong>{workingFile.originalName}</strong><small>ไฟล์ทำงาน · {formatBytes(Number(workingFile.sizeBytes))}</small></div><div className="work-file-actions"><a className="text-button" href={`/api/files/${workingFile.id}/content`} download>ดาวน์โหลด</a><button className="text-button subdued" onClick={() => void remove(workingFile)}>ลบ</button></div></article></>}
+          {assessedFiles.length ? <div className="work-file-list">{assessedFiles.map((file) => <article className="work-file" key={file.id}>
             <FileThumbnail file={file} onPreview={() => onPreview(file)}/><div className="work-file-copy"><strong>{file.originalName}</strong><small>{file.studentSubmission ? "ส่งโดยนักเรียน" : "ครูอัปโหลดให้"} · {formatBytes(Number(file.sizeBytes))}</small></div>
             <div className="work-file-actions">{file.mediaType.startsWith("model/") && <button className="text-button" onClick={() => onPreview(file)}>แสดงตัวอย่าง</button>}<a className="text-button" href={`/api/files/${file.id}/content`} download>ดาวน์โหลด</a><button className="text-button subdued" onClick={() => void remove(file)}>ลบ</button></div>
-          </article>)}</div> : <p className="muted">ยังไม่มีไฟล์งาน</p>}
+          </article>)}</div> : <p className="muted">ยังไม่มีไฟล์ที่ส่งเพื่อตรวจและให้คะแนน</p>}
+          </>}
           <form className="assessment-form" onSubmit={(event) => void saveDraft(event)}>
             <label>คะแนน<input type="number" min="0" max={max} step="0.01" value={score} onChange={(event) => setScore(event.target.value)} required/><small>จาก {max} คะแนน</small></label>
             <label>ความคิดเห็น<textarea maxLength={5000} rows={3} value={feedback} onChange={(event) => setFeedback(event.target.value)}/></label>

@@ -6,8 +6,11 @@ test("shares a thumbnail job without cancelling it while another viewer remains"
   const thumbnail = new Blob(["preview"], { type: "image/png" });
   let activeSignal: AbortSignal | undefined;
   let finish!: (blob: Blob) => void;
+  let rendered!: () => void;
+  const rendering = new Promise<void>((resolve) => { rendered = resolve; });
   const render = spyOn(modelView, "createThumbnailFromUrl").mockImplementation((_file, _path, signal) => {
     activeSignal = signal;
+    rendered();
     return new Promise((resolve) => { finish = resolve; });
   });
   const request = spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ ok: true }));
@@ -16,7 +19,7 @@ test("shares a thumbnail job without cancelling it while another viewer remains"
     const first = new AbortController(); const second = new AbortController();
     const firstView = generateThumbnail(file, "/api/files/work-1/content", "/files/work-1/thumbnail", first.signal);
     const secondView = generateThumbnail(file, "/api/files/work-1/content", "/files/work-1/thumbnail", second.signal);
-    await Promise.resolve();
+    await rendering;
     expect(render).toHaveBeenCalledTimes(1);
     first.abort();
     await expect(firstView).rejects.toMatchObject({ name: "AbortError" });
