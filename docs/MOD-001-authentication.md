@@ -32,7 +32,7 @@ Authenticate owner and teacher accounts with passwords and students with verifie
 ## Dependencies and consumers
 
 **dependencies:** `src/db/client.ts`, DAT-001, `src/security.ts`
-**used_by:** MOD-002, MOD-003, MOD-004; every protected API route
+**used_by:** MOD-002, MOD-003, MOD-004, MOD-005; every protected API route
 
 **Code Map:**
 

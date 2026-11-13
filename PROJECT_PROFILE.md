@@ -4,7 +4,7 @@
 
 **Name:** Classroom (`classroom` repository)
 
-**Description:** Teacher-facing classroom app for rosters, attendance, assignments, worksheets, and student 3D model submissions.
+**Description:** Teacher-facing classroom app for rosters, attendance, assignments, shareable lesson pages, worksheets, and student 3D model submissions.
 
 **Status:** Student submissions and Google-only student sign-in are implemented in this revision. Production deployment and live school sign-in are not verified; set up the Google OAuth client and Workspace approval described in `docs/OPS-001-deployment.md`.
 
@@ -67,12 +67,14 @@ Important resolved dependencies include Elysia 1.4.30, Google Auth Library 11.3.
 ```text
 src/server.ts                 Elysia application, health routes, static files
 src/routes/                   Teacher/student authentication, classroom, attendance, teacher, assignment/file APIs
+src/routes/lesson-pages.ts    Teacher-owned lesson drafts and published public lesson APIs
 src/auth/session.ts           Session cookies, lookup, and access checks
 src/db/                       PostgreSQL client, startup migration, owner setup
 src/db/migrations/            Ordered tracked PostgreSQL schema migrations
 src/file-storage.ts           Upload validation, size limits, and persistent volume
 web/src/ClassroomWork.tsx     Teacher assignment and submission review workflows
 web/src/StudentPortal.tsx     Student assignment and submission workflow
+web/src/LessonLibrary.tsx     Teacher lesson editor/library; PublicLessonPage.tsx serves shared lesson pages
 web/src/roster-import.ts      XLSX/CSV parsing and roster preview
 web/src/ModelPreview.tsx      Three.js viewer
 web/src/model-preview.worker.ts STL/OBJ parser worker

@@ -15,6 +15,7 @@ Browser
         │           │     └── PostgreSQL 18+ / classroom schema
         │           └── protected file routes
         │                 └── persistent Coolify volume
+        ├── public /lessons/:id reader
         └── browser-only model parsing worker
 ```
 
@@ -28,6 +29,8 @@ Browser
 - Postgres.js uses parameterized tagged-template queries. Attendance batches and password/session changes use transactions.
 - Numbered tracked SQL migrations run at application startup or from `bun run db:migrate`. The application login must own the pre-created `classroom` schema. PostgreSQL data remains outside the app container.
 - File contents live in the configured upload directory; file metadata and classroom ownership live in PostgreSQL. File routes authorize either the owning teacher or a student with an active membership viewing a worksheet or their own file.
+- Public lesson URLs load a React reading page and published structured content from a separate public API. Teacher lesson routes require ownership; public image access requires the asset UUID in the current published snapshot. Lesson pictures use the same persistent volume and quota as assignment uploads.
+- When a reader has a valid student session, it reuses the scheduled attendance panel and server lease; anonymous readers do not create attendance records.
 - The upload directory must be mounted persistently by Coolify and backed up separately from PostgreSQL.
 - Student accounts use Google's stable subject and retain their existing UUID when a verified matching email safely links a legacy account. The migration adds the subject field, backfills numeric student IDs, and invalidates old student sessions and email tokens; it preserves teacher sessions, attendance, assignments, and files.
 - XLSX/CSV workbooks are parsed in the browser with SheetJS and are not uploaded or retained. The server revalidates mapped rows before inserting students in a transaction.
@@ -40,9 +43,11 @@ Web entry and screen workflows: web/src/main.tsx, web/src/App.tsx
 Styles and HTML: web/src/styles.css, web/index.html
 API server and production static files: src/server.ts
 API routes: src/routes/auth.ts, src/routes/student-auth.ts, src/routes/classrooms.ts, src/routes/coursework.ts, src/routes/student-coursework.ts, src/routes/teachers.ts
+Lesson routes: src/routes/lesson-pages.ts
 Auth and database: src/auth/session.ts, src/db/client.ts, src/db/bootstrap.ts
-Schema: src/db/migrations/001_initial.sql, src/db/migrations/002_assignments_files.sql, src/db/migrations/003_student_submissions.sql, src/db/migrations/004_google_student_auth.sql
-Files: src/file-storage.ts, web/src/ClassroomWork.tsx, web/src/StudentPortal.tsx
+Schema: src/db/migrations/001_initial.sql, src/db/migrations/002_assignments_files.sql, src/db/migrations/003_student_submissions.sql, src/db/migrations/004_google_student_auth.sql, src/db/migrations/010_lesson_pages.sql
+Files: src/file-storage.ts, web/src/ClassroomWork.tsx, web/src/StudentPortal.tsx, web/src/LessonLibrary.tsx
+Public lesson reader: web/src/PublicLessonPage.tsx, web/src/LessonContent.tsx
 Google identity: src/routes/student-auth.ts, google-auth-library
 Roster import: web/src/StudentRosterImport.tsx, web/src/roster-import.ts
 Model preview: web/src/ModelPreview.tsx, web/src/model-preview.worker.ts

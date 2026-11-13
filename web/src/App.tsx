@@ -5,6 +5,8 @@ import { ClassroomWork } from "./ClassroomWork";
 import { StudentRosterImport } from "./StudentRosterImport";
 import { StudentPortal } from "./StudentPortal";
 import { AttendanceTimetable } from "./AttendanceTimetable";
+import { LessonLibrary } from "./LessonLibrary";
+import { PublicLessonPage } from "./PublicLessonPage";
 
 type TeacherUser = { id: string; username: string; displayName: string; role: "owner" | "teacher" };
 type User = TeacherUser | { id: string; username: string; displayName: string; role: "student" };
@@ -12,7 +14,7 @@ type Classroom = { id: string; name: string; studentCount: number };
 type Status = "present" | "absent" | "late" | "excused";
 type Student = { id: string; studentCode: string | null; studentNumber: number | null; displayName: string; email?: string | null; googleLinked?: boolean; archived?: boolean; status?: Status | null; source?: "manual" | "automatic" | null; firstArrivalAt?: string | null; lastSeenAt?: string | null; visibleSeconds?: number | null; tracking?: boolean };
 type AttendanceStudent = Omit<Student, "id"> & { studentId: string };
-type View = "home" | "classes" | "summary" | "teachers";
+type View = "home" | "classes" | "summary" | "teachers" | "lessons";
 const statuses: Status[] = ["present", "absent", "late", "excused"];
 const labels: Record<Status, string> = { present: "มาเรียน", absent: "ขาด", late: "สาย", excused: "ลา" };
 const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Bangkok" }).format(new Date());
@@ -74,15 +76,16 @@ function App() {
   }
   async function logout() { try { await api("/auth/logout", { method: "POST" }); } catch { /* Clear the local view even when the network is unavailable. */ } setUser(null); setSelected(null); setView("home"); }
   if (!ready) return <div className="loading"><span className="spinner" />กำลังเปิดห้องเรียนของคุณ…</div>;
+  if (/^\/lessons\/[0-9a-f-]{36}\/?$/i.test(window.location.pathname)) return <PublicLessonPage student={user?.role === "student" ? user : null} />;
   if (!user) return <Login onLogin={setUser} />;
   if (user.role === "student") return <StudentPortal user={user} logout={() => void logout()} />;
-  const pageNames: Record<View, string> = { home: "ภาพรวม", classes: "ห้องเรียน", summary: "สรุปการเข้าเรียน", teachers: "จัดการบัญชีครู" };
+  const pageNames: Record<View, string> = { home: "ภาพรวม", classes: "ห้องเรียน", summary: "สรุปการเข้าเรียน", teachers: "จัดการบัญชีครู", lessons: "บทเรียน" };
   return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark">ค</div><div><strong>ห้องเรียน</strong><span>พื้นที่ของคุณครู</span></div></div><p className="side-caption">เมนู</p>
-    <nav className="side-nav" aria-label="เมนูหลัก"><button className={view === "home" && !selected ? "active" : ""} onClick={() => { setView("home"); setSelected(null); }}><span>⌂</span>ภาพรวม</button><button className={view === "classes" ? "active" : ""} onClick={() => { setView("classes"); setSelected(null); }}><span>▦</span>ห้องเรียน</button><button className={view === "summary" ? "active" : ""} onClick={() => { setView("summary"); setSelected(null); }}><span>▤</span>สรุปการเข้าเรียน</button>{user.role === "owner" && <button className={view === "teachers" ? "active" : ""} onClick={() => { setView("teachers"); setSelected(null); }}><span>♙</span>จัดการบัญชีครู</button>}</nav>
+    <nav className="side-nav" aria-label="เมนูหลัก"><button className={view === "home" && !selected ? "active" : ""} onClick={() => { setView("home"); setSelected(null); }}><span>⌂</span>ภาพรวม</button><button className={view === "classes" ? "active" : ""} onClick={() => { setView("classes"); setSelected(null); }}><span>▦</span>ห้องเรียน</button><button className={view === "lessons" ? "active" : ""} onClick={() => { setView("lessons"); setSelected(null); }}><span>▧</span>บทเรียน</button><button className={view === "summary" ? "active" : ""} onClick={() => { setView("summary"); setSelected(null); }}><span>▤</span>สรุปการเข้าเรียน</button>{user.role === "owner" && <button className={view === "teachers" ? "active" : ""} onClick={() => { setView("teachers"); setSelected(null); }}><span>♙</span>จัดการบัญชีครู</button>}</nav>
     <div className="sidebar-bottom"><div className="profile"><div className="avatar">{user.displayName.slice(0, 1)}</div><div className="profile-copy"><strong>{user.displayName}</strong><span>{user.role === "owner" ? "ผู้ดูแล" : "คุณครู"}</span></div><button className="icon-button" onClick={logout} aria-label="ออกจากระบบ" title="ออกจากระบบ">↗</button></div></div>
   </aside><main className="main-area"><header className="topbar"><div className="breadcrumb">ห้องเรียน <span>/</span> {selected?.name ?? pageNames[view]}</div><div className="date-pill"><i />{showDate(today)}</div></header><div className="page-content">{error && <div className="notice" role="alert">{error}<button onClick={() => setError("")} aria-label="ปิด">×</button></div>}
     {selected ? <ClassDetail room={selected} refresh={refresh} back={() => setSelected(null)} onError={setError} /> : view === "home" ? <Dashboard user={user} rooms={rooms} stats={stats} create={createRoom} open={setSelected} browse={() => setView("classes")} busy={busy} /> : null}
-    {!selected && view === "classes" && <ClassList rooms={rooms} create={createRoom} open={setSelected} busy={busy} onError={setError} />}{!selected && view === "summary" && <SummaryPage rooms={rooms} />}{!selected && view === "teachers" && user.role === "owner" && <TeacherAdmin onError={setError} />}
+    {!selected && view === "classes" && <ClassList rooms={rooms} create={createRoom} open={setSelected} busy={busy} onError={setError} />}{!selected && view === "summary" && <SummaryPage rooms={rooms} />}{!selected && view === "teachers" && user.role === "owner" && <TeacherAdmin onError={setError} />}{!selected && view === "lessons" && <LessonLibrary onError={setError} />}
   </div></main></div>;
 }
 

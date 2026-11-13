@@ -5,6 +5,7 @@ import { mkdir, readdir, rename, rm, utimes } from "node:fs/promises";
 import { resolve } from "node:path";
 import { deflateSync } from "node:zlib";
 import { Elysia } from "elysia";
+import sharp from "sharp";
 
 const databaseUrl = process.env.CLASSROOM_TEST_DATABASE_URL;
 
@@ -47,19 +48,21 @@ describe("student submission API", () => {
 
     const { sql } = await import("./db/client");
     const { createSession } = await import("./auth/session");
-    const [{ authRoutes }, { studentAuthRoutes }, { classroomRoutes }, { courseworkRoutes }, { studentCourseworkRoutes }, { attendanceScheduleRoutes }, { studentAttendanceRoutes }, { handleAppError }] = await Promise.all([
+    const [{ authRoutes }, { studentAuthRoutes }, { classroomRoutes }, { courseworkRoutes }, { studentCourseworkRoutes }, { attendanceScheduleRoutes }, { studentAttendanceRoutes }, { lessonPageApiRoutes }, { handleAppError }] = await Promise.all([
       import("./routes/auth"), import("./routes/student-auth"), import("./routes/classrooms"),
       import("./routes/coursework"), import("./routes/student-coursework"), import("./routes/attendance-schedule"), import("./routes/student-attendance"),
+      import("./routes/lesson-pages"),
       import("./error-handler"),
     ]);
-    const { ensureUploadRoot } = await import("./file-storage");
-    const app = new Elysia().onError(handleAppError).use(authRoutes).use(studentAuthRoutes).use(classroomRoutes).use(attendanceScheduleRoutes).use(courseworkRoutes).use(studentCourseworkRoutes).use(studentAttendanceRoutes);
+    const { ensureUploadRoot, cleanupUnusedLessonImages } = await import("./file-storage");
+    const app = new Elysia().onError(handleAppError).use(authRoutes).use(studentAuthRoutes).use(classroomRoutes).use(attendanceScheduleRoutes).use(courseworkRoutes).use(studentCourseworkRoutes).use(studentAttendanceRoutes).use(lessonPageApiRoutes);
     const teacherId = randomUUID(); const accountId = randomUUID();
     const roomA = randomUUID(); const roomB = randomUUID(); const emptyRoom = randomUUID();
     const studentA = randomUUID(); const studentB = randomUUID(); const studentC = randomUUID(); const studentD = randomUUID();
     const assignmentA = randomUUID(); const assignmentB = randomUUID();
     const teacherFile = randomUUID(); const peerFile = randomUUID();
     let teacherToken = ""; let studentToken = ""; let otherTeacherToken = "";
+    let lessonPageId: string | null = null;
     const otherTeacherId = randomUUID();
     let deleteTriggerName = ""; let deleteFunctionName = ""; let deleteTriggerInstalled = false;
     let workingTriggerName = ""; let workingFunctionName = ""; let workingTriggerInstalled = false;
@@ -427,6 +430,76 @@ describe("student submission API", () => {
       expect((await app.handle(new Request(`http://localhost/api/files/${teacherFile}/content`, { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).status).toBe(404);
       expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/students`, { headers: studentHeaders }))).status).toBe(401);
 
+      const lessonCreate = await app.handle(new Request("http://localhost/api/lesson-pages", { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title: "Synthetic lesson" }) }));
+      expect(lessonCreate.status).toBe(200);
+      const lesson = await lessonCreate.json() as { id: string; revision: number };
+      lessonPageId = lesson.id;
+      expect((await (await app.handle(new Request("http://localhost/api/lesson-pages", { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).json() as { id: string }[]).some((item) => item.id === lesson.id)).toBe(false);
+      const png = await sharp({ create: { width: 32, height: 24, channels: 3, background: { r: 35, g: 120, b: 95 } } }).png().toBuffer();
+      const invalidImageForm = new FormData(); invalidImageForm.set("file", new File(["not an image"], "fake.png", { type: "image/png" }));
+      expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/images`, { method: "POST", headers: teacherHeaders, body: invalidImageForm }))).status).toBe(422);
+      const failureTag = randomUUID().replaceAll("-", ""); const failureTrigger = "lesson_image_fail_" + failureTag; const failureFunction = failureTrigger + "_fn";
+      await sql.unsafe(`CREATE FUNCTION classroom.${failureFunction}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced lesson image registration failure'; END $$`).simple();
+      await sql.unsafe(`CREATE TRIGGER ${failureTrigger} BEFORE INSERT ON classroom.lesson_page_images FOR EACH ROW EXECUTE FUNCTION classroom.${failureFunction}()`).simple();
+      const beforeFailedUpload = new Set(await readdir(uploadDir));
+      const failingImageForm = new FormData(); failingImageForm.set("file", new File([png], "retry.png", { type: "image/png" }));
+      expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/images`, { method: "POST", headers: teacherHeaders, body: failingImageForm }))).status).toBe(500);
+      expect(await readdir(uploadDir)).toEqual([...beforeFailedUpload]);
+      await sql.unsafe(`DROP TRIGGER ${failureTrigger} ON classroom.lesson_page_images`).simple();
+      await sql.unsafe(`DROP FUNCTION classroom.${failureFunction}()`).simple();
+      const imageForm = new FormData(); imageForm.set("file", new File([png], "lesson.png", { type: "image/png" }));
+      const imageUpload = await app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/images`, { method: "POST", headers: teacherHeaders, body: imageForm }));
+      expect(imageUpload.status).toBe(200);
+      const image = await imageUpload.json() as { id: string };
+      const lessonBlocks = [
+        { type: "text", heading: "Step one", text: "Synthetic lesson text" },
+        { type: "image", imageId: image.id, alt: "Example", caption: "Sample image" },
+        { type: "youtube", videoId: "dQw4w9WgXcQ", caption: "Demo" },
+      ];
+      const saveDraft = (expectedRevision: number, blocks: Record<string, unknown>[] = lessonBlocks) => app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/draft`, { method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title: "Synthetic lesson", blocks, expectedRevision }) }));
+      expect((await saveDraft(0)).status).toBe(200);
+      const stagedImage = resolve(uploadDir, image.id + ".deleting");
+      await rename(resolve(uploadDir, image.id), stagedImage);
+      const imageOldTime = new Date(Date.now() - 48 * 60 * 60 * 1000); await utimes(stagedImage, imageOldTime, imageOldTime);
+      await ensureUploadRoot();
+      expect(await Bun.file(resolve(uploadDir, image.id)).exists()).toBe(true);
+      expect((await app.handle(new Request(`http://localhost/api/public/lesson-pages/${lesson.id}`))).status).toBe(404);
+      expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/images/${image.id}/content`, { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).status).toBe(404);
+      expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/images/${image.id}/content`, { headers: studentHeaders }))).status).toBe(401);
+      const privateImage = await app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/images/${image.id}/content`, { headers: teacherHeaders }));
+      expect(privateImage.status).toBe(200);
+      expect(privateImage.headers.get("content-type")).toBe("image/webp");
+      expect((await sharp(Buffer.from(await privateImage.arrayBuffer())).metadata()).width).toBe(32);
+      expect((await saveDraft(1, [{ type: "youtube", videoId: "invalid", caption: "" }])).status).toBe(422);
+      const published = await app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/publish`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title: "Synthetic lesson", blocks: lessonBlocks, expectedRevision: 1 }) }));
+      expect(published.status).toBe(200);
+      const publicPage = await app.handle(new Request(`http://localhost/api/public/lesson-pages/${lesson.id}`));
+      expect(publicPage.status).toBe(200);
+      expect((await publicPage.json() as { blocks: { type: string }[] }).blocks.map((item) => item.type)).toEqual(["text", "image", "youtube"]);
+      expect((await app.handle(new Request(`http://localhost/api/public/lesson-pages/${lesson.id}/images/${image.id}/content`))).status).toBe(200);
+      const edited = await saveDraft(2, [{ type: "text", text: "New draft" }]);
+      expect(edited.status).toBe(200);
+      expect((await (await app.handle(new Request(`http://localhost/api/public/lesson-pages/${lesson.id}`))).json() as { blocks: { text?: string }[] }).blocks[0].text).toBe("Synthetic lesson text");
+      const competingDrafts = await Promise.all([
+        saveDraft(3, [{ type: "text", text: "Concurrent A" }]),
+        saveDraft(3, [{ type: "text", text: "Concurrent B" }]),
+      ]);
+      expect(competingDrafts.map((response) => response.status).sort()).toEqual([200, 409]);
+      expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/publish`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title: "Synthetic lesson", blocks: lessonBlocks, expectedRevision: 2 }) }))).status).toBe(409);
+      expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/publish`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title: "Synthetic lesson", blocks: [{ type: "text", text: "Published again" }], expectedRevision: 4 }) }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/unpublish`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: 5 }) }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/public/lesson-pages/${lesson.id}`))).status).toBe(404);
+      expect((await app.handle(new Request(`http://localhost/api/public/lesson-pages/${lesson.id}/images/${image.id}/content`))).status).toBe(404);
+      const [{ sizeBytes }] = await sql<{ sizeBytes: string }[]>`SELECT size_bytes::text AS "sizeBytes" FROM classroom.lesson_page_images WHERE id = ${image.id}`;
+      process.env.UPLOAD_MAX_TOTAL_BYTES = String(Number(sizeBytes) + 9);
+      const overSharedQuota = new FormData(); overSharedQuota.set("file", new File(["%PDF-1.7\nquota"], "quota.pdf", { type: "application/pdf" }));
+      expect((await app.handle(new Request(`http://localhost/api/student/classrooms/${roomA}/assignments/${assignmentA}/files`, { method: "POST", headers: studentHeaders, body: overSharedQuota }))).status).toBe(413);
+      process.env.UPLOAD_MAX_TOTAL_BYTES = String(5 * 1024 * 1024);
+      await sql`UPDATE classroom.lesson_page_images SET created_at = NOW() - INTERVAL '48 hours' WHERE id = ${image.id}`;
+      await cleanupUnusedLessonImages();
+      expect(await sql`SELECT id FROM classroom.lesson_page_images WHERE id = ${image.id}`).toHaveLength(0);
+      expect(await Bun.file(resolve(uploadDir, image.id)).exists()).toBe(false);
+
       const form = new FormData();
       form.set("file", new File(["%PDF-1.7\nstudent work"], "work.pdf", { type: "application/pdf" }));
       process.env.UPLOAD_MAX_TOTAL_BYTES = "20";
@@ -632,6 +705,7 @@ describe("student submission API", () => {
       await mkdir(resolve(uploadDir, "thumbnails"), { recursive: true });
       await Bun.write(resolve(uploadDir, "thumbnails", removedFileId + ".png"), removedThumbnail);
       await sql.begin(async (tx) => {
+        if (lessonPageId) await tx`DELETE FROM classroom.lesson_pages WHERE id = ${lessonPageId}`;
         await tx`INSERT INTO classroom.attendance (classroom_id, student_id, attendance_date, status) VALUES (${roomB}, ${studentC}, '2025-01-15', 'present')`;
         await tx`INSERT INTO classroom.files (id, classroom_id, assignment_id, student_id, uploaded_by, kind, original_name, storage_name, media_type, size_bytes, thumbnail_size_bytes, thumbnail_media_type)
           VALUES (${removedFileId}, ${roomB}, ${assignmentB}, ${studentC}, ${teacherId}, 'model', 'student.stl', ${storageName}, 'model/stl', 23, ${removedThumbnail.byteLength}, 'image/png')`;

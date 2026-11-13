@@ -8,12 +8,13 @@ import { classroomRoutes } from "./routes/classrooms";
 import { teacherRoutes } from "./routes/teachers";
 import { HttpError } from "./http-error";
 import { handleAppError } from "./error-handler";
-import { ensureUploadRoot, maxUploadBytes } from "./file-storage";
+import { cleanupUnusedLessonImages, ensureUploadRoot, maxUploadBytes } from "./file-storage";
 import { courseworkRoutes } from "./routes/coursework";
 import { studentAuthRoutes } from "./routes/student-auth";
 import { studentCourseworkRoutes } from "./routes/student-coursework";
 import { attendanceScheduleRoutes } from "./routes/attendance-schedule";
 import { studentAttendanceRoutes } from "./routes/student-attendance";
+import { lessonPageApiRoutes } from "./routes/lesson-pages";
 
 const port = Number(process.env.PORT ?? 3000);
 const appUrl = process.env.APP_URL ?? "http://localhost:3000";
@@ -23,6 +24,7 @@ if (process.env.NODE_ENV === "production" && !appUrl.startsWith("https://")) {
 
 await bootstrapDatabase();
 await ensureUploadRoot();
+await cleanupUnusedLessonImages();
 const webRoot = resolve(import.meta.dir, "../web/dist");
 const indexFile = resolve(webRoot, "index.html");
 
@@ -40,6 +42,7 @@ const app = new Elysia({ serve: { maxRequestBodySize: maxUploadBytes() + 1024 * 
   .use(courseworkRoutes)
   .use(studentCourseworkRoutes)
   .use(studentAttendanceRoutes)
+  .use(lessonPageApiRoutes)
   .use(teacherRoutes)
   .get("/student/*", () => new Response(null, { status: 302, headers: { Location: "/?role=student" } }))
   .get("/", () => file(indexFile))

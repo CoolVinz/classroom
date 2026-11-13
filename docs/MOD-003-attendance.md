@@ -12,6 +12,7 @@ Record one daily attendance result per roster student, collect automatic arrival
 
 - Teachers configure a term, weekdays, continuous start/end times, and late-arrival grace in Asia/Bangkok; they can cancel an individual upcoming lesson. Dated lessons snapshot their schedule, so started/history records survive later timetable edits.
 - A signed-in student opening the portal while one eligible lesson is in progress is automatically recorded as present through the grace cutoff, otherwise late. A single linked classroom starts automatically; overlapping classrooms require selection.
+- The same attendance panel is available when an already signed-in student reads a public lesson page, so scheduled tracking continues there. Anonymous readers do not create attendance records.
 - Focused, visible portal time is estimated with 30-second heartbeats and a 45-second server lease. Hidden or unfocused pages pause; long gaps and stale/duplicate tabs do not accrue disconnected time. Minutes are informational and do not affect status.
 - Teachers can manually mark present, absent, late, excused, or unmarked; manual status overrides automatic status. “Restore automatic” re-applies the recorded arrival result without erasing timing evidence.
 - After a lesson ends, teachers can finalize it once. Students eligible at lesson end with neither attendance nor an arrival are marked absent; existing marks remain unchanged.
@@ -42,7 +43,7 @@ Record one daily attendance result per roster student, collect automatic arrival
 ```text
 Teacher UI: web/src/App.tsx (Attendance, SummaryPage, RoomSummary)
 Timetable UI: web/src/AttendanceTimetable.tsx
-Student tracking UI: web/src/StudentAttendance.tsx, web/src/StudentPortal.tsx
+Student tracking UI: web/src/StudentAttendance.tsx, web/src/StudentPortal.tsx, web/src/PublicLessonPage.tsx
 Daily attendance API: src/routes/classrooms.ts
 Timetable, cancellation, reset, finalization API: src/routes/attendance-schedule.ts
 Student lesson and heartbeat API: src/routes/student-attendance.ts

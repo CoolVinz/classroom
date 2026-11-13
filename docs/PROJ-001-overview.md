@@ -15,8 +15,9 @@ A Thai-language classroom management app for teachers. Teachers manage their own
 - Classroom assignments, worksheet attachments, student model files, PDF/image previews, and STL/OBJ previews.
 - Excel/CSV roster import with ID mapping and duplicate review.
 - Student assignment access, worksheet viewing/download, private file submissions, and teacher submission status.
+- Reusable teacher lesson pages with text, uploaded pictures, YouTube videos, private drafts, and public share links.
 
-Parent accounts, gradebook, gallery blocks/likes, public sharing, and announcements remain unimplemented.
+Parent accounts, gradebook, virtual gallery blocks/likes, and announcements remain unimplemented.
 
 ## Main workflows
 
@@ -28,6 +29,7 @@ Parent accounts, gradebook, gallery blocks/likes, public sharing, and announceme
 6. Students view active assignments and worksheets for linked classrooms and submit files; teachers see submission status and review files.
 7. A teacher records attendance for a classroom date and saves the full roster atomically.
 8. A teacher views classroom/student attendance counts for a date range.
+9. A teacher builds and publishes a lesson page, then shares its link. Students can read without an account; signed-in students continue scheduled attendance tracking on the page.
 
 ## Major boundaries
 
@@ -35,6 +37,7 @@ Parent accounts, gradebook, gallery blocks/likes, public sharing, and announceme
 - **Classrooms and rosters:** [MOD-002](MOD-002-classrooms-rosters.md)
 - **Assignments and files:** [MOD-004](MOD-004-assignments-files.md)
 - **Attendance and summaries:** [MOD-003](MOD-003-attendance.md)
+- **Lesson pages:** [MOD-005](MOD-005-lessons.md)
 - **Persistence and ownership:** [DAT-001](DAT-001-data-model.md)
 - **Runtime and deployment:** [TEC-001](TEC-001-architecture.md), [OPS-001](OPS-001-deployment.md)
 

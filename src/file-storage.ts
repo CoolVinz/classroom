@@ -131,7 +131,8 @@ export async function saveFileThumbnail(fileId: string, bytes: Uint8Array, role:
         }
       }
       const [usage] = await tx<{ used: string }[]>`
-        SELECT COALESCE(SUM(size_bytes + COALESCE(thumbnail_size_bytes, 0)), 0)::text AS used FROM classroom.files
+        SELECT ((SELECT COALESCE(SUM(size_bytes + COALESCE(thumbnail_size_bytes, 0)), 0) FROM classroom.files) +
+          (SELECT COALESCE(SUM(size_bytes), 0) FROM classroom.lesson_page_images))::text AS used
       `;
       if (Number(usage.used) + bytes.byteLength > maxStoredBytes()) throw new HttpError(413, "พื้นที่จัดเก็บไฟล์เต็มแล้ว");
       await Bun.write(temporary, bytes);
@@ -182,6 +183,7 @@ export async function ensureUploadRoot() {
   const { sql } = await import("./db/client");
   const records = await sql<{ storageName: string; id: string; thumbnailSizeBytes: number | null; thumbnailMediaType: "image/png" | "image/webp" | null }[]>`
     SELECT storage_name AS "storageName", id, thumbnail_size_bytes AS "thumbnailSizeBytes", thumbnail_media_type AS "thumbnailMediaType" FROM classroom.files
+    UNION ALL SELECT storage_name AS "storageName", id, NULL::bigint AS "thumbnailSizeBytes", NULL::text AS "thumbnailMediaType" FROM classroom.lesson_page_images
   `;
   const referenced = new Set(records.map((record) => record.storageName));
   const referencedThumbnails = new Set(records.filter((record) => record.thumbnailSizeBytes !== null && record.thumbnailMediaType).map((record) => record.id + (record.thumbnailMediaType === "image/webp" ? ".webp" : ".png")));
@@ -216,6 +218,44 @@ export async function ensureUploadRoot() {
       await rm(path, { force: true });
     }
   }
+}
+
+export async function cleanupUnusedLessonImages() {
+  const { sql } = await import("./db/client");
+  const root = uploadRoot();
+  const staged: { id: string; original: string; tombstone: string }[] = [];
+  try {
+    await sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(870010022)`;
+      const unused = await tx<{ id: string; storageName: string }[]>`
+        SELECT i.id, i.storage_name AS "storageName" FROM classroom.lesson_page_images i
+        WHERE i.created_at < NOW() - INTERVAL '24 hours'
+          AND NOT EXISTS (
+            SELECT 1 FROM classroom.lesson_pages l
+            WHERE l.id = i.lesson_id AND (
+              EXISTS (SELECT 1 FROM jsonb_array_elements(l.draft_blocks) b WHERE b->>'type' = 'image' AND b->>'imageId' = i.id::text)
+              OR (l.published_blocks IS NOT NULL AND EXISTS (
+                SELECT 1 FROM jsonb_array_elements(l.published_blocks) b WHERE b->>'type' = 'image' AND b->>'imageId' = i.id::text
+              ))
+            )
+          ) FOR UPDATE OF i
+      `;
+      for (const image of unused) {
+        const original = resolve(root, image.storageName); const tombstone = original + ".deleting";
+        try { await rename(original, tombstone); staged.push({ id: image.id, original, tombstone }); }
+        catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; }
+      }
+      if (unused.length) await tx`DELETE FROM classroom.lesson_page_images WHERE id = ANY(${unused.map((image) => image.id)}::uuid[])`;
+    });
+  } catch (error) {
+    for (const item of staged) {
+      const [record] = await sql`SELECT id FROM classroom.lesson_page_images WHERE id = ${item.id}`.catch(() => []);
+      if (record) await rename(item.tombstone, item.original).catch(() => {});
+      else await rm(item.tombstone, { force: true }).catch(() => {});
+    }
+    throw error;
+  }
+  for (const item of staged) await rm(item.tombstone, { force: true }).catch(() => {});
 }
 
 export async function validateUpload(file: File, kind: UploadKind) {
@@ -373,7 +413,8 @@ export async function saveStudentWorkingFile(input: {
       `;
       if ((existing?.id ?? null) !== input.expectedFileId) throw new HttpError(409, "ไฟล์ทำงานเปลี่ยนไปแล้ว กรุณาโหลดข้อมูลใหม่");
       const [usage] = await tx<{ used: string }[]>`
-        SELECT COALESCE(SUM(size_bytes + COALESCE(thumbnail_size_bytes, 0)), 0)::text AS used FROM classroom.files
+          SELECT ((SELECT COALESCE(SUM(size_bytes + COALESCE(thumbnail_size_bytes, 0)), 0) FROM classroom.files) +
+            (SELECT COALESCE(SUM(size_bytes), 0) FROM classroom.lesson_page_images))::text AS used
       `;
       const currentSize = Number(existing?.sizeBytes ?? 0) + Number(existing?.thumbnailSizeBytes ?? 0);
       if (Number(usage.used) - currentSize + input.file.size > maxStoredBytes()) {

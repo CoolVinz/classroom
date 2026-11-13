@@ -1,0 +1,204 @@
+import { Elysia, t } from "elysia";
+import { randomUUID } from "node:crypto";
+import { mkdir, rename, rm } from "node:fs/promises";
+import { basename, resolve } from "node:path";
+import type postgres from "postgres";
+import sharp from "sharp";
+import { requireActor } from "../auth/session";
+import { sql } from "../db/client";
+import { HttpError } from "../http-error";
+import { checkRequestOrigin, cleanText } from "../security";
+import { cleanupUnusedLessonImages, maxStoredBytes, maxUploadBytes, uploadRoot, storedFilePath } from "../file-storage";
+
+const block = t.Union([
+  t.Object({ type: t.Literal("text"), heading: t.Optional(t.String({ maxLength: 120 })), text: t.String({ maxLength: 10000 }) }),
+  t.Object({ type: t.Literal("image"), imageId: t.String({ format: "uuid" }), alt: t.String({ maxLength: 300 }), caption: t.Optional(t.String({ maxLength: 500 })) }),
+  t.Object({ type: t.Literal("youtube"), videoId: t.String({ pattern: "^[A-Za-z0-9_-]{11}$" }), caption: t.Optional(t.String({ maxLength: 500 })) }),
+]);
+const blocks = t.Array(block, { maxItems: 100 });
+const revisionBody = t.Object({ expectedRevision: t.Integer({ minimum: 0 }) });
+
+function cleanupLater() {
+  void cleanupUnusedLessonImages().catch((error) => console.error("Lesson image cleanup deferred", error instanceof Error ? error.name : "unknown error"));
+}
+
+async function ownedPage(id: string, ownerId: string) {
+  const [page] = await sql`SELECT id FROM classroom.lesson_pages WHERE id = ${id} AND owner_id = ${ownerId}`;
+  if (!page) throw new HttpError(404, "ไม่พบบทเรียนนี้");
+}
+
+async function usedStorageBytes(tx: postgres.ISql) {
+  const [usage] = await tx<{ used: string }[]>`
+    SELECT (
+      (SELECT COALESCE(SUM(size_bytes + COALESCE(thumbnail_size_bytes, 0)), 0) FROM classroom.files) +
+      (SELECT COALESCE(SUM(size_bytes), 0) FROM classroom.lesson_page_images)
+    )::text AS used
+  `;
+  return Number(usage.used);
+}
+
+export const lessonPageRoutes = new Elysia({ prefix: "/api" })
+  .get("/lesson-pages", async ({ request }) => {
+    const actor = await requireActor(request);
+    return sql`SELECT id, title, draft_revision AS "draftRevision", published_at AS "publishedAt", updated_at AS "updatedAt"
+      FROM classroom.lesson_pages WHERE owner_id = ${actor.id} ORDER BY updated_at DESC`;
+  })
+  .post("/lesson-pages", async ({ body, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireActor(request);
+    const [page] = await sql`INSERT INTO classroom.lesson_pages (owner_id, title)
+      VALUES (${actor.id}, ${cleanText(body.title, 120)})
+      RETURNING id, title, draft_blocks AS blocks, draft_revision AS revision,
+        published_at AS "publishedAt", published_revision AS "publishedRevision"`;
+    return page;
+  }, { body: t.Object({ title: t.String({ minLength: 1, maxLength: 120 }) }) })
+  .get("/lesson-pages/:id", async ({ params, request }) => {
+    const actor = await requireActor(request);
+    const [page] = await sql`SELECT id, title, draft_blocks AS blocks, draft_revision AS revision,
+      published_at AS "publishedAt", published_revision AS "publishedRevision"
+      FROM classroom.lesson_pages WHERE id = ${params.id} AND owner_id = ${actor.id}`;
+    if (!page) throw new HttpError(404, "ไม่พบบทเรียนนี้");
+    return page;
+  })
+  .put("/lesson-pages/:id/draft", async ({ params, body, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireActor(request);
+    const [page] = await sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(870010022)`;
+      await validateImageReferences(params.id, actor.id, body.blocks, tx);
+      return tx`UPDATE classroom.lesson_pages
+        SET title = ${cleanText(body.title, 120)}, draft_blocks = ${sql.json(body.blocks)},
+          draft_revision = draft_revision + 1, updated_at = NOW()
+        WHERE id = ${params.id} AND owner_id = ${actor.id} AND draft_revision = ${body.expectedRevision}
+        RETURNING id, title, draft_blocks AS blocks, draft_revision AS revision,
+          published_at AS "publishedAt", published_revision AS "publishedRevision"`;
+    });
+    if (!page) await conflictOrMissing(params.id, actor.id);
+    cleanupLater();
+    return page;
+  }, { body: t.Object({ title: t.String({ minLength: 1, maxLength: 120 }), blocks, expectedRevision: t.Integer({ minimum: 0 }) }) })
+  .post("/lesson-pages/:id/publish", async ({ params, body, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireActor(request);
+    const [page] = await sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(870010022)`;
+      const [current] = await tx<{ id: string }[]>`SELECT id FROM classroom.lesson_pages
+        WHERE id = ${params.id} AND owner_id = ${actor.id} AND draft_revision = ${body.expectedRevision} FOR UPDATE`;
+      if (!current) return [];
+      await validateImageReferences(params.id, actor.id, body.blocks, tx);
+      return tx`UPDATE classroom.lesson_pages SET title = ${cleanText(body.title, 120)},
+        draft_blocks = ${sql.json(body.blocks)}, draft_revision = draft_revision + 1,
+        published_blocks = ${sql.json(body.blocks)}, published_revision = draft_revision + 1,
+        published_at = NOW(), updated_at = NOW()
+        WHERE id = ${params.id} AND owner_id = ${actor.id}
+        RETURNING id, title, draft_blocks AS blocks, draft_revision AS revision,
+          published_at AS "publishedAt", published_revision AS "publishedRevision"`;
+    });
+    if (!page) await conflictOrMissing(params.id, actor.id);
+    cleanupLater();
+    return page;
+  }, { body: t.Object({ title: t.String({ minLength: 1, maxLength: 120 }), blocks, expectedRevision: t.Integer({ minimum: 0 }) }) })
+  .post("/lesson-pages/:id/unpublish", async ({ params, body, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireActor(request);
+    const [page] = await sql`UPDATE classroom.lesson_pages SET published_blocks = NULL,
+      published_revision = NULL, published_at = NULL, updated_at = NOW()
+      WHERE id = ${params.id} AND owner_id = ${actor.id} AND draft_revision = ${body.expectedRevision}
+      RETURNING id`;
+    if (!page) await conflictOrMissing(params.id, actor.id);
+    cleanupLater();
+    return { ok: true };
+  }, { body: revisionBody })
+  .post("/lesson-pages/:id/images", async ({ params, body, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireActor(request);
+    await ownedPage(params.id, actor.id);
+    if (!body.file.size || body.file.size > maxUploadBytes()) throw new HttpError(413, "ไฟล์ภาพมีขนาดเกินกำหนด");
+    let image: Buffer; let mediaType: string;
+    try {
+      const input = Buffer.from(await body.file.arrayBuffer());
+      const processor = sharp(input, { failOn: "error", limitInputPixels: 40_000_000 });
+      const metadata = await processor.metadata();
+      if (!metadata.width || !metadata.height || metadata.pages && metadata.pages > 1 || !["jpeg", "png", "webp"].includes(metadata.format ?? "")) throw new Error("unsupported image");
+      image = await sharp(input, { failOn: "error", limitInputPixels: 40_000_000 })
+        .rotate().resize({ width: 1920, height: 1920, fit: "inside", withoutEnlargement: true })
+        .webp({ quality: 80 }).toBuffer();
+      if (image.byteLength > maxUploadBytes()) throw new HttpError(413, "ภาพหลังปรับขนาดมีขนาดเกินกำหนด");
+      mediaType = "image/webp";
+    } catch (error) { if (error instanceof HttpError) throw error; throw new HttpError(422, "รองรับภาพ PNG, JPEG หรือ WebP ที่เปิดได้เท่านั้น"); }
+    const originalName = basename(body.file.name).replace(/[\\/\0-\x1f\x7f]/g, "_").trim().slice(-255) || "image";
+    const id = randomUUID(); const storageName = id; const root = uploadRoot();
+    await mkdir(root, { recursive: true, mode: 0o750 });
+    const temporary = resolve(root, id + ".upload"); const destination = resolve(root, id); let renamed = false;
+    try {
+      await Bun.write(temporary, image);
+      await sql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(870010022)`;
+        const [lesson] = await tx`SELECT id FROM classroom.lesson_pages WHERE id = ${params.id} AND owner_id = ${actor.id} FOR UPDATE`;
+        if (!lesson) throw new HttpError(404, "ไม่พบบทเรียนนี้");
+        if (await usedStorageBytes(tx) + image.byteLength > maxStoredBytes()) throw new HttpError(413, "พื้นที่จัดเก็บไฟล์เต็มแล้ว");
+        await rename(temporary, destination); renamed = true;
+        await tx`INSERT INTO classroom.lesson_page_images (id, lesson_id, original_name, storage_name, size_bytes)
+          VALUES (${id}, ${params.id}, ${originalName}, ${storageName}, ${image.byteLength})`;
+      });
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => {});
+      if (renamed) {
+        try {
+          const [record] = await sql`SELECT id FROM classroom.lesson_page_images WHERE id = ${id}`;
+          if (!record) await rm(destination, { force: true });
+        } catch { /* Startup reconciliation removes orphaned images when the commit result is unknown. */ }
+      }
+      throw error;
+    }
+    cleanupLater();
+    return { id, originalName, mediaType };
+  }, { body: t.Object({ file: t.File() }) })
+  .get("/lesson-pages/:id/images/:imageId/content", async ({ params, request }) => {
+    const actor = await requireActor(request);
+    const [image] = await sql`SELECT i.storage_name AS "storageName" FROM classroom.lesson_page_images i
+      JOIN classroom.lesson_pages l ON l.id = i.lesson_id
+      WHERE l.id = ${params.id} AND i.id = ${params.imageId} AND l.owner_id = ${actor.id}`;
+    if (!image) throw new HttpError(404, "ไม่พบภาพนี้");
+    return imageResponse(await storedFilePath(image.storageName));
+  });
+
+const publicLessonPageRoutes = new Elysia({ prefix: "/api/public/lesson-pages" })
+  .get("/:id", async ({ params, set }) => {
+    set.headers["cache-control"] = "no-store";
+    const [page] = await sql`SELECT id, title, published_blocks AS blocks, published_at AS "publishedAt"
+      FROM classroom.lesson_pages WHERE id = ${params.id} AND published_blocks IS NOT NULL`;
+    if (!page) throw new HttpError(404, "ไม่พบบทเรียนที่เผยแพร่แล้ว");
+    return page;
+  }, { params: t.Object({ id: t.String({ format: "uuid" }) }) })
+  .get("/:id/images/:imageId/content", async ({ params }) => {
+    const [image] = await sql`SELECT i.storage_name AS "storageName" FROM classroom.lesson_page_images i
+      JOIN classroom.lesson_pages l ON l.id = i.lesson_id
+      WHERE l.id = ${params.id} AND i.id = ${params.imageId} AND l.published_blocks IS NOT NULL
+        AND EXISTS (SELECT 1 FROM jsonb_array_elements(l.published_blocks) block
+          WHERE block->>'type' = 'image' AND block->>'imageId' = i.id::text)`;
+    if (!image) throw new HttpError(404, "ไม่พบภาพนี้");
+    return imageResponse(await storedFilePath(image.storageName));
+  }, { params: t.Object({ id: t.String({ format: "uuid" }), imageId: t.String({ format: "uuid" }) }) });
+
+export const lessonPageApiRoutes = new Elysia().use(lessonPageRoutes).use(publicLessonPageRoutes);
+
+async function validateImageReferences(id: string, ownerId: string, contents: { type: string; imageId?: string }[], tx: postgres.ISql = sql) {
+  const ids = [...new Set(contents.flatMap((item) => item.type === "image" && item.imageId ? [item.imageId] : []))];
+  if (!ids.length) return;
+  const images = await tx`SELECT i.id FROM classroom.lesson_page_images i
+    JOIN classroom.lesson_pages l ON l.id = i.lesson_id
+    WHERE l.id = ${id} AND l.owner_id = ${ownerId} AND i.id = ANY(${ids}::uuid[])`;
+  if (images.length !== ids.length) throw new HttpError(422, "ภาพในบทเรียนไม่ถูกต้อง");
+}
+
+async function conflictOrMissing(id: string, ownerId: string) {
+  await ownedPage(id, ownerId);
+  throw new HttpError(409, "มีการแก้ไขบทเรียนจากอีกหน้าต่าง กรุณาโหลดบทเรียนใหม่ก่อนบันทึก");
+}
+
+function imageResponse(path: string) {
+  return new Response(Bun.file(path), { headers: {
+    "content-type": "image/webp", "cache-control": "no-store", "x-content-type-options": "nosniff",
+  } });
+}
