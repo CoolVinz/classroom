@@ -62,7 +62,7 @@ describe("student submission API", () => {
     const assignmentA = randomUUID(); const assignmentB = randomUUID();
     const teacherFile = randomUUID(); const peerFile = randomUUID();
     let teacherToken = ""; let studentToken = ""; let otherTeacherToken = "";
-    let lessonPageId: string | null = null;
+    const lessonPageIds: string[] = [];
     const otherTeacherId = randomUUID();
     let deleteTriggerName = ""; let deleteFunctionName = ""; let deleteTriggerInstalled = false;
     let workingTriggerName = ""; let workingFunctionName = ""; let workingTriggerInstalled = false;
@@ -433,7 +433,7 @@ describe("student submission API", () => {
       const lessonCreate = await app.handle(new Request("http://localhost/api/lesson-pages", { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title: "Synthetic lesson" }) }));
       expect(lessonCreate.status).toBe(200);
       const lesson = await lessonCreate.json() as { id: string; revision: number };
-      lessonPageId = lesson.id;
+      lessonPageIds.push(lesson.id);
       expect((await (await app.handle(new Request("http://localhost/api/lesson-pages", { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).json() as { id: string }[]).some((item) => item.id === lesson.id)).toBe(false);
       const png = await sharp({ create: { width: 32, height: 24, channels: 3, background: { r: 35, g: 120, b: 95 } } }).png().toBuffer();
       const invalidImageForm = new FormData(); invalidImageForm.set("file", new File(["not an image"], "fake.png", { type: "image/png" }));
@@ -451,6 +451,56 @@ describe("student submission API", () => {
       const imageUpload = await app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/images`, { method: "POST", headers: teacherHeaders, body: imageForm }));
       expect(imageUpload.status).toBe(200);
       const image = await imageUpload.json() as { id: string };
+
+      const codeCreate = await app.handle(new Request("http://localhost/api/lesson-pages", {
+        method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title: "Draft code title", editorMode: "code" }),
+      }));
+      expect(codeCreate.status).toBe(200);
+      const codeLesson = await codeCreate.json() as { id: string; revision: number; editorMode: string; blocks: { type: string }[] };
+      lessonPageIds.push(codeLesson.id);
+      expect(codeLesson).toMatchObject({ editorMode: "code", blocks: [{ type: "code" }] });
+      expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${codeLesson.id}/images`, { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).status).toBe(404);
+      const codeImageForm = new FormData(); codeImageForm.set("file", new File([png], "code-image.png", { type: "image/png" }));
+      const codeImageResponse = await app.handle(new Request(`http://localhost/api/lesson-pages/${codeLesson.id}/images`, { method: "POST", headers: teacherHeaders, body: codeImageForm }));
+      expect(codeImageResponse.status).toBe(200);
+      const codeImage = await codeImageResponse.json() as { id: string; originalName: string };
+      expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${codeLesson.id}/images`, { headers: teacherHeaders })).then((response) => response.json()) as { id: string }[]).map((item) => item.id)).toContain(codeImage.id);
+      const codePath = `/api/lesson-pages/${codeLesson.id}`;
+      const codeSource = (html: string, imageId?: string) => ({ type: "code", html, css: "body { color: #234; }", javascript: "window.lessonReady = true;", ...(imageId ? { imageIds: [imageId] } : {}) });
+      const saveCode = (expectedRevision: number, title: string, code: Record<string, unknown>) => app.handle(new Request(`http://localhost${codePath}/draft`, {
+        method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title, blocks: [code], expectedRevision }),
+      }));
+      expect((await saveCode(0, "Bad source", codeSource("<img src='lesson-image://not-a-uuid'>"))).status).toBe(422);
+      expect((await saveCode(0, "Malformed UUID", codeSource("<img src='lesson-image://00000000-0000-0000-0000-000000000000'>"))).status).toBe(422);
+      expect((await saveCode(0, "Foreign image", codeSource("<img src='lesson-image://" + image.id + "'>"))).status).toBe(422);
+      expect((await saveCode(0, "Oversize", { ...codeSource(""), javascript: "x".repeat(1048576) })).status).toBe(413);
+      expect((await saveCode(0, "Oversize UTF-8", { ...codeSource(""), javascript: "ก".repeat(349526) })).status).toBe(413);
+      expect((await saveCode(0, "Mixed blocks", { type: "text", text: "not code" })).status).toBe(422);
+      const validCode = codeSource(`<!doctype html><html><body><h1>Published source</h1><img src="lesson-image://${codeImage.id}"></body></html>`, codeImage.id);
+      const codeDraft = await saveCode(0, "Public code title", validCode);
+      expect(codeDraft.status).toBe(200);
+      expect((await codeDraft.json() as { blocks: { imageIds?: string[] }[] }).blocks[0].imageIds).toEqual([codeImage.id]);
+      expect((await app.handle(new Request(`http://localhost/api/public/lesson-pages/${codeLesson.id}`))).status).toBe(404);
+      const codePublish = await app.handle(new Request(`http://localhost${codePath}/publish`, {
+        method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title: "Public code title", blocks: [validCode], expectedRevision: 1 }),
+      }));
+      expect(codePublish.status).toBe(200);
+      const publicCode = await app.handle(new Request(`http://localhost/api/public/lesson-pages/${codeLesson.id}`));
+      expect(publicCode.status).toBe(200);
+      expect(await publicCode.json()).toMatchObject({ title: "Public code title", editorMode: "code", blocks: [{ html: expect.stringContaining("Published source"), imageIds: [codeImage.id] }] });
+      expect((await app.handle(new Request(`http://localhost/api/public/lesson-pages/${codeLesson.id}/images/${codeImage.id}/content`))).status).toBe(200);
+      const nextCode = codeSource("<!doctype html><body>Draft only</body>");
+      expect((await saveCode(2, "Private draft title", nextCode)).status).toBe(200);
+      expect(await (await app.handle(new Request(`http://localhost/api/public/lesson-pages/${codeLesson.id}`))).json()).toMatchObject({ title: "Public code title", blocks: [{ html: expect.stringContaining("Published source") }] });
+      await sql`UPDATE classroom.lesson_page_images SET created_at = NOW() - INTERVAL '48 hours' WHERE id = ${codeImage.id}`;
+      await cleanupUnusedLessonImages();
+      expect(await sql`SELECT id FROM classroom.lesson_page_images WHERE id = ${codeImage.id}`).toHaveLength(1);
+      expect((await app.handle(new Request(`http://localhost${codePath}/unpublish`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: 3 }) }))).status).toBe(200);
+      await cleanupUnusedLessonImages();
+      expect(await sql`SELECT id FROM classroom.lesson_page_images WHERE id = ${codeImage.id}`).toHaveLength(0);
+      expect((await app.handle(new Request(`http://localhost/api/public/lesson-pages/${codeLesson.id}`))).status).toBe(404);
+      expect((await app.handle(new Request(`http://localhost/api/public/lesson-pages/${codeLesson.id}/images/${codeImage.id}/content`))).status).toBe(404);
+
       const lessonBlocks = [
         { type: "text", heading: "Step one", text: "Synthetic lesson text" },
         { type: "image", imageId: image.id, alt: "Example", caption: "Sample image" },
@@ -705,7 +755,7 @@ describe("student submission API", () => {
       await mkdir(resolve(uploadDir, "thumbnails"), { recursive: true });
       await Bun.write(resolve(uploadDir, "thumbnails", removedFileId + ".png"), removedThumbnail);
       await sql.begin(async (tx) => {
-        if (lessonPageId) await tx`DELETE FROM classroom.lesson_pages WHERE id = ${lessonPageId}`;
+        if (lessonPageIds.length) await tx`DELETE FROM classroom.lesson_pages WHERE id = ANY(${lessonPageIds}::uuid[])`;
         await tx`INSERT INTO classroom.attendance (classroom_id, student_id, attendance_date, status) VALUES (${roomB}, ${studentC}, '2025-01-15', 'present')`;
         await tx`INSERT INTO classroom.files (id, classroom_id, assignment_id, student_id, uploaded_by, kind, original_name, storage_name, media_type, size_bytes, thumbnail_size_bytes, thumbnail_media_type)
           VALUES (${removedFileId}, ${roomB}, ${assignmentB}, ${studentC}, ${teacherId}, 'model', 'student.stl', ${storageName}, 'model/stl', 23, ${removedThumbnail.byteLength}, 'image/png')`;
@@ -785,6 +835,7 @@ describe("student submission API", () => {
       if (otherTeacherToken) await sql`DELETE FROM classroom.sessions WHERE token_hash = ${hash(otherTeacherToken)}`;
       if (studentToken) await sql`DELETE FROM classroom.student_sessions WHERE token_hash = ${hash(studentToken)}`;
       await sql.begin(async (tx) => {
+        if (lessonPageIds.length) await tx`DELETE FROM classroom.lesson_pages WHERE id = ANY(${lessonPageIds}::uuid[])`;
         await tx`DELETE FROM classroom.files WHERE classroom_id IN (${roomA}, ${roomB}, ${emptyRoom})`;
         await tx`DELETE FROM classroom.assignments WHERE classroom_id IN (${roomA}, ${roomB}, ${emptyRoom})`;
         await tx`DELETE FROM classroom.attendance WHERE classroom_id IN (${roomA}, ${roomB}, ${emptyRoom})`;

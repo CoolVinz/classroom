@@ -233,9 +233,13 @@ export async function cleanupUnusedLessonImages() {
           AND NOT EXISTS (
             SELECT 1 FROM classroom.lesson_pages l
             WHERE l.id = i.lesson_id AND (
-              EXISTS (SELECT 1 FROM jsonb_array_elements(l.draft_blocks) b WHERE b->>'type' = 'image' AND b->>'imageId' = i.id::text)
+              EXISTS (SELECT 1 FROM jsonb_array_elements(l.draft_blocks) b WHERE
+                (b->>'type' = 'image' AND b->>'imageId' = i.id::text)
+                OR (b->>'type' = 'code' AND b->'imageIds' ? i.id::text))
               OR (l.published_blocks IS NOT NULL AND EXISTS (
-                SELECT 1 FROM jsonb_array_elements(l.published_blocks) b WHERE b->>'type' = 'image' AND b->>'imageId' = i.id::text
+                SELECT 1 FROM jsonb_array_elements(l.published_blocks) b WHERE
+                  (b->>'type' = 'image' AND b->>'imageId' = i.id::text)
+                  OR (b->>'type' = 'code' AND b->'imageIds' ? i.id::text)
               ))
             )
           ) FOR UPDATE OF i

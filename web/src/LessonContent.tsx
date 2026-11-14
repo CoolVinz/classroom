@@ -1,16 +1,18 @@
 import { useState } from "react";
+import type { CodeBlock } from "./code-lesson";
 
 export type LessonBlock =
   | { type: "text"; heading?: string; text: string }
   | { type: "image"; imageId: string; alt: string; caption?: string }
-  | { type: "youtube"; videoId: string; caption?: string };
+  | { type: "youtube"; videoId: string; caption?: string }
+  | CodeBlock;
 
 export function LessonContent({ title, blocks, imageUrl }: { title: string; blocks: LessonBlock[]; imageUrl: (id: string) => string }) {
   return <article className="lesson-reading-content"><h1>{title}</h1>{blocks.map((block, index) => block.type === "text"
     ? <section className="lesson-reading-text" key={index}>{block.heading && <h2>{block.heading}</h2>}<p>{block.text}</p></section>
     : block.type === "image"
       ? <figure key={block.imageId}><img loading="lazy" src={imageUrl(block.imageId)} alt={block.alt} />{block.caption && <figcaption>{block.caption}</figcaption>}</figure>
-      : <YouTube key={block.videoId + "-" + index} block={block} />
+      : block.type === "youtube" ? <YouTube key={block.videoId + "-" + index} block={block} /> : null
   )}</article>;
 }
 

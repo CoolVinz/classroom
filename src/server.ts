@@ -15,6 +15,7 @@ import { studentCourseworkRoutes } from "./routes/student-coursework";
 import { attendanceScheduleRoutes } from "./routes/attendance-schedule";
 import { studentAttendanceRoutes } from "./routes/student-attendance";
 import { lessonPageApiRoutes } from "./routes/lesson-pages";
+import { appFramePolicy } from "./content-security-policy";
 
 const port = Number(process.env.PORT ?? 3000);
 const appUrl = process.env.APP_URL ?? "http://localhost:3000";
@@ -45,7 +46,7 @@ const app = new Elysia({ serve: { maxRequestBodySize: maxUploadBytes() + 1024 * 
   .use(lessonPageApiRoutes)
   .use(teacherRoutes)
   .get("/student/*", () => new Response(null, { status: 302, headers: { Location: "/?role=student" } }))
-  .get("/", () => file(indexFile))
+  .get("/", ({ set }) => { set.headers["content-security-policy"] = appFramePolicy; return file(indexFile); })
   .get("/assets/*", ({ request }) => {
     let pathname: string;
     try { pathname = decodeURIComponent(new URL(request.url).pathname); }
@@ -54,7 +55,7 @@ const app = new Elysia({ serve: { maxRequestBodySize: maxUploadBytes() + 1024 * 
     if (!assetPath.startsWith(webRoot + sep) || !existsSync(assetPath)) return new Response("Not found", { status: 404 });
     return file(assetPath);
   })
-  .get("/*", () => file(indexFile))
+  .get("/*", ({ set }) => { set.headers["content-security-policy"] = appFramePolicy; return file(indexFile); })
   .listen({ port, hostname: "0.0.0.0" });
 
 console.log("Classroom server listening on " + app.server?.hostname + ":" + app.server?.port);

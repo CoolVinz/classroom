@@ -15,7 +15,7 @@ A Thai-language classroom management app for teachers. Teachers manage their own
 - Classroom assignments, worksheet attachments, student model files, PDF/image previews, and STL/OBJ previews.
 - Excel/CSV roster import with ID mapping and duplicate review.
 - Student assignment access, worksheet viewing/download, private file submissions, and teacher submission status.
-- Reusable teacher lesson pages with text, uploaded pictures, YouTube videos, private drafts, and public share links.
+- Reusable teacher lesson pages with a block builder or full-page HTML/CSS/JavaScript editor, uploaded pictures, YouTube videos, private drafts, and public share links.
 
 Parent accounts, gradebook, virtual gallery blocks/likes, and announcements remain unimplemented.
 

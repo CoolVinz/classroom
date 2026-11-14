@@ -59,6 +59,7 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
 function App() {
   const [user, setUser] = useState<User | null>(null); const [ready, setReady] = useState(false);
   const [view, setView] = useState<View>("home"); const [selected, setSelected] = useState<Classroom | null>(null);
+  const [lessonDirty, setLessonDirty] = useState(false);
   const [rooms, setRooms] = useState<Classroom[]>([]); const [stats, setStats] = useState<Record<string, number | string> | null>(null);
   const [error, setError] = useState(""); const [busy, setBusy] = useState(false);
   const refresh = useCallback(async () => {
@@ -74,18 +75,23 @@ function App() {
     catch (reason) { setError(reason instanceof Error ? reason.message : "สร้างห้องเรียนไม่สำเร็จ"); throw reason; }
     finally { setBusy(false); }
   }
-  async function logout() { try { await api("/auth/logout", { method: "POST" }); } catch { /* Clear the local view even when the network is unavailable. */ } setUser(null); setSelected(null); setView("home"); }
+  function confirmLessonLeave() {
+    if (lessonDirty && !window.confirm("ออกจากบทเรียนโดยไม่บันทึกการแก้ไขหรือไม่?")) return false;
+    setLessonDirty(false);
+    return true;
+  }
+  async function logout() { if (!confirmLessonLeave()) return; try { await api("/auth/logout", { method: "POST" }); } catch { /* Clear the local view even when the network is unavailable. */ } setUser(null); setSelected(null); setView("home"); }
   if (!ready) return <div className="loading"><span className="spinner" />กำลังเปิดห้องเรียนของคุณ…</div>;
   if (/^\/lessons\/[0-9a-f-]{36}\/?$/i.test(window.location.pathname)) return <PublicLessonPage student={user?.role === "student" ? user : null} />;
   if (!user) return <Login onLogin={setUser} />;
   if (user.role === "student") return <StudentPortal user={user} logout={() => void logout()} />;
   const pageNames: Record<View, string> = { home: "ภาพรวม", classes: "ห้องเรียน", summary: "สรุปการเข้าเรียน", teachers: "จัดการบัญชีครู", lessons: "บทเรียน" };
   return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark">ค</div><div><strong>ห้องเรียน</strong><span>พื้นที่ของคุณครู</span></div></div><p className="side-caption">เมนู</p>
-    <nav className="side-nav" aria-label="เมนูหลัก"><button className={view === "home" && !selected ? "active" : ""} onClick={() => { setView("home"); setSelected(null); }}><span>⌂</span>ภาพรวม</button><button className={view === "classes" ? "active" : ""} onClick={() => { setView("classes"); setSelected(null); }}><span>▦</span>ห้องเรียน</button><button className={view === "lessons" ? "active" : ""} onClick={() => { setView("lessons"); setSelected(null); }}><span>▧</span>บทเรียน</button><button className={view === "summary" ? "active" : ""} onClick={() => { setView("summary"); setSelected(null); }}><span>▤</span>สรุปการเข้าเรียน</button>{user.role === "owner" && <button className={view === "teachers" ? "active" : ""} onClick={() => { setView("teachers"); setSelected(null); }}><span>♙</span>จัดการบัญชีครู</button>}</nav>
+    <nav className="side-nav" aria-label="เมนูหลัก"><button className={view === "home" && !selected ? "active" : ""} onClick={() => { if (view !== "home" && !confirmLessonLeave()) return; setView("home"); setSelected(null); }}><span>⌂</span>ภาพรวม</button><button className={view === "classes" ? "active" : ""} onClick={() => { if (view !== "classes" && !confirmLessonLeave()) return; setView("classes"); setSelected(null); }}><span>▦</span>ห้องเรียน</button><button className={view === "lessons" ? "active" : ""} onClick={() => { if (view !== "lessons" && !confirmLessonLeave()) return; setView("lessons"); setSelected(null); }}><span>▧</span>บทเรียน</button><button className={view === "summary" ? "active" : ""} onClick={() => { if (view !== "summary" && !confirmLessonLeave()) return; setView("summary"); setSelected(null); }}><span>▤</span>สรุปการเข้าเรียน</button>{user.role === "owner" && <button className={view === "teachers" ? "active" : ""} onClick={() => { if (view !== "teachers" && !confirmLessonLeave()) return; setView("teachers"); setSelected(null); }}><span>♙</span>จัดการบัญชีครู</button>}</nav>
     <div className="sidebar-bottom"><div className="profile"><div className="avatar">{user.displayName.slice(0, 1)}</div><div className="profile-copy"><strong>{user.displayName}</strong><span>{user.role === "owner" ? "ผู้ดูแล" : "คุณครู"}</span></div><button className="icon-button" onClick={logout} aria-label="ออกจากระบบ" title="ออกจากระบบ">↗</button></div></div>
   </aside><main className="main-area"><header className="topbar"><div className="breadcrumb">ห้องเรียน <span>/</span> {selected?.name ?? pageNames[view]}</div><div className="date-pill"><i />{showDate(today)}</div></header><div className="page-content">{error && <div className="notice" role="alert">{error}<button onClick={() => setError("")} aria-label="ปิด">×</button></div>}
     {selected ? <ClassDetail room={selected} refresh={refresh} back={() => setSelected(null)} onError={setError} /> : view === "home" ? <Dashboard user={user} rooms={rooms} stats={stats} create={createRoom} open={setSelected} browse={() => setView("classes")} busy={busy} /> : null}
-    {!selected && view === "classes" && <ClassList rooms={rooms} create={createRoom} open={setSelected} busy={busy} onError={setError} />}{!selected && view === "summary" && <SummaryPage rooms={rooms} />}{!selected && view === "teachers" && user.role === "owner" && <TeacherAdmin onError={setError} />}{!selected && view === "lessons" && <LessonLibrary onError={setError} />}
+    {!selected && view === "classes" && <ClassList rooms={rooms} create={createRoom} open={setSelected} busy={busy} onError={setError} />}{!selected && view === "summary" && <SummaryPage rooms={rooms} />}{!selected && view === "teachers" && user.role === "owner" && <TeacherAdmin onError={setError} />}{!selected && view === "lessons" && <LessonLibrary onError={setError} onDirtyChange={setLessonDirty} />}
   </div></main></div>;
 }
 

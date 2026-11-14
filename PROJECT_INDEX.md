@@ -9,7 +9,7 @@ AI entry point. Read `AI_CONTEXT.md`, then open only the documents relevant to t
 | PROJ-001 | Overview | [docs/PROJ-001-overview.md](docs/PROJ-001-overview.md) | Users, capabilities, and main workflows | `project, workflows` | LOW | LOW | MOD-001, MOD-002, MOD-003, MOD-004, MOD-005 |
 | PROJ-002 | AI context rules | [AI_CONTEXT.md](AI_CONTEXT.md) | Selective retrieval and documentation rules | `AI, retrieval` | LOW | LOW | TEC-003 |
 | DAT-001 | Data model | [docs/DAT-001-data-model.md](docs/DAT-001-data-model.md) | Entities, relationships, and ownership | `PostgreSQL, data, ownership` | LOW | LOW | MOD-002, MOD-003, MOD-004, MOD-005 |
-| TEC-001 | Architecture | [docs/TEC-001-architecture.md](docs/TEC-001-architecture.md) | Current React, Elysia, and database architecture | `React, Elysia, uploads, workers, lessons` | LOW | LOW | MOD-001, MOD-002, MOD-003, MOD-004, MOD-005 |
+| TEC-001 | Architecture | [docs/TEC-001-architecture.md](docs/TEC-001-architecture.md) | Current React, Elysia, and database architecture | `React, Elysia, uploads, workers, lessons, sandbox` | LOW | LOW | MOD-001, MOD-002, MOD-003, MOD-004, MOD-005 |
 | TEC-002 | Project profile | [PROJECT_PROFILE.md](PROJECT_PROFILE.md) | Stack, commands, constraints, and debt | `stack, tooling, constraints` | LOW | LOW | TEC-001, OPS-001, MOD-004, MOD-005 |
 | TEC-003 | Module template | [docs/MODULE_TEMPLATE.md](docs/MODULE_TEMPLATE.md) | Format for future module documentation | `template, Code Map` | LOW | LOW | PROJ-002 |
 | OPS-001 | Deployment | [docs/OPS-001-deployment.md](docs/OPS-001-deployment.md) | Docker and Coolify deployment requirements | `Docker, Coolify, operations` | LOW | LOW | TEC-001, DAT-001, MOD-005 |
@@ -26,7 +26,7 @@ Project-document rows are rated LOW/LOW; module rows below describe implementati
 | MOD-002 | Classrooms and student rosters | [docs/MOD-002-classrooms-rosters.md](docs/MOD-002-classrooms-rosters.md) | Classroom numbers, headered/headerless roster import, archive, and scoped permanent removal | `classrooms, students, Google, CSV, XLSX, removal` | MEDIUM | HIGH | MOD-001, MOD-003, MOD-004, DAT-001 |
 | MOD-003 | Scheduled daily attendance and summaries | [docs/MOD-003-attendance.md](docs/MOD-003-attendance.md) | Weekly timetable, student arrival/visible-time tracking, teacher review/finalization, and daily summaries | `attendance, timetable, arrival, visible-time, reports` | HIGH | HIGH | MOD-001, MOD-002, DAT-001 |
 | MOD-004 | Assignments, files, and marking | [docs/MOD-004-assignments-files.md](docs/MOD-004-assignments-files.md) | Private submissions, Blender working files, saved thumbnails, per-student scores, and storage cleanup | `assignments, submissions, Blender, assessments, thumbnails, storage` | HIGH | HIGH | MOD-001, MOD-002, DAT-001, TEC-001, REQ-001 |
-| MOD-005 | Shareable lesson library | [docs/MOD-005-lessons.md](docs/MOD-005-lessons.md) | Teacher-owned drafts and public link-based lessons with text, images, and YouTube videos | `lessons, public-links, images, YouTube` | HIGH | HIGH | MOD-001, MOD-003, DAT-001, TEC-001, OPS-001 |
+| MOD-005 | Shareable lesson library | [docs/MOD-005-lessons.md](docs/MOD-005-lessons.md) | Teacher-owned block or HTML/CSS/JavaScript lessons published by public link | `lessons, public-links, code, sandbox, images, YouTube` | HIGH | HIGH | MOD-001, MOD-003, DAT-001, TEC-001, OPS-001 |
 
 ## Retrieval
 

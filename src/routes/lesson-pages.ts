@@ -14,9 +14,14 @@ const block = t.Union([
   t.Object({ type: t.Literal("text"), heading: t.Optional(t.String({ maxLength: 120 })), text: t.String({ maxLength: 10000 }) }),
   t.Object({ type: t.Literal("image"), imageId: t.String({ format: "uuid" }), alt: t.String({ maxLength: 300 }), caption: t.Optional(t.String({ maxLength: 500 })) }),
   t.Object({ type: t.Literal("youtube"), videoId: t.String({ pattern: "^[A-Za-z0-9_-]{11}$" }), caption: t.Optional(t.String({ maxLength: 500 })) }),
+  t.Object({ type: t.Literal("code"), html: t.String({ maxLength: 1048576 }), css: t.String({ maxLength: 1048576 }), javascript: t.String({ maxLength: 1048576 }), imageIds: t.Optional(t.Array(t.String({ format: "uuid" }), { maxItems: 50 })) }),
 ]);
 const blocks = t.Array(block, { maxItems: 100 });
 const revisionBody = t.Object({ expectedRevision: t.Integer({ minimum: 0 }) });
+const lessonBody = t.Object({ title: t.String({ minLength: 1, maxLength: 120 }), blocks, expectedRevision: t.Integer({ minimum: 0 }) });
+type LessonBlock = { type: "text"; heading?: string; text: string } | { type: "image"; imageId: string; alt: string; caption?: string } | { type: "youtube"; videoId: string; caption?: string } | { type: "code"; html: string; css: string; javascript: string; imageIds?: string[] };
+type StoredBlock = Exclude<LessonBlock, { type: "code" }> | Extract<LessonBlock, { type: "code" }> & { imageIds: string[] };
+const lessonImagePattern = /lesson-image:\/\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/gi;
 
 function cleanupLater() {
   void cleanupUnusedLessonImages().catch((error) => console.error("Lesson image cleanup deferred", error instanceof Error ? error.name : "unknown error"));
@@ -40,22 +45,24 @@ async function usedStorageBytes(tx: postgres.ISql) {
 export const lessonPageRoutes = new Elysia({ prefix: "/api" })
   .get("/lesson-pages", async ({ request }) => {
     const actor = await requireActor(request);
-    return sql`SELECT id, title, draft_revision AS "draftRevision", published_at AS "publishedAt", updated_at AS "updatedAt"
+    return sql`SELECT id, title, editor_mode AS "editorMode", draft_revision AS "draftRevision", published_at AS "publishedAt", updated_at AS "updatedAt"
       FROM classroom.lesson_pages WHERE owner_id = ${actor.id} ORDER BY updated_at DESC`;
   })
   .post("/lesson-pages", async ({ body, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
-    const [page] = await sql`INSERT INTO classroom.lesson_pages (owner_id, title)
-      VALUES (${actor.id}, ${cleanText(body.title, 120)})
-      RETURNING id, title, draft_blocks AS blocks, draft_revision AS revision,
+    const editorMode = body.editorMode ?? "blocks";
+    const initialBlocks: StoredBlock[] = editorMode === "code" ? [{ type: "code", html: "", css: "", javascript: "", imageIds: [] }] : [];
+    const [page] = await sql`INSERT INTO classroom.lesson_pages (owner_id, title, editor_mode, draft_blocks)
+      VALUES (${actor.id}, ${cleanText(body.title, 120)}, ${editorMode}, ${sql.json(initialBlocks)})
+      RETURNING id, title, editor_mode AS "editorMode", draft_blocks AS blocks, draft_revision AS revision,
         published_at AS "publishedAt", published_revision AS "publishedRevision"`;
     return page;
-  }, { body: t.Object({ title: t.String({ minLength: 1, maxLength: 120 }) }) })
+  }, { body: t.Object({ title: t.String({ minLength: 1, maxLength: 120 }), editorMode: t.Optional(t.Union([t.Literal("blocks"), t.Literal("code")])) }) })
   .get("/lesson-pages/:id", async ({ params, request }) => {
     const actor = await requireActor(request);
-    const [page] = await sql`SELECT id, title, draft_blocks AS blocks, draft_revision AS revision,
-      published_at AS "publishedAt", published_revision AS "publishedRevision"
+    const [page] = await sql`SELECT id, title, editor_mode AS "editorMode", draft_blocks AS blocks, draft_revision AS revision,
+      published_title AS "publishedTitle", published_at AS "publishedAt", published_revision AS "publishedRevision"
       FROM classroom.lesson_pages WHERE id = ${params.id} AND owner_id = ${actor.id}`;
     if (!page) throw new HttpError(404, "ไม่พบบทเรียนนี้");
     return page;
@@ -65,44 +72,51 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
     const actor = await requireActor(request);
     const [page] = await sql.begin(async (tx) => {
       await tx`SELECT pg_advisory_xact_lock(870010022)`;
-      await validateImageReferences(params.id, actor.id, body.blocks, tx);
+      const [current] = await tx<{ editorMode: "blocks" | "code" }[]>`SELECT editor_mode AS "editorMode" FROM classroom.lesson_pages
+        WHERE id = ${params.id} AND owner_id = ${actor.id} AND draft_revision = ${body.expectedRevision} FOR UPDATE`;
+      if (!current) return [];
+      const content = normalizeBlocks(current.editorMode, body.blocks);
+      await validateImageReferences(params.id, actor.id, content, tx);
       return tx`UPDATE classroom.lesson_pages
-        SET title = ${cleanText(body.title, 120)}, draft_blocks = ${sql.json(body.blocks)},
+        SET title = ${cleanText(body.title, 120)}, draft_blocks = ${sql.json(content)},
           draft_revision = draft_revision + 1, updated_at = NOW()
         WHERE id = ${params.id} AND owner_id = ${actor.id} AND draft_revision = ${body.expectedRevision}
-        RETURNING id, title, draft_blocks AS blocks, draft_revision AS revision,
+        RETURNING id, title, editor_mode AS "editorMode", draft_blocks AS blocks, draft_revision AS revision,
+          published_title AS "publishedTitle",
           published_at AS "publishedAt", published_revision AS "publishedRevision"`;
     });
     if (!page) await conflictOrMissing(params.id, actor.id);
     cleanupLater();
     return page;
-  }, { body: t.Object({ title: t.String({ minLength: 1, maxLength: 120 }), blocks, expectedRevision: t.Integer({ minimum: 0 }) }) })
+  }, { body: lessonBody })
   .post("/lesson-pages/:id/publish", async ({ params, body, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
     const [page] = await sql.begin(async (tx) => {
       await tx`SELECT pg_advisory_xact_lock(870010022)`;
-      const [current] = await tx<{ id: string }[]>`SELECT id FROM classroom.lesson_pages
+      const [current] = await tx<{ editorMode: "blocks" | "code" }[]>`SELECT editor_mode AS "editorMode" FROM classroom.lesson_pages
         WHERE id = ${params.id} AND owner_id = ${actor.id} AND draft_revision = ${body.expectedRevision} FOR UPDATE`;
       if (!current) return [];
-      await validateImageReferences(params.id, actor.id, body.blocks, tx);
+      const content = normalizeBlocks(current.editorMode, body.blocks);
+      await validateImageReferences(params.id, actor.id, content, tx);
       return tx`UPDATE classroom.lesson_pages SET title = ${cleanText(body.title, 120)},
-        draft_blocks = ${sql.json(body.blocks)}, draft_revision = draft_revision + 1,
-        published_blocks = ${sql.json(body.blocks)}, published_revision = draft_revision + 1,
+        draft_blocks = ${sql.json(content)}, draft_revision = draft_revision + 1,
+        published_blocks = ${sql.json(content)}, published_title = ${cleanText(body.title, 120)}, published_revision = draft_revision + 1,
         published_at = NOW(), updated_at = NOW()
         WHERE id = ${params.id} AND owner_id = ${actor.id}
-        RETURNING id, title, draft_blocks AS blocks, draft_revision AS revision,
+        RETURNING id, title, editor_mode AS "editorMode", draft_blocks AS blocks, draft_revision AS revision,
+          published_title AS "publishedTitle",
           published_at AS "publishedAt", published_revision AS "publishedRevision"`;
     });
     if (!page) await conflictOrMissing(params.id, actor.id);
     cleanupLater();
     return page;
-  }, { body: t.Object({ title: t.String({ minLength: 1, maxLength: 120 }), blocks, expectedRevision: t.Integer({ minimum: 0 }) }) })
+  }, { body: lessonBody })
   .post("/lesson-pages/:id/unpublish", async ({ params, body, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
     const [page] = await sql`UPDATE classroom.lesson_pages SET published_blocks = NULL,
-      published_revision = NULL, published_at = NULL, updated_at = NOW()
+      published_title = NULL, published_revision = NULL, published_at = NULL, updated_at = NOW()
       WHERE id = ${params.id} AND owner_id = ${actor.id} AND draft_revision = ${body.expectedRevision}
       RETURNING id`;
     if (!page) await conflictOrMissing(params.id, actor.id);
@@ -154,6 +168,13 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
     cleanupLater();
     return { id, originalName, mediaType };
   }, { body: t.Object({ file: t.File() }) })
+  .get("/lesson-pages/:id/images", async ({ params, request }) => {
+    const actor = await requireActor(request);
+    const [page] = await sql`SELECT id FROM classroom.lesson_pages WHERE id = ${params.id} AND owner_id = ${actor.id}`;
+    if (!page) throw new HttpError(404, "ไม่พบบทเรียนนี้");
+    return sql`SELECT id, original_name AS "originalName", size_bytes AS "sizeBytes"
+      FROM classroom.lesson_page_images WHERE lesson_id = ${params.id} ORDER BY created_at DESC`;
+  })
   .get("/lesson-pages/:id/images/:imageId/content", async ({ params, request }) => {
     const actor = await requireActor(request);
     const [image] = await sql`SELECT i.storage_name AS "storageName" FROM classroom.lesson_page_images i
@@ -166,7 +187,7 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
 const publicLessonPageRoutes = new Elysia({ prefix: "/api/public/lesson-pages" })
   .get("/:id", async ({ params, set }) => {
     set.headers["cache-control"] = "no-store";
-    const [page] = await sql`SELECT id, title, published_blocks AS blocks, published_at AS "publishedAt"
+    const [page] = await sql`SELECT id, published_title AS title, editor_mode AS "editorMode", published_blocks AS blocks, published_at AS "publishedAt"
       FROM classroom.lesson_pages WHERE id = ${params.id} AND published_blocks IS NOT NULL`;
     if (!page) throw new HttpError(404, "ไม่พบบทเรียนที่เผยแพร่แล้ว");
     return page;
@@ -176,15 +197,31 @@ const publicLessonPageRoutes = new Elysia({ prefix: "/api/public/lesson-pages" }
       JOIN classroom.lesson_pages l ON l.id = i.lesson_id
       WHERE l.id = ${params.id} AND i.id = ${params.imageId} AND l.published_blocks IS NOT NULL
         AND EXISTS (SELECT 1 FROM jsonb_array_elements(l.published_blocks) block
-          WHERE block->>'type' = 'image' AND block->>'imageId' = i.id::text)`;
+          WHERE (block->>'type' = 'image' AND block->>'imageId' = i.id::text)
+            OR (block->>'type' = 'code' AND block->'imageIds' ? i.id::text))`;
     if (!image) throw new HttpError(404, "ไม่พบภาพนี้");
     return imageResponse(await storedFilePath(image.storageName));
   }, { params: t.Object({ id: t.String({ format: "uuid" }), imageId: t.String({ format: "uuid" }) }) });
 
 export const lessonPageApiRoutes = new Elysia().use(lessonPageRoutes).use(publicLessonPageRoutes);
 
-async function validateImageReferences(id: string, ownerId: string, contents: { type: string; imageId?: string }[], tx: postgres.ISql = sql) {
-  const ids = [...new Set(contents.flatMap((item) => item.type === "image" && item.imageId ? [item.imageId] : []))];
+function normalizeBlocks(mode: "blocks" | "code", contents: LessonBlock[]): StoredBlock[] {
+  if (mode === "blocks") {
+    if (contents.some((item) => item.type === "code")) throw new HttpError(422, "รูปแบบเนื้อหาไม่ตรงกับบทเรียน");
+    return contents as StoredBlock[];
+  }
+  if (contents.length !== 1 || contents[0].type !== "code") throw new HttpError(422, "บทเรียนโค้ดต้องมีแหล่งเนื้อหาเพียงชุดเดียว");
+  const code = contents[0];
+  if (Buffer.byteLength(code.html + code.css + code.javascript, "utf8") > 1048576) throw new HttpError(413, "โค้ดรวมต้องมีขนาดไม่เกิน 1 MiB");
+  const sources = [code.html, code.css, code.javascript];
+  if (sources.some((source) => source.replace(lessonImagePattern, "").includes("lesson-image://"))) throw new HttpError(422, "รูปอ้างอิงต้องใช้รหัสภาพที่ถูกต้อง");
+  const imageIds = [...new Set(sources.flatMap((source) => [...source.matchAll(lessonImagePattern)].map((match) => match[1].toLowerCase())))];
+  if (imageIds.length > 50) throw new HttpError(422, "บทเรียนหนึ่งรายการใช้ภาพอัปโหลดได้ไม่เกิน 50 ภาพ");
+  return [{ type: "code", html: code.html, css: code.css, javascript: code.javascript, imageIds }];
+}
+
+async function validateImageReferences(id: string, ownerId: string, contents: StoredBlock[], tx: postgres.ISql = sql) {
+  const ids = [...new Set(contents.flatMap((item) => item.type === "image" ? [item.imageId] : item.type === "code" ? item.imageIds : []))];
   if (!ids.length) return;
   const images = await tx`SELECT i.id FROM classroom.lesson_page_images i
     JOIN classroom.lesson_pages l ON l.id = i.lesson_id
