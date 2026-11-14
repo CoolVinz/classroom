@@ -25,6 +25,10 @@ export function CodeLessonEditor({ code, images, onChange, onUpload }: {
   }
 
   return <section className="code-lesson-editor" aria-label="ตัวแก้ไขโค้ดบทเรียน">
+    <label>Framework<select value={code.framework ?? "none"} onChange={(event) => onChange({ ...code, framework: event.target.value as CodeBlock["framework"] })}>
+      <option value="none">None — ไม่ใช้เฟรมเวิร์ก</option><option value="bootstrap">Bootstrap 5.3.9 — CSS + JavaScript</option>
+    </select></label>
+    {code.framework === "bootstrap" && <p className="muted">ระบบโหลด Bootstrap CSS และ JavaScript ให้แล้ว ไม่ต้องเพิ่มลิงก์ Bootstrap ในโค้ดซ้ำ ใช้ CSS และ JavaScript ของคุณเพิ่มเติมได้</p>}
     <div className="code-editor-tabs" role="tablist" aria-label="ภาษาในบทเรียน">
       {(["html", "css", "javascript"] as const).map((name) => <button key={name} role="tab" aria-selected={field === name} onClick={() => setField(name)}>{name === "javascript" ? "JavaScript" : name.toUpperCase()}</button>)}
     </div>
@@ -82,7 +86,7 @@ export function CodeLessonFrame({ code, imageUrl, autoRun = false }: {
       const replace = (source: string) => source.replace(/lesson-image:\/\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/gi, (token, id: string) => resolved.get(id.toLowerCase()) ?? token);
       const css = replace(captured.css); const javascript = replace(captured.javascript); const content = replace(captured.html);
       setImageWarning(missing);
-      setHtml(createCodeLessonDocument(content, css, javascript));
+      setHtml(createCodeLessonDocument(content, css, javascript, captured.framework));
     })().catch(() => { if (!controller.signal.aborted) setImageWarning(true); });
     return () => controller.abort();
   }, [running, captured, run, imageUrl]);

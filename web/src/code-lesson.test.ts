@@ -25,3 +25,19 @@ test("uploaded image markers resolve to unique UUIDs", () => {
   expect(lessonImageIds(`<img src="lesson-image://${first}">`, `url(lesson-image://${first}) lesson-image://${second}`)).toEqual([first, second]);
   expect(lessonImageIds("lesson-image://not-a-uuid")).toEqual([]);
 });
+
+
+test("Bootstrap is opt-in and loads before lesson code with verified integrity while custom styles follow it", () => {
+  const source = '<html><body><button class="btn btn-primary">Lesson</button></body></html>';
+  expect(createCodeLessonDocument(source)).not.toContain("bootstrap@5");
+  expect(createCodeLessonDocument(source, "", "", "none")).not.toContain("bootstrap@5");
+  const document = createCodeLessonDocument(source, ".btn{color:red}", "window.ready = Boolean(bootstrap);", "bootstrap");
+  expect(document).toContain('bootstrap@5.3.9/dist/css/bootstrap.min.css');
+  expect(document).toContain('bootstrap@5.3.9/dist/js/bootstrap.bundle.min.js');
+  expect(document).toContain('integrity="sha384-yEPZ7jP9S0QKiUQ0m3jjsO4ProIW7wvR9gXkI7JOGa2XVsw53Yke2bsdkBbjmmiX" crossorigin="anonymous"');
+  expect(document).toContain('integrity="sha384-WyOxWvTyr1QaMPfiPJSv76iReVthorl5uWlFtZPyK0IEB0hGzo9y5Bp9mYanr8Bu" crossorigin="anonymous"');
+  expect(document.indexOf("Content-Security-Policy")).toBeLessThan(document.indexOf("bootstrap@"));
+  expect(document.indexOf("bootstrap.bundle.min.js")).toBeLessThan(document.indexOf(source));
+  expect(document.indexOf(source)).toBeLessThan(document.indexOf("<style>.btn"));
+  expect(document.endsWith("<script>window.ready = Boolean(bootstrap);</script>")).toBe(true);
+});

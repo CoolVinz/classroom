@@ -11,12 +11,15 @@ export const lessonCodePolicy = [
   "frame-src https://www.youtube-nocookie.com",
 ].join("; ");
 
-export type CodeBlock = { type: "code"; html: string; css: string; javascript: string; imageIds: string[] };
+export type CodeBlock = { type: "code"; html: string; css: string; javascript: string; imageIds: string[]; framework?: "none" | "bootstrap" };
 
-export function createCodeLessonDocument(html: string, css = "", javascript = "") {
+export function createCodeLessonDocument(html: string, css = "", javascript = "", framework: CodeBlock["framework"] = "none") {
   const style = css ? `<style>${css.replace(/<\/style/gi, "<\\/style")}</style>` : "";
   const script = javascript ? `<script>${javascript.replace(/<\/script/gi, "<\\/script")}</script>` : "";
-  return `<!doctype html><meta http-equiv="Content-Security-Policy" content="${lessonCodePolicy}">${html}${style}${script}`;
+  const resources = framework === "bootstrap"
+    ? '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.9/dist/css/bootstrap.min.css" integrity="sha384-yEPZ7jP9S0QKiUQ0m3jjsO4ProIW7wvR9gXkI7JOGa2XVsw53Yke2bsdkBbjmmiX" crossorigin="anonymous"><script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.9/dist/js/bootstrap.bundle.min.js" integrity="sha384-WyOxWvTyr1QaMPfiPJSv76iReVthorl5uWlFtZPyK0IEB0hGzo9y5Bp9mYanr8Bu" crossorigin="anonymous"></script>'
+    : "";
+  return `<!doctype html><meta http-equiv="Content-Security-Policy" content="${lessonCodePolicy}">${resources}${html}${style}${script}`;
 }
 
 export async function imageDataUrl(blob: Blob) {

@@ -558,7 +558,7 @@ describe("student submission API", () => {
       expect(codeCreate.status).toBe(200);
       const codeLesson = await codeCreate.json() as { id: string; revision: number; editorMode: string; blocks: { type: string }[] };
       lessonPageIds.push(codeLesson.id);
-      expect(codeLesson).toMatchObject({ editorMode: "code", blocks: [{ type: "code" }] });
+      expect(codeLesson).toMatchObject({ editorMode: "code", blocks: [{ type: "code", framework: "none" }] });
       expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${codeLesson.id}/images`, { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).status).toBe(404);
       const codeImageForm = new FormData(); codeImageForm.set("file", new File([png], "code-image.png", { type: "image/png" }));
       const codeImageResponse = await app.handle(new Request(`http://localhost/api/lesson-pages/${codeLesson.id}/images`, { method: "POST", headers: teacherHeaders, body: codeImageForm }));
@@ -576,10 +576,12 @@ describe("student submission API", () => {
       expect((await saveCode(0, "Oversize", { ...codeSource(""), javascript: "x".repeat(1048576) })).status).toBe(413);
       expect((await saveCode(0, "Oversize UTF-8", { ...codeSource(""), javascript: "ก".repeat(349526) })).status).toBe(413);
       expect((await saveCode(0, "Mixed blocks", { type: "text", text: "not code" })).status).toBe(422);
-      const validCode = codeSource(`<!doctype html><html><body><h1>Published source</h1><img src="lesson-image://${codeImage.id}"></body></html>`, codeImage.id);
+      expect((await saveCode(0, "Unsupported framework", { ...codeSource(""), framework: "tailwind" })).status).toBe(422);
+      const validCode = { ...codeSource(`<!doctype html><html><body><h1>Published source</h1><img src="lesson-image://${codeImage.id}"></body></html>`, codeImage.id), framework: "bootstrap" };
       const codeDraft = await saveCode(0, "Public code title", validCode);
       expect(codeDraft.status).toBe(200);
-      expect((await codeDraft.json() as { blocks: { imageIds?: string[] }[] }).blocks[0].imageIds).toEqual([codeImage.id]);
+      expect(await codeDraft.json()).toMatchObject({ blocks: [{ imageIds: [codeImage.id], framework: "bootstrap" }] });
+      expect(await (await app.handle(new Request(`http://localhost${codePath}`, { headers: teacherHeaders }))).json()).toMatchObject({ blocks: [{ framework: "bootstrap" }] });
       expect((await app.handle(new Request(`http://localhost/api/public/lesson-pages/${codeLesson.id}`))).status).toBe(404);
       const codePublish = await app.handle(new Request(`http://localhost${codePath}/publish`, {
         method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title: "Public code title", blocks: [validCode], expectedRevision: 1 }),
@@ -587,10 +589,11 @@ describe("student submission API", () => {
       expect(codePublish.status).toBe(200);
       const publicCode = await app.handle(new Request(`http://localhost/api/public/lesson-pages/${codeLesson.id}`));
       expect(publicCode.status).toBe(200);
-      expect(await publicCode.json()).toMatchObject({ title: "Public code title", editorMode: "code", blocks: [{ html: expect.stringContaining("Published source"), imageIds: [codeImage.id] }] });
+      expect(await publicCode.json()).toMatchObject({ title: "Public code title", editorMode: "code", blocks: [{ html: expect.stringContaining("Published source"), imageIds: [codeImage.id], framework: "bootstrap" }] });
       expect((await app.handle(new Request(`http://localhost/api/public/lesson-pages/${codeLesson.id}/images/${codeImage.id}/content`))).status).toBe(200);
       const nextCode = codeSource("<!doctype html><body>Draft only</body>");
       expect((await saveCode(2, "Private draft title", nextCode)).status).toBe(200);
+      expect(await (await app.handle(new Request(`http://localhost${codePath}`, { headers: teacherHeaders }))).json()).toMatchObject({ blocks: [{ framework: "none" }] });
       expect(await (await app.handle(new Request(`http://localhost/api/public/lesson-pages/${codeLesson.id}`))).json()).toMatchObject({ title: "Public code title", blocks: [{ html: expect.stringContaining("Published source") }] });
       await sql`UPDATE classroom.lesson_page_images SET created_at = NOW() - INTERVAL '48 hours' WHERE id = ${codeImage.id}`;
       await cleanupUnusedLessonImages();

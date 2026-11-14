@@ -14,13 +14,13 @@ const block = t.Union([
   t.Object({ type: t.Literal("text"), heading: t.Optional(t.String({ maxLength: 120 })), text: t.String({ maxLength: 10000 }) }),
   t.Object({ type: t.Literal("image"), imageId: t.String({ format: "uuid" }), alt: t.String({ maxLength: 300 }), caption: t.Optional(t.String({ maxLength: 500 })) }),
   t.Object({ type: t.Literal("youtube"), videoId: t.String({ pattern: "^[A-Za-z0-9_-]{11}$" }), caption: t.Optional(t.String({ maxLength: 500 })) }),
-  t.Object({ type: t.Literal("code"), html: t.String({ maxLength: 1048576 }), css: t.String({ maxLength: 1048576 }), javascript: t.String({ maxLength: 1048576 }), imageIds: t.Optional(t.Array(t.String({ format: "uuid" }), { maxItems: 50 })) }),
+  t.Object({ type: t.Literal("code"), html: t.String({ maxLength: 1048576 }), css: t.String({ maxLength: 1048576 }), javascript: t.String({ maxLength: 1048576 }), framework: t.Optional(t.Union([t.Literal("none"), t.Literal("bootstrap")])), imageIds: t.Optional(t.Array(t.String({ format: "uuid" }), { maxItems: 50 })) }),
 ]);
 const blocks = t.Array(block, { maxItems: 100 });
 const revisionBody = t.Object({ expectedRevision: t.Integer({ minimum: 0 }) });
 const quizLinksSchema = t.Array(t.Object({ quizId: t.String({ format: "uuid" }), label: t.String({ minLength: 1, maxLength: 100 }) }), { maxItems: 20 });
 const lessonBody = t.Object({ title: t.String({ minLength: 1, maxLength: 120 }), blocks, quizLinks: t.Optional(quizLinksSchema), expectedRevision: t.Integer({ minimum: 0 }) });
-type LessonBlock = { type: "text"; heading?: string; text: string } | { type: "image"; imageId: string; alt: string; caption?: string } | { type: "youtube"; videoId: string; caption?: string } | { type: "code"; html: string; css: string; javascript: string; imageIds?: string[] };
+type LessonBlock = { type: "text"; heading?: string; text: string } | { type: "image"; imageId: string; alt: string; caption?: string } | { type: "youtube"; videoId: string; caption?: string } | { type: "code"; html: string; css: string; javascript: string; framework?: "none" | "bootstrap"; imageIds?: string[] };
 type StoredBlock = Exclude<LessonBlock, { type: "code" }> | Extract<LessonBlock, { type: "code" }> & { imageIds: string[] };
 const lessonImagePattern = /lesson-image:\/\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/gi;
 
@@ -54,7 +54,7 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
     checkRequestOrigin(request);
     const actor = await requireActor(request);
     const editorMode = body.editorMode ?? "blocks";
-    const initialBlocks: StoredBlock[] = editorMode === "code" ? [{ type: "code", html: "", css: "", javascript: "", imageIds: [] }] : [];
+    const initialBlocks: StoredBlock[] = editorMode === "code" ? [{ type: "code", html: "", css: "", javascript: "", framework: "none", imageIds: [] }] : [];
     const [page] = await sql`INSERT INTO classroom.lesson_pages (owner_id, title, editor_mode, draft_blocks)
       VALUES (${actor.id}, ${cleanText(body.title, 120)}, ${editorMode}, ${sql.json(initialBlocks)})
       RETURNING id, title, editor_mode AS "editorMode", draft_blocks AS blocks, draft_revision AS revision,
@@ -226,7 +226,7 @@ function normalizeBlocks(mode: "blocks" | "code", contents: LessonBlock[]): Stor
   if (sources.some((source) => source.replace(lessonImagePattern, "").includes("lesson-image://"))) throw new HttpError(422, "รูปอ้างอิงต้องใช้รหัสภาพที่ถูกต้อง");
   const imageIds = [...new Set(sources.flatMap((source) => [...source.matchAll(lessonImagePattern)].map((match) => match[1].toLowerCase())))];
   if (imageIds.length > 50) throw new HttpError(422, "บทเรียนหนึ่งรายการใช้ภาพอัปโหลดได้ไม่เกิน 50 ภาพ");
-  return [{ type: "code", html: code.html, css: code.css, javascript: code.javascript, imageIds }];
+  return [{ type: "code", html: code.html, css: code.css, javascript: code.javascript, framework: code.framework ?? "none", imageIds }];
 }
 
 function normalizeQuizLinks(value: { quizId: string; label: string }[]) {
