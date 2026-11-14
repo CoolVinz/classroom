@@ -18,7 +18,8 @@ const block = t.Union([
 ]);
 const blocks = t.Array(block, { maxItems: 100 });
 const revisionBody = t.Object({ expectedRevision: t.Integer({ minimum: 0 }) });
-const lessonBody = t.Object({ title: t.String({ minLength: 1, maxLength: 120 }), blocks, expectedRevision: t.Integer({ minimum: 0 }) });
+const quizLinksSchema = t.Array(t.Object({ quizId: t.String({ format: "uuid" }), label: t.String({ minLength: 1, maxLength: 100 }) }), { maxItems: 20 });
+const lessonBody = t.Object({ title: t.String({ minLength: 1, maxLength: 120 }), blocks, quizLinks: t.Optional(quizLinksSchema), expectedRevision: t.Integer({ minimum: 0 }) });
 type LessonBlock = { type: "text"; heading?: string; text: string } | { type: "image"; imageId: string; alt: string; caption?: string } | { type: "youtube"; videoId: string; caption?: string } | { type: "code"; html: string; css: string; javascript: string; imageIds?: string[] };
 type StoredBlock = Exclude<LessonBlock, { type: "code" }> | Extract<LessonBlock, { type: "code" }> & { imageIds: string[] };
 const lessonImagePattern = /lesson-image:\/\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/gi;
@@ -36,7 +37,8 @@ async function usedStorageBytes(tx: postgres.ISql) {
   const [usage] = await tx<{ used: string }[]>`
     SELECT (
       (SELECT COALESCE(SUM(size_bytes + COALESCE(thumbnail_size_bytes, 0)), 0) FROM classroom.files) +
-      (SELECT COALESCE(SUM(size_bytes), 0) FROM classroom.lesson_page_images)
+      (SELECT COALESCE(SUM(size_bytes), 0) FROM classroom.lesson_page_images) +
+      (SELECT COALESCE(SUM(size_bytes), 0) FROM classroom.quiz_images)
     )::text AS used
   `;
   return Number(usage.used);
@@ -62,7 +64,8 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
   .get("/lesson-pages/:id", async ({ params, request }) => {
     const actor = await requireActor(request);
     const [page] = await sql`SELECT id, title, editor_mode AS "editorMode", draft_blocks AS blocks, draft_revision AS revision,
-      published_title AS "publishedTitle", published_at AS "publishedAt", published_revision AS "publishedRevision"
+      published_title AS "publishedTitle", published_at AS "publishedAt", published_revision AS "publishedRevision",
+      draft_quiz_links AS "quizLinks"
       FROM classroom.lesson_pages WHERE id = ${params.id} AND owner_id = ${actor.id}`;
     if (!page) throw new HttpError(404, "ไม่พบบทเรียนนี้");
     return page;
@@ -72,18 +75,20 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
     const actor = await requireActor(request);
     const [page] = await sql.begin(async (tx) => {
       await tx`SELECT pg_advisory_xact_lock(870010022)`;
-      const [current] = await tx<{ editorMode: "blocks" | "code" }[]>`SELECT editor_mode AS "editorMode" FROM classroom.lesson_pages
+      const [current] = await tx<{ editorMode: "blocks" | "code"; quizLinks: { quizId: string; label: string }[] }[]>`SELECT editor_mode AS "editorMode", draft_quiz_links AS "quizLinks" FROM classroom.lesson_pages
         WHERE id = ${params.id} AND owner_id = ${actor.id} AND draft_revision = ${body.expectedRevision} FOR UPDATE`;
       if (!current) return [];
       const content = normalizeBlocks(current.editorMode, body.blocks);
       await validateImageReferences(params.id, actor.id, content, tx);
+      const quizLinks = body.quizLinks ? normalizeQuizLinks(body.quizLinks) : current.quizLinks;
+      await validateQuizLinks(actor.id, quizLinks, tx);
       return tx`UPDATE classroom.lesson_pages
-        SET title = ${cleanText(body.title, 120)}, draft_blocks = ${sql.json(content)},
+        SET title = ${cleanText(body.title, 120)}, draft_blocks = ${sql.json(content)}, draft_quiz_links = ${sql.json(quizLinks)},
           draft_revision = draft_revision + 1, updated_at = NOW()
         WHERE id = ${params.id} AND owner_id = ${actor.id} AND draft_revision = ${body.expectedRevision}
         RETURNING id, title, editor_mode AS "editorMode", draft_blocks AS blocks, draft_revision AS revision,
           published_title AS "publishedTitle",
-          published_at AS "publishedAt", published_revision AS "publishedRevision"`;
+          published_at AS "publishedAt", published_revision AS "publishedRevision", draft_quiz_links AS "quizLinks"`;
     });
     if (!page) await conflictOrMissing(params.id, actor.id);
     cleanupLater();
@@ -94,19 +99,22 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
     const actor = await requireActor(request);
     const [page] = await sql.begin(async (tx) => {
       await tx`SELECT pg_advisory_xact_lock(870010022)`;
-      const [current] = await tx<{ editorMode: "blocks" | "code" }[]>`SELECT editor_mode AS "editorMode" FROM classroom.lesson_pages
+      const [current] = await tx<{ editorMode: "blocks" | "code"; quizLinks: { quizId: string; label: string }[] }[]>`SELECT editor_mode AS "editorMode", draft_quiz_links AS "quizLinks" FROM classroom.lesson_pages
         WHERE id = ${params.id} AND owner_id = ${actor.id} AND draft_revision = ${body.expectedRevision} FOR UPDATE`;
       if (!current) return [];
       const content = normalizeBlocks(current.editorMode, body.blocks);
       await validateImageReferences(params.id, actor.id, content, tx);
+      const quizLinks = body.quizLinks ? normalizeQuizLinks(body.quizLinks) : current.quizLinks;
+      await validateQuizLinks(actor.id, quizLinks, tx);
       return tx`UPDATE classroom.lesson_pages SET title = ${cleanText(body.title, 120)},
-        draft_blocks = ${sql.json(content)}, draft_revision = draft_revision + 1,
+        draft_blocks = ${sql.json(content)}, draft_quiz_links = ${sql.json(quizLinks)}, draft_revision = draft_revision + 1,
         published_blocks = ${sql.json(content)}, published_title = ${cleanText(body.title, 120)}, published_revision = draft_revision + 1,
+        published_quiz_links = ${sql.json(quizLinks)},
         published_at = NOW(), updated_at = NOW()
         WHERE id = ${params.id} AND owner_id = ${actor.id}
         RETURNING id, title, editor_mode AS "editorMode", draft_blocks AS blocks, draft_revision AS revision,
           published_title AS "publishedTitle",
-          published_at AS "publishedAt", published_revision AS "publishedRevision"`;
+          published_at AS "publishedAt", published_revision AS "publishedRevision", draft_quiz_links AS "quizLinks"`;
     });
     if (!page) await conflictOrMissing(params.id, actor.id);
     cleanupLater();
@@ -116,7 +124,7 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
     checkRequestOrigin(request);
     const actor = await requireActor(request);
     const [page] = await sql`UPDATE classroom.lesson_pages SET published_blocks = NULL,
-      published_title = NULL, published_revision = NULL, published_at = NULL, updated_at = NOW()
+      published_title = NULL, published_revision = NULL, published_quiz_links = NULL, published_at = NULL, updated_at = NOW()
       WHERE id = ${params.id} AND owner_id = ${actor.id} AND draft_revision = ${body.expectedRevision}
       RETURNING id`;
     if (!page) await conflictOrMissing(params.id, actor.id);
@@ -187,7 +195,8 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
 const publicLessonPageRoutes = new Elysia({ prefix: "/api/public/lesson-pages" })
   .get("/:id", async ({ params, set }) => {
     set.headers["cache-control"] = "no-store";
-    const [page] = await sql`SELECT id, published_title AS title, editor_mode AS "editorMode", published_blocks AS blocks, published_at AS "publishedAt"
+    const [page] = await sql`SELECT id, published_title AS title, editor_mode AS "editorMode", published_blocks AS blocks,
+      published_quiz_links AS "quizLinks", published_at AS "publishedAt"
       FROM classroom.lesson_pages WHERE id = ${params.id} AND published_blocks IS NOT NULL`;
     if (!page) throw new HttpError(404, "ไม่พบบทเรียนที่เผยแพร่แล้ว");
     return page;
@@ -218,6 +227,22 @@ function normalizeBlocks(mode: "blocks" | "code", contents: LessonBlock[]): Stor
   const imageIds = [...new Set(sources.flatMap((source) => [...source.matchAll(lessonImagePattern)].map((match) => match[1].toLowerCase())))];
   if (imageIds.length > 50) throw new HttpError(422, "บทเรียนหนึ่งรายการใช้ภาพอัปโหลดได้ไม่เกิน 50 ภาพ");
   return [{ type: "code", html: code.html, css: code.css, javascript: code.javascript, imageIds }];
+}
+
+function normalizeQuizLinks(value: { quizId: string; label: string }[]) {
+  const seen = new Set<string>();
+  return value.map(({ quizId, label }) => {
+    const id = quizId.toLowerCase(); const text = cleanText(label, 100);
+    if (seen.has(id) || !text) throw new HttpError(422, "ปุ่มแบบทดสอบซ้ำหรือไม่มีชื่อ");
+    seen.add(id);
+    return { quizId: id, label: text };
+  });
+}
+
+async function validateQuizLinks(ownerId: string, links: { quizId: string; label: string }[], tx: postgres.ISql) {
+  if (!links.length) return;
+  const found = await tx`SELECT id FROM classroom.quizzes WHERE owner_id = ${ownerId} AND id = ANY(${links.map((link) => link.quizId)}::uuid[])`;
+  if (found.length !== links.length) throw new HttpError(422, "มีแบบทดสอบที่ไม่ได้เป็นของบัญชีนี้");
 }
 
 async function validateImageReferences(id: string, ownerId: string, contents: StoredBlock[], tx: postgres.ISql = sql) {

@@ -16,6 +16,7 @@ A Thai-language classroom management app for teachers. Teachers manage their own
 - Excel/CSV roster import with ID mapping and duplicate review.
 - Student assignment access, worksheet viewing/download, private file submissions, and teacher submission status.
 - Reusable teacher lesson pages with a block builder or full-page HTML/CSS/JavaScript editor, uploaded pictures, YouTube videos, private drafts, and public share links.
+- Reusable quiz drafts with multiple-choice and true/false questions, images, fixed classroom rounds, student attempts, automatic scores, and teacher-released solutions. Published lessons may include quiz buttons.
 
 Parent accounts, gradebook, virtual gallery blocks/likes, and announcements remain unimplemented.
 
@@ -30,6 +31,7 @@ Parent accounts, gradebook, virtual gallery blocks/likes, and announcements rema
 7. A teacher records attendance for a classroom date and saves the full roster atomically.
 8. A teacher views classroom/student attendance counts for a date range.
 9. A teacher builds and publishes a lesson page, then shares its link. Students can read without an account; signed-in students continue scheduled attendance tracking on the page.
+10. A teacher builds and publishes a quiz, creates a classroom round, opens it for students, then closes the round and optionally releases solutions. A student signs in with Google, resumes saved answers if needed, and sees the total score after submission.
 
 ## Major boundaries
 
@@ -38,6 +40,7 @@ Parent accounts, gradebook, virtual gallery blocks/likes, and announcements rema
 - **Assignments and files:** [MOD-004](MOD-004-assignments-files.md)
 - **Attendance and summaries:** [MOD-003](MOD-003-attendance.md)
 - **Lesson pages:** [MOD-005](MOD-005-lessons.md)
+- **Quizzes:** [MOD-006](MOD-006-quizzes.md)
 - **Persistence and ownership:** [DAT-001](DAT-001-data-model.md)
 - **Runtime and deployment:** [TEC-001](TEC-001-architecture.md), [OPS-001](OPS-001-deployment.md)
 

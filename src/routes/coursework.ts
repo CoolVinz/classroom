@@ -296,7 +296,8 @@ export const courseworkRoutes = new Elysia({ prefix: "/api" })
         }
         const [usage] = await tx<{ used: string }[]>`
           SELECT ((SELECT COALESCE(SUM(size_bytes + COALESCE(thumbnail_size_bytes, 0)), 0) FROM classroom.files) +
-            (SELECT COALESCE(SUM(size_bytes), 0) FROM classroom.lesson_page_images))::text AS used
+            (SELECT COALESCE(SUM(size_bytes), 0) FROM classroom.lesson_page_images) +
+            (SELECT COALESCE(SUM(size_bytes), 0) FROM classroom.quiz_images))::text AS used
         `;
         if (Number(usage.used) + body.file.size > maxStoredBytes()) throw new HttpError(413, "พื้นที่จัดเก็บไฟล์เต็มแล้ว");
         await rename(tempPath, storedPath);

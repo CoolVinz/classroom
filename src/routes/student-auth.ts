@@ -11,8 +11,9 @@ const appUrl = process.env.APP_URL ?? "http://localhost:3000";
 const clientId = () => process.env.GOOGLE_CLIENT_ID?.trim() ?? "";
 const workspaceDomain = () => (process.env.GOOGLE_WORKSPACE_DOMAIN?.trim() || "banjan.ac.th").toLowerCase();
 
-function loginRedirect(reason: "config" | "signin" | "domain" | "roster") {
-  const url = new URL("/", appUrl);
+function loginRedirect(reason: "config" | "signin" | "domain" | "roster", returnPath = "/") {
+  const safeReturn = /^\/quizzes\/[0-9a-f-]{36}\/?$/i.test(returnPath) ? returnPath : "/";
+  const url = new URL(safeReturn, appUrl);
   url.searchParams.set("role", "student");
   url.searchParams.set("error", reason);
   return new Response(null, { status: 303, headers: { Location: url.href } });
@@ -41,13 +42,14 @@ export const studentAuthRoutes = new Elysia({ prefix: "/api/auth/student" })
     if (!audience) return loginRedirect("config");
     if (Number(request.headers.get("content-length") ?? 0) > 32 * 1024) return loginRedirect("signin");
     const form = await request.formData().catch(() => null);
-    if (!form || !csrfMatches(request, String(form.get("g_csrf_token") ?? ""))) return loginRedirect("signin");
+    const returnPath = String(form?.get("state") ?? "/");
+    if (!form || !csrfMatches(request, String(form.get("g_csrf_token") ?? ""))) return loginRedirect("signin", returnPath);
 
     let payload;
     try {
       const ticket = await google.verifyIdToken({ idToken: String(form.get("credential") ?? ""), audience });
       payload = ticket.getPayload();
-    } catch { return loginRedirect("signin"); }
+    } catch { return loginRedirect("signin", returnPath); }
 
     const domain = workspaceDomain();
     const email = normalizeEmail(payload?.email);
@@ -56,7 +58,7 @@ export const studentAuthRoutes = new Elysia({ prefix: "/api/auth/student" })
       || !audiences.includes(audience)
       || !email.endsWith(`@${domain}`)
       || !["accounts.google.com", "https://accounts.google.com"].includes(payload.iss ?? "")
-      || !payload.exp || payload.exp <= Math.floor(Date.now() / 1000)) return loginRedirect("domain");
+      || !payload.exp || payload.exp <= Math.floor(Date.now() / 1000)) return loginRedirect("domain", returnPath);
 
     let signedIn: { id: string; email: string };
     try {
@@ -108,13 +110,13 @@ export const studentAuthRoutes = new Elysia({ prefix: "/api/auth/student" })
         return { id: account.id, email };
       });
     } catch (error) {
-      if (error instanceof HttpError && (error.status === 403 || error.status === 409)) return loginRedirect("roster");
+      if (error instanceof HttpError && (error.status === 403 || error.status === 409)) return loginRedirect("roster", returnPath);
       throw error;
     }
     const token = await createStudentSession(signedIn.id);
     return new Response(null, {
       status: 303,
-      headers: { Location: new URL("/", appUrl).href, "Set-Cookie": sessionCookie(token) },
+      headers: { Location: new URL(/^\/quizzes\/[0-9a-f-]{36}\/?$/i.test(returnPath) ? returnPath : "/", appUrl).href, "Set-Cookie": sessionCookie(token) },
     });
   })
   .post("/login", () => { throw new HttpError(410, "Student password login was retired. Use Google sign-in."); })

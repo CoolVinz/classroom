@@ -8,10 +8,12 @@ const ModelPreview = lazy(() => import("./ModelPreview"));
 export type StudentUser = { id: string; username: string; displayName: string; role: "student" };
 type Assignment = { assignmentId: string; classroomId: string; classroomName: string; title: string; instructions: string; submissionCount: number; publishedScore: number | string | null; publishedMaxScore: number | string | null; publishedFeedback: string | null; publishedAt: string | null; newWork: boolean };
 type StudentFile = { id: string; kind: "worksheet" | "model" | "submission" | "working"; originalName: string; mediaType: string; sizeBytes: number | string; createdAt: string; studentSubmission: boolean; thumbnailAvailable: boolean };
+type StudentQuiz = { quizId: string; title: string; classroomName: string; status: string; finishedAt: string | null; score: string | null };
 const uploadTypes = ".pdf,.png,.jpg,.jpeg,.doc,.docx,.stl,.obj";
 
 export function StudentPortal({ user, logout }: { user: StudentUser; logout: () => void }) {
   const [assignments, setAssignments] = useState<Assignment[]>([]);
+  const [quizzes, setQuizzes] = useState<StudentQuiz[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [files, setFiles] = useState<StudentFile[]>([]);
   const [busy, setBusy] = useState(false);
@@ -32,6 +34,7 @@ export function StudentPortal({ user, logout }: { user: StudentUser; logout: () 
     finally { setLoading(false); }
   }, [selectedId]);
   useEffect(() => { void loadAssignments(); }, [loadAssignments]);
+  useEffect(() => { void api<StudentQuiz[]>("/student/quizzes").then(setQuizzes).catch((reason) => setError(reason instanceof Error ? reason.message : "โหลดแบบทดสอบไม่สำเร็จ")); }, []);
 
   const loadFiles = useCallback(async () => {
     if (!selected) { setFiles([]); return; }
@@ -99,6 +102,7 @@ export function StudentPortal({ user, logout }: { user: StudentUser; logout: () 
       {error && <div className="notice" role="alert">{error}<button onClick={() => setError("")} aria-label="ปิด">×</button></div>}
       <div className="page-heading"><div><p className="eyebrow">พื้นที่นักเรียน</p><h1>งานของฉัน</h1><p className="muted page-description">ดูคำชี้แจงและไฟล์ใบงาน แล้วส่งงานของคุณ</p></div></div>
       <StudentAttendance />
+      {quizzes.length > 0 && <section className="panel student-quiz-list"><header className="panel-heading compact"><div><h2>แบบทดสอบ</h2><p className="muted">แบบทดสอบที่ครูเปิดหรือรอบที่คุณเริ่มแล้ว</p></div></header><div className="assignment-list">{[...new Map(quizzes.map((item) => [item.quizId, item])).values()].map((quiz) => { const related = quizzes.filter((item) => item.quizId === quiz.quizId); return <a className="assignment-select student-quiz-link" href={`/quizzes/${quiz.quizId}?role=student`} key={quiz.quizId}><strong>{quiz.title}</strong><small>{related.map((item) => item.classroomName).join(" · ")} · {related.some((item) => item.finishedAt) ? "มีผลคะแนน" : "มีรอบแบบทดสอบ"}</small></a>; })}</div></section>}
       <section className="panel"><header className="panel-heading compact"><div><h2>งานที่ได้รับ <small>{assignments.length} งาน</small></h2></div><button className="text-button" onClick={() => void loadAssignments()}>โหลดใหม่</button></header>
         {loading ? <p className="inline-loading"><i className="spinner"/>กำลังโหลดงาน…</p> : assignments.length ? <div className="assignment-list">{assignments.map((assignment) => <div className="assignment-row" key={assignment.assignmentId}><button className={"assignment-select " + (assignment.assignmentId === selectedId ? "selected" : "")} onClick={() => setSelectedId(assignment.assignmentId)}><strong>{assignment.title}</strong><small>{assignment.classroomName} · ส่งแล้ว {assignment.submissionCount} ไฟล์</small></button>{assignment.assignmentId === selectedId && <span className="assignment-marker">●</span>}</div>)}</div> : <p className="assignment-empty muted">ยังไม่มีงานที่เปิดอยู่</p>}
       </section>

@@ -28,11 +28,12 @@ Authenticate owner and teacher accounts with passwords and students with verifie
 - Google's double-submit `g_csrf_token` cookie/body pair is checked on the cross-site redirect callback. The callback does not use the app's same-origin check because Google posts directly to it.
 - Teacher login throttling uses process-local memory keyed by username.
 - Student access is limited to active classroom roster rows linked to the account. Archiving a student or classroom removes that membership from student APIs and clears its active attendance-tracking lease.
+- Student quiz links preserve a validated same-origin `/quizzes/<id>` return route through Google redirect sign-in. Quiz APIs recheck active roster membership; see MOD-006.
 
 ## Dependencies and consumers
 
 **dependencies:** `src/db/client.ts`, DAT-001, `src/security.ts`
-**used_by:** MOD-002, MOD-003, MOD-004, MOD-005; every protected API route
+**used_by:** MOD-002, MOD-003, MOD-004, MOD-005, MOD-006; every protected API route
 
 **Code Map:**
 

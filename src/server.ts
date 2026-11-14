@@ -15,6 +15,7 @@ import { studentCourseworkRoutes } from "./routes/student-coursework";
 import { attendanceScheduleRoutes } from "./routes/attendance-schedule";
 import { studentAttendanceRoutes } from "./routes/student-attendance";
 import { lessonPageApiRoutes } from "./routes/lesson-pages";
+import { quizRoutes, studentQuizRoutes } from "./routes/quizzes";
 import { appFramePolicy } from "./content-security-policy";
 
 const port = Number(process.env.PORT ?? 3000);
@@ -43,6 +44,8 @@ const app = new Elysia({ serve: { maxRequestBodySize: maxUploadBytes() + 1024 * 
   .use(courseworkRoutes)
   .use(studentCourseworkRoutes)
   .use(studentAttendanceRoutes)
+  .use(quizRoutes)
+  .use(studentQuizRoutes)
   .use(lessonPageApiRoutes)
   .use(teacherRoutes)
   .get("/student/*", () => new Response(null, { status: 302, headers: { Location: "/?role=student" } }))

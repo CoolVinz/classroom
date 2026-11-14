@@ -6,8 +6,10 @@ import { CodeLessonEditor, CodeLessonFrame } from "./CodeLesson";
 import type { CodeBlock } from "./code-lesson";
 
 type LessonRow = { id: string; title: string; editorMode: "blocks" | "code"; draftRevision: number; publishedAt: string | null; updatedAt: string };
-type Lesson = { id: string; title: string; editorMode: "blocks" | "code"; blocks: LessonBlock[]; revision: number; publishedTitle: string | null; publishedAt: string | null; publishedRevision: number | null };
+type Lesson = { id: string; title: string; editorMode: "blocks" | "code"; blocks: LessonBlock[]; quizLinks?: QuizLink[]; revision: number; publishedTitle: string | null; publishedAt: string | null; publishedRevision: number | null };
 type LessonImage = { id: string; originalName: string; sizeBytes: number };
+type QuizLink = { quizId: string; label: string };
+type QuizOption = { id: string; title: string; publishedTitle: string | null; publishedAt: string | null };
 
 export function LessonLibrary({ onError, onDirtyChange }: { onError: (message: string) => void; onDirtyChange: (dirty: boolean) => void }) {
   const [lessons, setLessons] = useState<LessonRow[]>([]);
@@ -19,9 +21,12 @@ export function LessonLibrary({ onError, onDirtyChange }: { onError: (message: s
   const [preview, setPreview] = useState(false);
   const [creationMode, setCreationMode] = useState<"blocks" | "code">("blocks");
   const [images, setImages] = useState<LessonImage[]>([]);
+  const [quizLinks, setQuizLinks] = useState<QuizLink[]>([]);
+  const [quizzes, setQuizzes] = useState<QuizOption[]>([]);
+  const [linkQuizId, setLinkQuizId] = useState("");
   const [busy, setBusy] = useState(false);
   const codeImageUrl = useCallback((imageId: string) => lesson ? `/api/lesson-pages/${lesson.id}/images/${imageId}/content` : "", [lesson?.id]);
-  const dirty = Boolean(lesson && (lesson.title !== title || JSON.stringify(lesson.blocks) !== JSON.stringify(blocks)));
+  const dirty = Boolean(lesson && (lesson.title !== title || JSON.stringify(lesson.blocks) !== JSON.stringify(blocks) || JSON.stringify(lesson.quizLinks ?? []) !== JSON.stringify(quizLinks)));
   const publicUrl = lesson && location.origin + "/lessons/" + lesson.id;
 
   useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
@@ -35,17 +40,18 @@ export function LessonLibrary({ onError, onDirtyChange }: { onError: (message: s
 
   const load = useCallback(async () => setLessons(await api<LessonRow[]>("/lesson-pages")), []);
   useEffect(() => { void load().catch((error) => onError(error instanceof Error ? error.message : "โหลดบทเรียนไม่สำเร็จ")); }, [load, onError]);
+  useEffect(() => { void api<QuizOption[]>("/quizzes").then(setQuizzes).catch(() => {}); }, []);
 
   async function open(id: string) {
     try {
       const [result, nextImages] = await Promise.all([api<Lesson>("/lesson-pages/" + id), api<LessonImage[]>(`/lesson-pages/${id}/images`)]);
-      setLesson(result); setTitle(result.title); setBlocks(result.blocks); setRevision(result.revision); setImages(nextImages); setPreview(false);
+      setLesson(result); setTitle(result.title); setBlocks(result.blocks); setRevision(result.revision); setImages(nextImages); setQuizLinks(result.quizLinks ?? []); setPreview(false);
     } catch (error) { onError(error instanceof Error ? error.message : "เปิดบทเรียนไม่สำเร็จ"); }
   }
 
   async function create(event: React.FormEvent) {
     event.preventDefault(); setBusy(true);
-    try { const result = await api<Lesson>("/lesson-pages", { method: "POST", body: JSON.stringify({ title, editorMode: creationMode }) }); await load(); setTitle(result.title); setLesson(result); setBlocks(result.blocks); setRevision(result.revision); setImages([]); }
+    try { const result = await api<Lesson>("/lesson-pages", { method: "POST", body: JSON.stringify({ title, editorMode: creationMode }) }); await load(); setTitle(result.title); setLesson(result); setBlocks(result.blocks); setRevision(result.revision); setImages([]); setQuizLinks([]); }
     catch (error) { onError(error instanceof Error ? error.message : "สร้างบทเรียนไม่สำเร็จ"); }
     finally { setBusy(false); }
   }
@@ -55,9 +61,9 @@ export function LessonLibrary({ onError, onDirtyChange }: { onError: (message: s
     setBusy(true);
     try {
       const result = await api<Lesson>(`/lesson-pages/${lesson.id}/${publish ? "publish" : "draft"}`, {
-        method: publish ? "POST" : "PUT", body: JSON.stringify({ title, blocks, expectedRevision: revision }),
+        method: publish ? "POST" : "PUT", body: JSON.stringify({ title, blocks, quizLinks, expectedRevision: revision }),
       });
-      setLesson(result); setTitle(result.title); setBlocks(result.blocks); setRevision(result.revision); await load();
+      setLesson(result); setTitle(result.title); setBlocks(result.blocks); setRevision(result.revision); setQuizLinks(result.quizLinks ?? []); await load();
     } catch (error) { onError(error instanceof Error ? error.message : "บันทึกบทเรียนไม่สำเร็จ"); }
     finally { setBusy(false); }
   }
@@ -114,6 +120,10 @@ export function LessonLibrary({ onError, onDirtyChange }: { onError: (message: s
     </div></header>
     {revision !== lesson.revision && <p className="notice">บทเรียนนี้ถูกแก้ไขอีกหน้าต่างหนึ่ง กรุณากลับไปโหลดข้อมูลล่าสุดก่อนบันทึก</p>}
     <label className="lesson-title-field">ชื่อบทเรียน<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={120} /></label>
+    <section className="panel lesson-quiz-links"><h2>ปุ่มแบบทดสอบในบทเรียน</h2><p className="muted">ปุ่มจะแสดงนอกเนื้อหา HTML และเปิดแบบทดสอบสำหรับนักเรียนที่เข้าสู่ระบบแล้ว</p>
+      {quizLinks.map((link, index) => <div className="lesson-quiz-link" key={link.quizId}><label>แบบทดสอบ<select value={link.quizId} onChange={(event) => setQuizLinks((all) => all.map((item, i) => i === index ? { ...item, quizId: event.target.value } : item))}>{quizzes.map((quiz) => <option key={quiz.id} value={quiz.id}>{quiz.publishedTitle ?? quiz.title}{quiz.publishedAt ? " · เผยแพร่แล้ว" : " · ยังไม่เผยแพร่"}</option>)}</select></label><label>ข้อความบนปุ่ม<input value={link.label} maxLength={100} onChange={(event) => setQuizLinks((all) => all.map((item, i) => i === index ? { ...item, label: event.target.value } : item))}/></label><button className="text-button danger" onClick={() => setQuizLinks((all) => all.filter((_, i) => i !== index))}>นำออก</button></div>)}
+      <div className="lesson-add-controls"><select aria-label="เลือกแบบทดสอบ" value={linkQuizId} onChange={(event) => setLinkQuizId(event.target.value)}><option value="">เลือกแบบทดสอบ</option>{quizzes.filter((quiz) => !quizLinks.some((link) => link.quizId === quiz.id)).map((quiz) => <option key={quiz.id} value={quiz.id}>{quiz.title}</option>)}</select><button className="button button-quiet" disabled={!linkQuizId} onClick={() => { const quiz = quizzes.find((item) => item.id === linkQuizId); if (quiz) setQuizLinks((all) => [...all, { quizId: quiz.id, label: quiz.publishedTitle ?? quiz.title }]); setLinkQuizId(""); }}>＋ เพิ่มปุ่มแบบทดสอบ</button></div>
+    </section>
     {lesson.editorMode === "code" ? <CodeLessonEditor code={blocks[0] as CodeBlock} images={images} onChange={(code) => setBlocks([code])} onUpload={uploadCodeImage} /> : <div className="lesson-block-list">{blocks.map((item, index) => <article className="lesson-block-editor" key={item.type === "image" ? item.imageId : index}>
       <header><strong>{item.type === "text" ? "ข้อความ" : item.type === "image" ? "รูปภาพ" : "YouTube"}</strong><div><button aria-label="เลื่อนขึ้น" disabled={!index} onClick={() => setBlocks((all) => { const next = [...all]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; return next; })}>↑</button><button aria-label="เลื่อนลง" disabled={index === blocks.length - 1} onClick={() => setBlocks((all) => { const next = [...all]; [next[index], next[index + 1]] = [next[index + 1], next[index]]; return next; })}>↓</button><button className="text-button danger" onClick={() => setBlocks((all) => all.filter((_, i) => i !== index))}>ลบ</button></div></header>
       {item.type === "text" ? <><label>หัวข้อย่อย<input value={item.heading ?? ""} onChange={(event) => updateBlock(index, { heading: event.target.value })} maxLength={120} /></label><label>ข้อความ<textarea rows={5} value={item.text} onChange={(event) => updateBlock(index, { text: event.target.value })} maxLength={10000} /></label></> : item.type === "image" ? <><img className="lesson-editor-image" src={`/api/lesson-pages/${lesson.id}/images/${item.imageId}/content`} alt={item.alt} /><label>คำอธิบายภาพ<input value={item.alt} onChange={(event) => updateBlock(index, { alt: event.target.value })} maxLength={300} /></label><label>คำบรรยาย<input value={item.caption ?? ""} onChange={(event) => updateBlock(index, { caption: event.target.value })} maxLength={500} /></label></> : item.type === "youtube" ? <><a href={`https://www.youtube.com/watch?v=${item.videoId}`} target="_blank" rel="noreferrer">เปิดวิดีโอ YouTube</a><label>คำบรรยาย<input value={item.caption ?? ""} onChange={(event) => updateBlock(index, { caption: event.target.value })} maxLength={500} /></label></> : null}

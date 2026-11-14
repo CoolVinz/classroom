@@ -4,7 +4,7 @@
 
 **Name:** Classroom (`classroom` repository)
 
-**Description:** Teacher-facing classroom app for rosters, attendance, assignments, shareable lesson pages, worksheets, and student 3D model submissions.
+**Description:** Teacher-facing classroom app for rosters, attendance, assignments, shareable lessons, reusable quizzes, worksheets, and student 3D model submissions.
 
 **Status:** Student submissions and Google-only student sign-in are implemented in this revision. Production deployment and live school sign-in are not verified; set up the Google OAuth client and Workspace approval described in `docs/OPS-001-deployment.md`.
 
@@ -68,6 +68,7 @@ Important resolved dependencies include Elysia 1.4.30, Google Auth Library 11.3.
 src/server.ts                 Elysia application, health routes, static files
 src/routes/                   Teacher/student authentication, classroom, attendance, teacher, assignment/file APIs
 src/routes/lesson-pages.ts    Teacher-owned block/custom-code lesson drafts and published APIs
+src/routes/quizzes.ts         Quiz drafts, classroom snapshots, student attempts, scoring, and quiz images
 src/content-security-policy.ts App frame allowlist for sign-in, lesson previews, and YouTube
 src/auth/session.ts           Session cookies, lookup, and access checks
 src/db/                       PostgreSQL client, startup migration, owner setup
@@ -76,6 +77,8 @@ src/file-storage.ts           Upload validation, size limits, and persistent vol
 web/src/ClassroomWork.tsx     Teacher assignment and submission review workflows
 web/src/StudentPortal.tsx     Student assignment and submission workflow
 web/src/LessonLibrary.tsx     Teacher lesson library; CodeLesson.tsx edits and safely previews custom pages
+web/src/QuizLibrary.tsx       Teacher quiz library and classroom rounds
+web/src/StudentQuizPage.tsx   Student quiz selector, autosaved attempts, and score/solution view
 web/src/roster-import.ts      XLSX/CSV parsing and roster preview
 web/src/ModelPreview.tsx      Three.js viewer
 web/src/model-preview.worker.ts STL/OBJ parser worker
@@ -156,7 +159,7 @@ The initial owner can also be provisioned once with the `OWNER_USERNAME`, `OWNER
 
 ## Tests / Lint
 
-`bun test` runs file validation and roster parsing tests. `src/student-workflow.test.ts` covers Google callback validation, account linking, roster numbers/import, classroom-scoped student removal, access boundaries, and uploads when `CLASSROOM_TEST_DATABASE_URL` points to an isolated migrated PostgreSQL 18 database. Google token verification is mocked; there is no live school-account or browser suite.
+`bun test` runs file validation, roster parsing, quiz scoring/privacy, and related unit tests. `src/student-workflow.test.ts` covers Google callback validation, account linking, roster numbers/import, classroom-scoped student removal, access boundaries, uploads, and quiz APIs when `CLASSROOM_TEST_DATABASE_URL` points to an isolated migrated PostgreSQL 18 database. Google token verification is mocked; there is no live school-account or browser suite.
 
 ---
 

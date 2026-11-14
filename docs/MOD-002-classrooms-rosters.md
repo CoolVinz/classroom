@@ -30,7 +30,7 @@ Let an authenticated teacher create and manage their own classrooms and student 
 ## Dependencies and consumers
 
 **dependencies:** MOD-001, DAT-001
-**used_by:** MOD-003, MOD-004
+**used_by:** MOD-003, MOD-004, MOD-006
 
 **Code Map:**
 

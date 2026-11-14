@@ -16,6 +16,7 @@ Browser
         │           └── protected file routes
         │                 └── persistent Coolify volume
         ├── public /lessons/:id reader
+        ├── authenticated /quizzes/:id student attempt page
         └── browser-only model parsing worker
 ```
 
@@ -30,6 +31,8 @@ Browser
 - Numbered tracked SQL migrations run at application startup or from `bun run db:migrate`. The application login must own the pre-created `classroom` schema. PostgreSQL data remains outside the app container.
 - File contents live in the configured upload directory; file metadata and classroom ownership live in PostgreSQL. File routes authorize either the owning teacher or a student with an active membership viewing a worksheet or their own file.
 - Public lesson URLs load a React reading page and published structured content from a separate public API. Teacher lesson routes require ownership; public image access requires the asset UUID in the current published snapshot. Lesson pictures use the same persistent volume and quota as assignment uploads.
+- Teacher quiz APIs create revision-checked drafts and fixed classroom snapshots. Student quiz APIs require an active roster membership and serialize attempt changes, expiry, submissions, and teacher closure with a per-round database lock. Student payloads omit answer keys until solutions are released. Quiz images share the upload volume, quota, and staged cleanup with lesson images.
+- Lesson quiz links are included in lesson draft/published JSON columns and rendered by the parent reader, outside custom lesson iframes. Google sign-in carries only a validated same-origin quiz route back to the attempt page.
 - Custom lesson source remains JSON text in PostgreSQL. The browser resolves uploaded images to data URLs, appends optional inline CSS/JavaScript, and renders it in an opaque sandboxed iframe under a fixed CSP. The application shell restricts iframe sources to generated previews, Google sign-in, and privacy-enhanced YouTube.
 - When a reader has a valid student session, it reuses the scheduled attendance panel and server lease; anonymous readers do not create attendance records.
 - The upload directory must be mounted persistently by Coolify and backed up separately from PostgreSQL.
@@ -43,11 +46,12 @@ Browser
 Web entry and screen workflows: web/src/main.tsx, web/src/App.tsx
 Styles and HTML: web/src/styles.css, web/index.html
 API server and production static files: src/server.ts
-API routes: src/routes/auth.ts, src/routes/student-auth.ts, src/routes/classrooms.ts, src/routes/coursework.ts, src/routes/student-coursework.ts, src/routes/teachers.ts
-Lesson routes: src/routes/lesson-pages.ts
+API routes: src/routes/auth.ts, src/routes/student-auth.ts, src/routes/classrooms.ts, src/routes/coursework.ts, src/routes/student-coursework.ts, src/routes/quizzes.ts, src/routes/teachers.ts
+Lesson routes and published quiz-link snapshots: src/routes/lesson-pages.ts
 Auth and database: src/auth/session.ts, src/db/client.ts, src/db/bootstrap.ts
-Schema: src/db/migrations/001_initial.sql, src/db/migrations/002_assignments_files.sql, src/db/migrations/003_student_submissions.sql, src/db/migrations/004_google_student_auth.sql, src/db/migrations/010_lesson_pages.sql, src/db/migrations/011_lesson_code.sql
-Files: src/file-storage.ts, web/src/ClassroomWork.tsx, web/src/StudentPortal.tsx, web/src/LessonLibrary.tsx
+Schema: src/db/migrations/001_initial.sql, src/db/migrations/002_assignments_files.sql, src/db/migrations/003_student_submissions.sql, src/db/migrations/004_google_student_auth.sql, src/db/migrations/010_lesson_pages.sql, src/db/migrations/011_lesson_code.sql, src/db/migrations/012_quiz_builder.sql
+Files and quiz images: src/file-storage.ts, web/src/ClassroomWork.tsx, web/src/StudentPortal.tsx, web/src/LessonLibrary.tsx
+Quiz interfaces and scoring: web/src/QuizLibrary.tsx, web/src/StudentQuizPage.tsx, src/quiz-core.ts
 Public and code lesson reader: web/src/PublicLessonPage.tsx, web/src/LessonContent.tsx, web/src/CodeLesson.tsx, web/src/code-lesson.ts
 Frame policy: src/content-security-policy.ts
 Google identity: src/routes/student-auth.ts, google-auth-library

@@ -48,14 +48,15 @@ describe("student submission API", () => {
 
     const { sql } = await import("./db/client");
     const { createSession } = await import("./auth/session");
-    const [{ authRoutes }, { studentAuthRoutes }, { classroomRoutes }, { courseworkRoutes }, { studentCourseworkRoutes }, { attendanceScheduleRoutes }, { studentAttendanceRoutes }, { lessonPageApiRoutes }, { handleAppError }] = await Promise.all([
+    const [{ authRoutes }, { studentAuthRoutes }, { classroomRoutes }, { courseworkRoutes }, { studentCourseworkRoutes }, { attendanceScheduleRoutes }, { studentAttendanceRoutes }, { lessonPageApiRoutes }, { quizRoutes, studentQuizRoutes }, { handleAppError }] = await Promise.all([
       import("./routes/auth"), import("./routes/student-auth"), import("./routes/classrooms"),
       import("./routes/coursework"), import("./routes/student-coursework"), import("./routes/attendance-schedule"), import("./routes/student-attendance"),
       import("./routes/lesson-pages"),
+      import("./routes/quizzes"),
       import("./error-handler"),
     ]);
     const { ensureUploadRoot, cleanupUnusedLessonImages } = await import("./file-storage");
-    const app = new Elysia().onError(handleAppError).use(authRoutes).use(studentAuthRoutes).use(classroomRoutes).use(attendanceScheduleRoutes).use(courseworkRoutes).use(studentCourseworkRoutes).use(studentAttendanceRoutes).use(lessonPageApiRoutes);
+    const app = new Elysia().onError(handleAppError).use(authRoutes).use(studentAuthRoutes).use(classroomRoutes).use(attendanceScheduleRoutes).use(courseworkRoutes).use(studentCourseworkRoutes).use(studentAttendanceRoutes).use(quizRoutes).use(studentQuizRoutes).use(lessonPageApiRoutes);
     const teacherId = randomUUID(); const accountId = randomUUID();
     const roomA = randomUUID(); const roomB = randomUUID(); const emptyRoom = randomUUID();
     const studentA = randomUUID(); const studentB = randomUUID(); const studentC = randomUUID(); const studentD = randomUUID();
@@ -63,6 +64,8 @@ describe("student submission API", () => {
     const teacherFile = randomUUID(); const peerFile = randomUUID();
     let teacherToken = ""; let studentToken = ""; let otherTeacherToken = "";
     const lessonPageIds: string[] = [];
+    const quizIds: string[] = [];
+    const quizImageIds: string[] = [];
     const otherTeacherId = randomUUID();
     let deleteTriggerName = ""; let deleteFunctionName = ""; let deleteTriggerInstalled = false;
     let workingTriggerName = ""; let workingFunctionName = ""; let workingTriggerInstalled = false;
@@ -80,8 +83,8 @@ describe("student submission API", () => {
       claims.set(value, { sub, email, email_verified: true, hd: "banjan.ac.th", iss: "https://accounts.google.com", aud: "classroom-test-client", exp: Math.floor(Date.now() / 1000) + 3600, ...extra });
       return value;
     }
-    async function googleLogin(value: string, cookie = "csrf-token", submitted = cookie) {
-      const body = new URLSearchParams({ credential: value, g_csrf_token: submitted });
+    async function googleLogin(value: string, cookie = "csrf-token", submitted = cookie, state = "/") {
+      const body = new URLSearchParams({ credential: value, g_csrf_token: submitted, state });
       return app.handle(new Request("http://localhost/api/auth/student/google", {
         method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", cookie: `g_csrf_token=${cookie}` }, body,
       }));
@@ -127,11 +130,108 @@ describe("student submission API", () => {
       expect(new URL(wrongIssuer.headers.get("location")!).searchParams.get("error")).toBe("domain");
       const unverified = await googleLogin(token(accountEmail, "unverified", { email_verified: false }));
       expect(new URL(unverified.headers.get("location")!).searchParams.get("error")).toBe("domain");
-      const signedIn = await googleLogin(studentIdentityToken);
+      const returnQuizId = randomUUID();
+      const signedIn = await googleLogin(studentIdentityToken, "csrf-token", "csrf-token", `/quizzes/${returnQuizId}`);
       expect(signedIn.status).toBe(303);
+      expect(new URL(signedIn.headers.get("location")!).pathname).toBe(`/quizzes/${returnQuizId}`);
       studentToken = signedIn.headers.get("set-cookie")!.split(";")[0].split("=")[1];
       let studentHeaders = { cookie: signedIn.headers.get("set-cookie")!.split(";")[0], origin: "http://localhost:3000" };
       const teacherHeaders = { cookie: `classroom_session=${teacherToken}`, origin: "http://localhost:3000" };
+
+      const quizId = randomUUID(); const questionId = randomUUID(); const correctChoiceId = randomUUID(); const wrongChoiceId = randomUUID();
+      const quizTitle = "Quiz snapshot";
+      const createdQuiz = await app.handle(new Request("http://localhost/api/quizzes", { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title: quizTitle }) }));
+      expect(createdQuiz.status).toBe(200);
+      const createdQuizBody = await createdQuiz.json() as { id: string; revision: number };
+      quizIds.push(createdQuizBody.id);
+      const quizImageBytes = await sharp({ create: { width: 4, height: 4, channels: 4, background: "#49a889" } }).png().toBuffer();
+      const quizImageForm = new FormData(); quizImageForm.set("file", new File([quizImageBytes], "quiz-picture.png", { type: "image/png" }));
+      const quizImageResponse = await app.handle(new Request(`http://localhost/api/quizzes/${createdQuizBody.id}/images`, { method: "POST", headers: teacherHeaders, body: quizImageForm }));
+      expect(quizImageResponse.status).toBe(200);
+      const quizImage = await quizImageResponse.json() as { id: string };
+      quizImageIds.push(quizImage.id);
+      const quizContent = { description: "Synthetic quiz", questions: [{ id: questionId, type: "multiple-choice", prompt: "Which answer?", imageId: quizImage.id, points: 1,
+        choices: [{ id: correctChoiceId, text: "Correct", imageId: quizImage.id }, { id: wrongChoiceId, text: "Wrong", imageId: null }], correctChoiceId, explanation: "private solution" }] };
+      const saveQuizDraft = (title: string, content: typeof quizContent, expectedRevision: number) => app.handle(new Request(`http://localhost/api/quizzes/${createdQuizBody.id}/publish`, {
+        method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title, content, expectedRevision }),
+      }));
+      const publishedQuiz = await saveQuizDraft(quizTitle, quizContent, createdQuizBody.revision);
+      expect(publishedQuiz.status).toBe(200);
+      const makeRound = (classroomId: string) => app.handle(new Request(`http://localhost/api/classrooms/${classroomId}/quizzes`, {
+        method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ quizId: createdQuizBody.id, durationMinutes: null }),
+      }));
+      const firstRoundResponse = await makeRound(roomA); const secondRoundResponse = await makeRound(roomB);
+      expect(firstRoundResponse.status).toBe(200); expect(secondRoundResponse.status).toBe(200);
+      const firstRound = await firstRoundResponse.json() as { id: string; title: string };
+      const secondRound = await secondRoundResponse.json() as { id: string; title: string };
+      const lessonResponse = await app.handle(new Request("http://localhost/api/lesson-pages", {
+        method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title: "Quiz link lesson", editorMode: "blocks" }),
+      }));
+      expect(lessonResponse.status).toBe(200);
+      const quizLesson = await lessonResponse.json() as { id: string; revision: number; blocks: unknown[] };
+      lessonPageIds.push(quizLesson.id);
+      const draftLessonBody = { title: "Quiz link lesson", blocks: [], quizLinks: [{ quizId: createdQuizBody.id, label: "Start quiz" }], expectedRevision: quizLesson.revision };
+      const savedLessonDraft = await app.handle(new Request(`http://localhost/api/lesson-pages/${quizLesson.id}/draft`, {
+        method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify(draftLessonBody),
+      }));
+      expect(savedLessonDraft.status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/public/lesson-pages/${quizLesson.id}`))).status).toBe(404);
+      const publishedLesson = await app.handle(new Request(`http://localhost/api/lesson-pages/${quizLesson.id}/publish`, {
+        method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ ...draftLessonBody, expectedRevision: 1 }),
+      }));
+      expect(publishedLesson.status).toBe(200);
+      expect(await (await app.handle(new Request(`http://localhost/api/public/lesson-pages/${quizLesson.id}`))).json()).toMatchObject({ quizLinks: [{ quizId: createdQuizBody.id, label: "Start quiz" }] });
+      const changedContent = { ...quizContent, questions: [{ ...quizContent.questions[0], prompt: "Changed library prompt", points: 8 }] };
+      const savedDraft = await app.handle(new Request(`http://localhost/api/quizzes/${createdQuizBody.id}/draft`, {
+        method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title: "Changed library title", content: changedContent, expectedRevision: 1 }),
+      }));
+      expect(savedDraft.status).toBe(200);
+      expect((await saveQuizDraft("Changed library title", changedContent, 2)).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/quizzes/${createdQuizBody.id}`, { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).status).toBe(404);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/quizzes/${firstRound.id}/results`, { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).status).toBe(404);
+      const studentRoundsResponse = await app.handle(new Request(`http://localhost/api/student/quizzes/${createdQuizBody.id}`, { headers: studentHeaders }));
+      expect(studentRoundsResponse.status).toBe(200);
+      const eligibleRounds = await studentRoundsResponse.json() as { roundId: string }[];
+      expect(eligibleRounds.map((round) => round.roundId)).toEqual(expect.arrayContaining([firstRound.id, secondRound.id]));
+      expect((await app.handle(new Request(`http://localhost/api/student/quiz-rounds/${firstRound.id}/start`, { method: "POST", headers: studentHeaders }))).status).toBe(409);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/quizzes/${firstRound.id}/open`, { method: "POST", headers: teacherHeaders }))).status).toBe(200);
+      const startedQuiz = await app.handle(new Request(`http://localhost/api/student/quiz-rounds/${firstRound.id}/start`, { method: "POST", headers: studentHeaders }));
+      expect(startedQuiz.status).toBe(200);
+      const started = await startedQuiz.json() as { id: string; revision: number; questions: unknown[]; title: string; description: string };
+      expect(started.title).toBe(quizTitle); expect(started.description).toBe("Synthetic quiz");
+      expect(JSON.stringify(started)).not.toContain("correctChoiceId");
+      expect(JSON.stringify(started)).not.toContain("private solution");
+      const studentQuizImage = await app.handle(new Request(`http://localhost/api/student/quiz-attempts/${started.id}/images/${quizImage.id}`, { headers: studentHeaders }));
+      expect(studentQuizImage.status).toBe(200);
+      expect(studentQuizImage.headers.get("content-type")).toBe("image/webp");
+      const answerBody = { expectedRevision: 0, answers: { [questionId]: correctChoiceId } };
+      const savedAnswer = await app.handle(new Request(`http://localhost/api/student/quiz-attempts/${started.id}/answers`, {
+        method: "PUT", headers: { ...studentHeaders, "content-type": "application/json" }, body: JSON.stringify(answerBody),
+      }));
+      expect(savedAnswer.status).toBe(200);
+      expect((await savedAnswer.json()).revision).toBe(1);
+      expect((await app.handle(new Request(`http://localhost/api/student/quiz-attempts/${started.id}/answers`, {
+        method: "PUT", headers: { ...studentHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: 0, answers: { [questionId]: wrongChoiceId } }),
+      }))).status).toBe(409);
+      const submittedResponse = await app.handle(new Request(`http://localhost/api/student/quiz-attempts/${started.id}/submit`, {
+        method: "POST", headers: { ...studentHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: 1, answers: { [questionId]: correctChoiceId } }),
+      }));
+      expect(submittedResponse.status).toBe(200);
+      const submitted = await submittedResponse.json() as { score: string; questions: unknown[]; solutionsReleased: boolean };
+      expect(Number(submitted.score)).toBe(1); expect(submitted.solutionsReleased).toBe(false);
+      expect(JSON.stringify(submitted)).not.toContain("correctChoiceId");
+      expect((await app.handle(new Request(`http://localhost/api/student/quiz-attempts/${started.id}/submit`, {
+        method: "POST", headers: { ...studentHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: 1, answers: { [questionId]: wrongChoiceId } }),
+      })).then((response) => response.json()) as { score: string }).score).toBe(submitted.score);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/quizzes/${firstRound.id}/close`, { method: "POST", headers: teacherHeaders }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/quizzes/${firstRound.id}/release-solutions`, { method: "POST", headers: teacherHeaders }))).status).toBe(200);
+      const released = await app.handle(new Request(`http://localhost/api/student/quiz-attempts/${started.id}`, { headers: studentHeaders }));
+      expect(await released.json()).toMatchObject({ solutionsReleased: true, questions: [{ correctChoiceId, explanation: "private solution", isCorrect: true, awardedPoints: 1 }] });
+      const results = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/quizzes/${firstRound.id}/results`, { headers: teacherHeaders }));
+      expect(results.status).toBe(200);
+      expect(await results.json()).toMatchObject({ round: { title: quizTitle, content: { questions: [{ prompt: "Which answer?" }] } } });
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomB}/quizzes/${secondRound.id}/open`, { method: "POST", headers: teacherHeaders }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/student/quiz-rounds/${secondRound.id}/start`, { method: "POST", headers: studentHeaders }))).status).toBe(200);
 
       const timetableRequest = (classroomId: string, termStartsOn: string, termEndsOn: string) => app.handle(new Request(`http://localhost/api/classrooms/${classroomId}/timetable`, {
         method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" },
@@ -836,6 +936,10 @@ describe("student submission API", () => {
       if (studentToken) await sql`DELETE FROM classroom.student_sessions WHERE token_hash = ${hash(studentToken)}`;
       await sql.begin(async (tx) => {
         if (lessonPageIds.length) await tx`DELETE FROM classroom.lesson_pages WHERE id = ANY(${lessonPageIds}::uuid[])`;
+        if (quizIds.length) {
+          await tx`DELETE FROM classroom.classroom_quizzes WHERE quiz_id = ANY(${quizIds}::uuid[])`;
+          await tx`DELETE FROM classroom.quizzes WHERE id = ANY(${quizIds}::uuid[])`;
+        }
         await tx`DELETE FROM classroom.files WHERE classroom_id IN (${roomA}, ${roomB}, ${emptyRoom})`;
         await tx`DELETE FROM classroom.assignments WHERE classroom_id IN (${roomA}, ${roomB}, ${emptyRoom})`;
         await tx`DELETE FROM classroom.attendance WHERE classroom_id IN (${roomA}, ${roomB}, ${emptyRoom})`;

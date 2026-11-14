@@ -1,0 +1,49 @@
+.quiz-editor,.quiz-library,.student-quiz-card{display:grid;gap:16px}
+.quiz-description textarea,.quiz-question-editor textarea,.quiz-question-editor input:not([type=file]):not([type=radio]),.quiz-question-editor select,.quiz-assign-form input,.quiz-assign-form select,.lesson-quiz-links input,.lesson-quiz-links select{width:100%;border:1px solid var(--line);border-radius:9px;padding:10px 12px;background:#fff;color:var(--ink)}
+.quiz-description,.quiz-question-editor>label{display:grid;gap:6px;font-weight:600}
+.quiz-toolbar,.quiz-round-actions,.quiz-question-editor header,.quiz-round-management>header,.quiz-results>header,.quiz-student-card>header,.quiz-attempt-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.quiz-question-editor{display:grid;gap:14px;padding:18px}
+.quiz-question-editor header>div{display:flex;align-items:center;gap:8px}
+.quiz-question-fields{display:grid;grid-template-columns:minmax(0,1fr) 180px;gap:14px}
+.quiz-question-fields label,.quiz-choice-editor>label:not(:first-child){display:grid;gap:6px}
+.quiz-choices{display:grid;gap:12px;border:1px solid var(--line);border-radius:10px;padding:14px;min-width:0}
+.quiz-choice-editor{display:grid;grid-template-columns:110px minmax(130px,1fr) minmax(150px,1fr) auto;align-items:end;gap:10px;padding:10px 0;border-bottom:1px solid var(--line)}
+.quiz-choice-editor>label:first-child{display:flex;gap:7px;align-items:center;padding-bottom:10px}
+.quiz-choice-editor input[type=file],.quiz-image-upload input{max-width:100%;font-size:.9rem}
+.quiz-choice-editor img,.quiz-image-preview img,.quiz-preview img,.quiz-student-question>img,.quiz-student-choice img{max-width:180px;max-height:140px;object-fit:contain;border-radius:8px}
+.quiz-image-preview{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.quiz-round-management,.quiz-results,.quiz-preview{display:grid;gap:14px}
+.quiz-assign-form{display:grid;grid-template-columns:minmax(180px,1fr) minmax(150px,220px) auto;align-items:end;gap:12px}
+.quiz-assign-form label{display:grid;gap:6px}
+.quiz-round-list{display:grid;gap:9px}
+.quiz-round-list article{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:13px;border:1px solid var(--line);border-radius:10px}
+.quiz-round-list article>div:first-child,.quiz-attempt-summary>div{display:grid;gap:4px}
+.quiz-round-list small,.quiz-attempt-summary small{color:var(--muted)}
+.quiz-results .table-scroll{overflow:auto}
+.quiz-results td:last-child{min-width:190px;font-size:.88rem}
+.quiz-result-image{display:block;max-width:120px;max-height:90px;object-fit:contain;margin:4px 0}
+.lesson-quiz-links{display:grid;gap:12px}
+.lesson-quiz-link{display:grid;grid-template-columns:minmax(180px,1fr) minmax(180px,1fr) auto;gap:12px;align-items:end}
+.lesson-quiz-link label{display:grid;gap:6px}
+.lesson-quiz-links .lesson-add-controls{display:flex;gap:8px;flex-wrap:wrap}
+.public-lesson-quizzes{margin-top:18px}
+.public-lesson-quizzes>div{display:flex;gap:10px;flex-wrap:wrap}
+.student-quiz-card{max-width:1000px;margin:18px auto}
+.student-quiz-card>header{align-items:flex-start}
+.quiz-round-start{padding:18px;border-radius:12px;background:#f3f8f6}
+.quiz-attempt-summary{position:sticky;top:0;z-index:2;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:#ffffffed;backdrop-filter:blur(10px)}
+.quiz-timer{font-size:1.15rem;color:#a83e36}
+.quiz-score{font-size:1.2rem;color:var(--teal)}
+.quiz-student-questions{display:grid;gap:14px;margin:14px 0}
+.quiz-student-question{display:grid;gap:12px;padding:18px;border:1px solid var(--line);border-radius:12px}
+.quiz-student-question h2{display:flex;justify-content:space-between;gap:10px;margin:0}
+.quiz-student-question h2 small{color:var(--muted);font-size:.85rem}
+.quiz-student-question>p{margin:0}
+.quiz-student-question fieldset{display:grid;gap:9px;border:0;padding:0;margin:0}
+.quiz-student-choice{display:flex;align-items:center;gap:10px;padding:11px;border:1px solid var(--line);border-radius:9px;cursor:pointer}
+.quiz-student-choice input{flex:0 0 auto}
+.quiz-student-choice span:last-child{margin-left:auto;color:var(--teal);font-size:.9rem}
+.quiz-explanation{padding:10px;border-left:3px solid #83bbaa;background:#f1f8f5}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.student-quiz-link{text-decoration:none}
+@media(max-width:700px){.quiz-question-fields,.quiz-assign-form,.lesson-quiz-link{grid-template-columns:1fr}.quiz-choice-editor{grid-template-columns:1fr 1fr}.quiz-choice-editor>label:first-child{grid-column:1/-1}.quiz-round-list article{align-items:flex-start;flex-direction:column}.quiz-round-actions{justify-content:flex-start}.student-quiz-card{padding:16px}.quiz-results .table-scroll{max-width:calc(100vw - 56px)}}

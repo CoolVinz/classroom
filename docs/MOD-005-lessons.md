@@ -22,11 +22,12 @@ Teachers create reusable lesson pages with ordered text, image, and YouTube bloc
 - Every draft save and publish checks an expected revision. Conflicting edits return 409 and leave the editor's content intact.
 - Public routes expose only published content. Public image routes require the image UUID to appear in the current published blocks or custom-code image manifest. Teacher image routes require lesson ownership.
 - These pages are public to anyone with the link. They have no listing directory and student reading progress is not recorded. Existing attendance is tracked only for authenticated students using the shared attendance component.
+- Teachers may attach quiz buttons to draft and published snapshots. Their label and quiz ID publish atomically with the lesson, and buttons render in the parent reader outside a custom-code iframe. Opening a button requires student Google sign-in and an eligible classroom round; see MOD-006.
 - Published source is public and visible to readers; never include secrets.
 
 ## Dependencies and consumers
 
-**dependencies:** MOD-001, MOD-003, DAT-001, TEC-001, OPS-001
+**dependencies:** MOD-001, MOD-003, MOD-006, DAT-001, TEC-001, OPS-001
 
 **used_by:** none
 
@@ -37,9 +38,9 @@ Teacher UI and source editor: web/src/LessonLibrary.tsx, web/src/CodeLesson.tsx
 Public reader and content blocks: web/src/PublicLessonPage.tsx, web/src/LessonContent.tsx
 Sandbox document and image markers: web/src/code-lesson.ts
 Attendance on public lesson pages: web/src/StudentAttendance.tsx
-Teacher and public APIs: src/routes/lesson-pages.ts
+Teacher and public APIs, including draft/published quiz links: src/routes/lesson-pages.ts
 Storage quota, startup recovery, and image cleanup: src/file-storage.ts
-Migrations: src/db/migrations/010_lesson_pages.sql, src/db/migrations/011_lesson_code.sql
+Migrations: src/db/migrations/010_lesson_pages.sql, src/db/migrations/011_lesson_code.sql, src/db/migrations/012_quiz_builder.sql
 Frame policy: src/content-security-policy.ts, src/server.ts
 Routing and deployment: src/server.ts, web/src/App.tsx
 Tests: src/student-workflow.test.ts (isolated PostgreSQL integration), web/src/code-lesson.test.ts
@@ -52,7 +53,8 @@ YouTube URL validation: web/src/youtube-url.ts, web/src/youtube-url.test.ts
 - Many or large code lesson images can use substantial browser memory because the preview embeds them in its isolated document; keep uploaded preview images small.
 - Lesson JavaScript and approved third-party resources can consume browser resources. Publish only code you trust, and never include secrets.
 - Lessons depend on YouTube playback and network access. Embedded videos may be unavailable if blocked by the video owner, Google Workspace, or school network.
-- No quizzes, lesson completion records, or video uploads are implemented.
+- Lesson quiz buttons point to existing quiz rounds but do not embed question content; see MOD-006.
+- Lesson completion records and video uploads are not implemented.
 
 ## Open questions
 
