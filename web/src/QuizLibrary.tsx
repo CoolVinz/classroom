@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { api } from "./api";
+import { exportQuizForAI, parseQuizImportText, quizAITemplate } from "../../src/quiz-import";
 import "./quiz.css";
 
 type Choice = { id: string; text: string; imageId: string | null };
@@ -22,6 +23,9 @@ export function QuizLibrary({ classrooms, onError, onDirtyChange }: { classrooms
   const [classroomId, setClassroomId] = useState(""); const [rounds, setRounds] = useState<Round[]>([]);
   const [duration, setDuration] = useState(""); const [result, setResult] = useState<Result | null>(null);
   const [busy, setBusy] = useState(false); const [preview, setPreview] = useState(false);
+  const [aiTopic, setAiTopic] = useState(""); const [importOpen, setImportOpen] = useState(false);
+  const [importText, setImportText] = useState(""); const [importPreview, setImportPreview] = useState<ReturnType<typeof parseQuizImportText> | null>(null);
+  const [importError, setImportError] = useState(""); const [copyFallback, setCopyFallback] = useState(""); const [aiNotice, setAiNotice] = useState("");
   const dirty = Boolean(quiz && (quiz.title !== title || JSON.stringify(quiz.content) !== JSON.stringify(content)));
   const selectedClass = classrooms.find((item) => item.id === classroomId);
   useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
@@ -97,7 +101,51 @@ export function QuizLibrary({ classrooms, onError, onDirtyChange }: { classrooms
   }
   const maxScore = useMemo(() => content.questions.reduce((sum, question) => sum + Number(question.points || 0), 0), [content]);
 
+  async function copyForAI(value: string, note: string) {
+    setAiNotice(note);
+    try { await navigator.clipboard.writeText(value); setCopyFallback(""); }
+    catch { setCopyFallback(value); setAiNotice(`${note} · คัดลอกอัตโนมัติไม่ได้ กรุณาเลือกข้อความด้านล่างแล้วคัดลอก`); }
+  }
+  function previewImport() {
+    setImportError(""); setImportPreview(null);
+    try { setImportPreview(parseQuizImportText(importText)); }
+    catch (error) { setImportError(error instanceof Error ? error.message : "รูปแบบแบบทดสอบไม่ถูกต้อง"); }
+  }
+  async function createImportedDraft() {
+    if (!importPreview) return;
+    setBusy(true); setImportError("");
+    try {
+      await api<Quiz>("/quizzes/import", { method: "POST", body: JSON.stringify({ json: importText }) });
+      await loadList(); setImportOpen(false); setImportText(""); setImportPreview(null);
+      setAiNotice("นำเข้าเป็นฉบับร่างใหม่แล้ว เปิดจากรายการแบบทดสอบเพื่อตรวจสอบ");
+    } catch (error) { setImportError(error instanceof Error ? error.message : "นำเข้าไม่สำเร็จ"); }
+    finally { setBusy(false); }
+  }
+  const aiTools = <section className="panel quiz-ai-tools"><h2>สร้างแบบทดสอบด้วย AI</h2>
+    <label>หัวข้อสำหรับ AI<input value={aiTopic} onChange={(event) => setAiTopic(event.target.value)} placeholder="เช่น พื้นฐาน Blender" /></label>
+    <div className="lesson-actions">
+      <button className="button button-quiet" onClick={() => void copyForAI(quizAITemplate.replace("__REPLACE_WITH_TOPIC__", aiTopic || "ใส่หัวข้อที่ต้องการ"), "คัดลอกคำสั่งสำหรับ AI แล้ว")}>Copy AI template</button>
+      <button className="button button-quiet" onClick={() => { setImportOpen((value) => !value); setImportError(""); }}>Import from AI</button>
+      {quiz && <button className="button button-quiet" onClick={() => {
+        const hasImages = content.questions.some((question) => question.imageId || question.choices.some((choice) => choice.imageId));
+        void copyForAI(JSON.stringify(exportQuizForAI(title, content), null, 2), hasImages ? "ส่งออกเฉพาะข้อความ ไม่รวมรูป คำถามที่พึ่งพารูปอาจต้องเขียนใหม่" : "คัดลอกแบบทดสอบปัจจุบัน รวมการแก้ไขที่ยังไม่บันทึกแล้ว");
+      }}>Copy quiz for AI</button>}
+    </div>
+    {aiNotice && <p className="muted" role="status">{aiNotice}</p>}
+    {copyFallback && <label>ข้อความสำหรับคัดลอก<textarea rows={8} readOnly value={copyFallback} onFocus={(event) => event.currentTarget.select()} /></label>}
+    {importOpen && <div className="quiz-ai-import"><label>วาง JSON จาก AI<textarea rows={10} maxLength={1048576} value={importText} onChange={(event) => { setImportText(event.target.value); setImportPreview(null); setImportError(""); }} placeholder='{"format":"classroom-quiz","version":1,...}' /></label>
+      {importError && <p className="form-error" role="alert">{importError}</p>}
+      <button className="button button-quiet" disabled={!importText.trim()} onClick={previewImport}>ตรวจสอบและดูตัวอย่าง</button>
+      {importPreview && <div className="quiz-import-preview"><h3>{importPreview.title}</h3><p>{importPreview.content.description}</p><p>{importPreview.content.questions.length} ข้อ · {importPreview.content.questions.reduce((sum, question) => sum + question.points, 0)} คะแนน</p>
+        {importPreview.content.questions.map((question, index) => <article key={question.id}><strong>{index + 1}. {question.prompt} ({question.points} คะแนน)</strong><ol>{question.choices.map((choice) => <li key={choice.id}>{choice.text}{choice.id === question.correctChoiceId ? " · คำตอบถูก" : ""}</li>)}</ol>{question.explanation && <p>{question.explanation}</p>}</article>)}
+        <button className="button button-primary" disabled={busy} onClick={() => void createImportedDraft()}>{busy ? "กำลังนำเข้า…" : "สร้างฉบับร่างใหม่"}</button>
+      </div>}
+    </div>}
+    <p className="muted">AI อาจตอบผิด โปรดตรวจคำตอบก่อนเผยแพร่ · เพิ่มรูปได้ในตัวสร้างหลังนำเข้า</p>
+  </section>;
+
   if (!quiz) return <section className="quiz-library"><header className="page-heading"><div><p className="eyebrow">แบบทดสอบสำหรับนักเรียน</p><h1>แบบทดสอบ</h1><p className="muted page-description">สร้างแบบทดสอบ แล้วทำสำเนาแยกรอบให้แต่ละห้อง</p></div></header>
+    {aiTools}
     <form className="lesson-create" onSubmit={create}><label>ชื่อแบบทดสอบ<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={120} required/></label><button className="button button-primary" disabled={busy}>＋ สร้างแบบทดสอบ</button></form>
     {list.length ? <div className="lesson-list">{list.map((item) => <button className="lesson-list-item" key={item.id} onClick={() => void open(item.id)}><span><strong>{item.title}</strong><small>{item.publishedAt ? "เผยแพร่แล้ว" : "ฉบับร่าง"}</small></span><b>แก้ไข ↗</b></button>)}</div> : <div className="panel"><h2>ยังไม่มีแบบทดสอบ</h2><p className="muted">แบบทดสอบรองรับปรนัยเลือกคำตอบเดียวและถูก/ผิด</p></div>}
   </section>;
@@ -107,6 +155,7 @@ export function QuizLibrary({ classrooms, onError, onDirtyChange }: { classrooms
     <button className="button button-primary" disabled={busy || !dirty && Boolean(quiz.publishedAt)} onClick={() => void save(true)}>{quiz.publishedAt ? "บันทึกและเผยแพร่" : "เผยแพร่"}</button>
     {quiz.publishedAt && <button className="button button-danger" disabled={busy || dirty} onClick={() => void unpublish()}>ยกเลิกเผยแพร่</button>}
   </div></header>
+    {aiTools}
     <label className="lesson-title-field">ชื่อแบบทดสอบ<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={120}/></label>
     <label className="quiz-description">คำชี้แจง<textarea rows={3} value={content.description} maxLength={4000} onChange={(event) => setContent((value) => ({ ...value, description: event.target.value }))}/></label>
     <div className="quiz-toolbar"><span>{content.questions.length} / 100 ข้อ · รวม {maxScore} คะแนน</span><button className="button button-quiet" onClick={() => setPreview((value) => !value)}>{preview ? "ปิดตัวอย่าง" : "ดูตัวอย่าง"}</button><button className="button button-quiet" disabled={content.questions.length >= 100} onClick={() => setContent((value) => ({ ...value, questions: [...value.questions, newQuestion()] }))}>＋ เพิ่มคำถาม</button></div>

@@ -11,6 +11,7 @@ Teachers maintain a reusable quiz library and assign immutable copies to classro
 ## Workflows and rules
 
 - A teacher creates a draft, edits and reorders up to 100 single-answer multiple-choice or true/false questions, previews, and publishes. Each question has positive integer points, one correct choice, optional explanation and image; choices may also contain images. Drafts can be incomplete, while publication validates prompts, choices, and answer keys.
+- Teachers can copy a versioned JSON prompt/template to an AI and paste its response for validation and preview. Import creates a separate private draft with fresh IDs; format `classroom-quiz` version 1 supports 1–100 text-only questions, multiple-choice answer numbers (1-based), and true/false booleans. Export uses current editor content and omits images; teachers review AI answers and add images in the builder.
 - Teachers may assign a published snapshot to any owned active classroom, with an optional 1–240 minute countdown. The countdown starts with the student's first attempt. A round moves from awaiting opening to open to closed; closed rounds do not reopen.
 - Library republishing or unpublishing does not change existing classroom snapshots. A teacher creates a new round to distribute a newer version.
 - A student opening a quiz link must use Google sign-in. The app returns the student to the quiz route and selects a sole eligible round; multiple class/round options are selectable. Starting creates one attempt before question delivery. Reloads resume saved answers; revision checks reject stale tabs.
@@ -32,6 +33,7 @@ Teacher quiz library/editor and round results: web/src/QuizLibrary.tsx
 Student round selector, attempts, timer, autosave, and lesson entry: web/src/StudentQuizPage.tsx, web/src/StudentPortal.tsx
 Teacher/student APIs, snapshots, locking, deadlines, scoring, and image access: src/routes/quizzes.ts
 Content validation, scoring, privacy projection: src/quiz-core.ts, src/quiz-core.test.ts
+AI quiz import/export format and validation: src/quiz-import.ts, src/quiz-import.test.ts, POST /api/quizzes/import
 Lesson draft/published quiz links: src/routes/lesson-pages.ts, web/src/LessonLibrary.tsx, web/src/PublicLessonPage.tsx
 Storage quotas, reconciliation, and image retention: src/file-storage.ts
 Schema: src/db/migrations/012_quiz_builder.sql

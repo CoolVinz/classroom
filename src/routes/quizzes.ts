@@ -10,6 +10,7 @@ import { HttpError } from "../http-error";
 import { checkRequestOrigin, cleanText } from "../security";
 import { gradeQuiz, normalizeQuizContent, referencedQuizImages, studentQuizQuestions, validateAnswers, type QuizAnswers, type QuizContent } from "../quiz-core";
 import { cleanupUnusedLessonImages, maxStoredBytes, maxUploadBytes, storedFilePath, uploadRoot } from "../file-storage";
+import { parseQuizImportText } from "../quiz-import";
 
 const contentBody = t.Object({ title: t.String({ minLength: 1, maxLength: 120 }), content: t.Any(), expectedRevision: t.Integer({ minimum: 0 }) });
 const revisionBody = t.Object({ expectedRevision: t.Integer({ minimum: 0 }) });
@@ -88,6 +89,20 @@ export const quizRoutes = new Elysia({ prefix: "/api" })
         published_title AS "publishedTitle", published_at AS "publishedAt"`;
     return quiz;
   }, { body: t.Object({ title: t.String({ minLength: 1, maxLength: 120 }) }) })
+  .post("/quizzes/import", async ({ body, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireActor(request);
+    let imported: ReturnType<typeof parseQuizImportText>;
+    try { imported = parseQuizImportText(body.json); }
+    catch (error) { throw new HttpError(422, error instanceof Error ? error.message : "แบบข้อมูลไม่ถูกต้อง"); }
+    const [quiz] = await sql.begin(async (tx) => tx`
+      INSERT INTO classroom.quizzes (owner_id, title, draft_content)
+      VALUES (${actor.id}, ${imported.title}, ${sql.json(imported.content)})
+      RETURNING id, title, draft_content AS content, draft_revision AS revision,
+        published_title AS "publishedTitle", published_at AS "publishedAt"
+    `);
+    return quiz;
+  }, { body: t.Object({ json: t.String({ maxLength: 1048576 }) }) })
   .get("/quizzes/:id", async ({ params, request }) => {
     const actor = await requireActor(request);
     const [quiz] = await sql`SELECT id, title, draft_content AS content, draft_revision AS revision,

@@ -46,4 +46,9 @@
 .quiz-explanation{padding:10px;border-left:3px solid #83bbaa;background:#f1f8f5}
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .student-quiz-link{text-decoration:none}
+.quiz-ai-tools{display:grid;gap:12px;margin:16px 0}
+.quiz-ai-tools>label,.quiz-ai-import>label{display:grid;gap:6px}
+.quiz-ai-import,.quiz-import-preview{display:grid;gap:12px}
+.quiz-import-preview article{padding:12px;border:1px solid var(--line);border-radius:10px}
+.quiz-import-preview ol{margin-bottom:0}
 @media(max-width:700px){.quiz-question-fields,.quiz-assign-form,.lesson-quiz-link{grid-template-columns:1fr}.quiz-choice-editor{grid-template-columns:1fr 1fr}.quiz-choice-editor>label:first-child{grid-column:1/-1}.quiz-round-list article{align-items:flex-start;flex-direction:column}.quiz-round-actions{justify-content:flex-start}.student-quiz-card{padding:16px}.quiz-results .table-scroll{max-width:calc(100vw - 56px)}}

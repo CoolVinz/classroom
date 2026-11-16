@@ -138,6 +138,19 @@ describe("student submission API", () => {
       let studentHeaders = { cookie: signedIn.headers.get("set-cookie")!.split(";")[0], origin: "http://localhost:3000" };
       const teacherHeaders = { cookie: `classroom_session=${teacherToken}`, origin: "http://localhost:3000" };
 
+      const aiImport = await app.handle(new Request("http://localhost/api/quizzes/import", { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" },
+        body: JSON.stringify({ json: JSON.stringify({ format: "classroom-quiz", version: 1, title: "AI draft", description: "คำชี้แจง", questions: [
+          { type: "multiple-choice", prompt: "คำถาม", points: 2, choices: ["หนึ่ง", "สอง"], correctAnswer: 2, explanation: "คำตอบ" },
+        ] }) }) }));
+      expect(aiImport.status).toBe(200);
+      const aiDraft = await aiImport.json() as { id: string; title: string; publishedAt: string | null; content: { questions: { id: string; choices: { id: string }[]; correctChoiceId: string }[] } };
+      quizIds.push(aiDraft.id);
+      expect(aiDraft).toMatchObject({ title: "AI draft", publishedAt: null });
+      expect(aiDraft.content.questions[0].correctChoiceId).toBe(aiDraft.content.questions[0].choices[1].id);
+      expect((await app.handle(new Request(`http://localhost/api/quizzes/${aiDraft.id}`, { headers: { cookie: `classroom_session=${teacherToken}` } }))).status).toBe(200);
+      expect((await app.handle(new Request("http://localhost/api/quizzes/import", { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ json: "{}" }) }))).status).toBe(422);
+      expect((await app.handle(new Request("http://localhost/api/quizzes/import", { method: "POST", headers: { ...studentHeaders, "content-type": "application/json" }, body: JSON.stringify({ json: "{}" }) }))).status).toBe(401);
+
       const quizId = randomUUID(); const questionId = randomUUID(); const correctChoiceId = randomUUID(); const wrongChoiceId = randomUUID();
       const quizTitle = "Quiz snapshot";
       const createdQuiz = await app.handle(new Request("http://localhost/api/quizzes", { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title: quizTitle }) }));
