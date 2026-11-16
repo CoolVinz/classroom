@@ -3,6 +3,7 @@ import { Server, Room, ServerError } from "colyseus";
 import { schema, t } from "@colyseus/schema";
 import pg from "pg";
 import { boundedMove } from "./movement.mjs";
+import { applyAppearance } from "./avatar.mjs";
 
 if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
 const pool = new pg.Pool({
@@ -10,7 +11,7 @@ const pool = new pg.Pool({
   ssl: process.env.DATABASE_SSL === "disable" ? false : { rejectUnauthorized: false },
   max: 8,
 });
-const Player = schema({ displayName: t.string(), role: t.string(), x: t.number().default(0), z: t.number().default(0), rotation: t.number().default(0) });
+const Player = schema({ displayName: t.string(), role: t.string(), skinColor: t.string(), hairColor: t.string(), shirtColor: t.string(), trousersColor: t.string(), hairStyle: t.string(), x: t.number().default(0), z: t.number().default(0), rotation: t.number().default(0) });
 const GalleryState = schema({ players: t.map(Player) });
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
@@ -27,15 +28,15 @@ async function consumeTicket(token, classroomId) {
     const ticket = rows[0];
     if (!ticket) throw new ServerError(4001, "Room ticket expired or already used");
     const sessionQuery = ticket.actor_kind === "teacher"
-      ? `SELECT t.id, t.display_name AS "displayName", t.active FROM classroom.sessions s JOIN classroom.teachers t ON t.id=s.teacher_id WHERE s.token_hash=$1 AND s.teacher_id=$2 AND s.expires_at>NOW() AND t.active`
-      : `SELECT a.id, s.display_name AS "displayName", TRUE AS active FROM classroom.student_sessions ss JOIN classroom.student_accounts a ON a.id=ss.account_id JOIN classroom.students s ON s.id=$3 AND s.account_id=a.id JOIN classroom.classrooms c ON c.id=s.classroom_id WHERE ss.token_hash=$1 AND a.id=$2 AND ss.expires_at>NOW() AND s.archived_at IS NULL AND c.archived_at IS NULL`;
+      ? `SELECT t.id, t.display_name AS "displayName", t.active, t.avatar_settings AS appearance FROM classroom.sessions s JOIN classroom.teachers t ON t.id=s.teacher_id WHERE s.token_hash=$1 AND s.teacher_id=$2 AND s.expires_at>NOW() AND t.active`
+      : `SELECT a.id, s.display_name AS "displayName", a.avatar_settings AS appearance, TRUE AS active FROM classroom.student_sessions ss JOIN classroom.student_accounts a ON a.id=ss.account_id JOIN classroom.students s ON s.id=$3 AND s.account_id=a.id JOIN classroom.classrooms c ON c.id=s.classroom_id WHERE ss.token_hash=$1 AND a.id=$2 AND ss.expires_at>NOW() AND s.archived_at IS NULL AND c.archived_at IS NULL`;
     const sessionValues = ticket.actor_kind === "teacher" ? [ticket.session_hash, ticket.account_id] : [ticket.session_hash, ticket.account_id, ticket.student_id];
     const { rows: sessions } = await client.query(sessionQuery, sessionValues);
     const account = sessions[0];
     if (!account) throw new ServerError(4001, "Session is no longer active");
     await client.query("UPDATE classroom.gallery_tickets SET consumed_at=NOW() WHERE token_hash=$1", [ticket.token_hash]);
     await client.query("COMMIT");
-    return { classroomId, accountId: ticket.account_id, sessionHash: ticket.session_hash, studentId: ticket.student_id, role: ticket.actor_kind, displayName: account.displayName };
+    return { classroomId, accountId: ticket.account_id, sessionHash: ticket.session_hash, studentId: ticket.student_id, role: ticket.actor_kind, displayName: account.displayName, appearance: account.appearance };
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {});
     throw error;
@@ -57,6 +58,7 @@ class ClassroomGallery extends Room {
   members = new Map();
   movementTimes = new Map();
   movementMessages = new Map();
+  appearanceTimes = new Map();
   accessTimer;
   galleryTimer;
 
@@ -71,6 +73,7 @@ class ClassroomGallery extends Room {
     this.classroomId ??= options.classroomId;
     this.setMetadata({ classroomId: this.classroomId });
     this.onMessage("move", (client, message) => this.move(client, message));
+    this.onMessage("refresh-avatar", (client) => { void this.refreshAvatar(client); });
     const readSignature = async () => {
       const { rows } = await pool.query(`SELECT
         (SELECT COUNT(*)::int FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id WHERE f.classroom_id=$1 AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj)$' AND s.archived_at IS NULL AND a.archived_at IS NULL) AS files,
@@ -85,6 +88,7 @@ class ClassroomGallery extends Room {
     this.galleryTimer = setInterval(async () => {
       const next = await readSignature().catch(() => signature);
       if (next !== signature) { signature = next; this.broadcast("gallery-refresh"); }
+      await this.refreshAppearances().catch(() => {});
     }, 20000);
     this.accessTimer = setInterval(async () => {
       for (const client of [...this.clients]) {
@@ -103,6 +107,7 @@ class ClassroomGallery extends Room {
     const player = new Player();
     player.displayName = auth.displayName;
     player.role = auth.role;
+    applyAppearance(player, auth.appearance);
     player.x = Math.random() * 4 - 2;
     player.z = Math.random() * 4 - 2;
     this.state.players.set(client.sessionId, player);
@@ -126,11 +131,36 @@ class ClassroomGallery extends Room {
     this.movementTimes.set(client.sessionId, now);
   }
 
+  async refreshAvatar(client) {
+    const auth = this.members.get(client.sessionId);
+    if (!auth || Date.now() - (this.appearanceTimes.get(client.sessionId) ?? 0) < 1000) return;
+    this.appearanceTimes.set(client.sessionId, Date.now());
+    if (!(await stillAllowed(auth).catch(() => false))) { client.leave(4003, "Classroom access expired"); return; }
+    const table = auth.role === "teacher" ? "classroom.teachers" : "classroom.student_accounts";
+    const { rows } = await pool.query(`SELECT avatar_settings AS appearance FROM ${table} WHERE id=$1`, [auth.accountId]);
+    const player = this.state.players.get(client.sessionId);
+    if (player && rows[0]) applyAppearance(player, rows[0].appearance);
+  }
+
+  async refreshAppearances() {
+    const teacherIds = [...new Set([...this.members.values()].filter((member) => member.role === "teacher").map((member) => member.accountId))];
+    const studentIds = [...new Set([...this.members.values()].filter((member) => member.role === "student").map((member) => member.accountId))];
+    if (!teacherIds.length && !studentIds.length) return;
+    const { rows } = await pool.query(`SELECT id, avatar_settings AS appearance, 'teacher' AS role FROM classroom.teachers WHERE id=ANY($1::uuid[])
+      UNION ALL SELECT id, avatar_settings AS appearance, 'student' AS role FROM classroom.student_accounts WHERE id=ANY($2::uuid[])`, [teacherIds, studentIds]);
+    const appearances = new Map(rows.map((row) => [`${row.role}:${row.id}`, row.appearance]));
+    for (const client of this.clients) {
+      const auth = this.members.get(client.sessionId), player = this.state.players.get(client.sessionId);
+      if (auth && player) applyAppearance(player, appearances.get(`${auth.role}:${auth.accountId}`));
+    }
+  }
+
   onLeave(client) {
     this.state.players.delete(client.sessionId);
     this.members.delete(client.sessionId);
     this.movementTimes.delete(client.sessionId);
     this.movementMessages.delete(client.sessionId);
+    this.appearanceTimes.delete(client.sessionId);
   }
 
   onDispose() { clearInterval(this.accessTimer); clearInterval(this.galleryTimer); }
