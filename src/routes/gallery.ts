@@ -7,6 +7,13 @@ import { checkRequestOrigin } from "../security";
 import { storedFilePath } from "../file-storage";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+const avatarSchema = t.Object({
+  skinColor: t.String({ pattern: "^#[0-9a-fA-F]{6}$" }),
+  hairColor: t.String({ pattern: "^#[0-9a-fA-F]{6}$" }),
+  shirtColor: t.String({ pattern: "^#[0-9a-fA-F]{6}$" }),
+  trousersColor: t.String({ pattern: "^#[0-9a-fA-F]{6}$" }),
+  hairStyle: t.Union([t.Literal("none"), t.Literal("short"), t.Literal("long")]),
+});
 function cookieToken(request: Request) {
   const value = request.headers.get("cookie")?.split(";").map((part) => part.trim()).find((part) => part.startsWith("classroom_session="))?.slice("classroom_session=".length);
   if (!value || value.length > 128) throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
@@ -36,6 +43,33 @@ async function ensureBlocks(classroomId: string) {
 
 export const galleryRoutes = new Elysia({ prefix: "/api" })
   .get("/gallery/config", () => ({ url: process.env.GALLERY_WS_URL ?? "" }))
+  .get("/gallery/avatar", async ({ request }) => {
+    const teacher = await readActor(request);
+    if (teacher) {
+      const [row] = await sql<{ avatarSettings: unknown }[]>`SELECT avatar_settings AS "avatarSettings" FROM classroom.teachers WHERE id=${teacher.id}`;
+      if (row) return row.avatarSettings;
+    }
+    const student = teacher ? null : await readStudentActor(request);
+    if (student) {
+      const [row] = await sql<{ avatarSettings: unknown }[]>`SELECT avatar_settings AS "avatarSettings" FROM classroom.student_accounts WHERE id=${student.id}`;
+      if (row) return row.avatarSettings;
+    }
+    throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
+  })
+  .put("/gallery/avatar", async ({ request, body }) => {
+    checkRequestOrigin(request);
+    const teacher = await readActor(request);
+    if (teacher) {
+      await sql`UPDATE classroom.teachers SET avatar_settings=${JSON.stringify(body)}::jsonb WHERE id=${teacher.id}`;
+      return body;
+    }
+    const student = await readStudentActor(request);
+    if (student) {
+      await sql`UPDATE classroom.student_accounts SET avatar_settings=${JSON.stringify(body)}::jsonb WHERE id=${student.id}`;
+      return body;
+    }
+    throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
+  }, { body: avatarSchema })
   .get("/student/worlds", async ({ request }) => {
     const actor = await readStudentActor(request);
     if (!actor) throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");

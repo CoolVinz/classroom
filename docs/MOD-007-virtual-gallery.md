@@ -1,6 +1,6 @@
 # MOD-007 — Shared Classroom Virtual Gallery
 
-**Status:** Implemented; deployment is separately configured and not live-verified
+**Status:** Gallery service is deployed and its HTTPS health endpoint was verified; real teacher/student room joining remains unverified
 **Coupling:** HIGH
 **Risk:** HIGH
 
@@ -19,6 +19,7 @@ Give each classroom a shared third-person world where teachers and active studen
 - Colyseus admission uses a single-use 60-second ticket tied to the existing session. The service validates sessions and membership and rechecks access periodically. Movement is server-bounded and rate-limited.
 - Saved thumbnails show all models in the loaded page. At most 12 nearby model files are parsed in sequence at a time, with a one-million-triangle resident budget; individual previews retain the existing 500,000-triangle and 10-second limits.
 - On the student world page, the existing attendance panel continues to apply its visibility/focus rules. World movement and likes do not affect attendance.
+- Teachers and students can save one account-level character appearance shared across classrooms. The builder changes hair style and colors only; the Colyseus player state broadcasts appearance without changing identity, role, or position.
 
 ## Dependencies and Code Map
 
@@ -26,10 +27,10 @@ Give each classroom a shared third-person world where teachers and active studen
 **used_by:** teacher classroom workspace and student portal
 
 ```text
-Teacher UI and Three.js world: web/src/App.tsx, web/src/GalleryWorld.tsx
+Teacher UI and Three.js world: web/src/App.tsx, web/src/GalleryWorld.tsx, web/src/gallery-avatar.ts
 Student entry: web/src/StudentPortal.tsx
 Authenticated world APIs and model file reads: src/routes/gallery.ts
-Migration: src/db/migrations/014_virtual_gallery.sql
+Migrations: src/db/migrations/014_virtual_gallery.sql, src/db/migrations/015_gallery_avatars.sql
 Colyseus service and bounded movement: gallery-server/src/server.mjs, gallery-server/src/movement.mjs
 Service deployment: gallery-server/Dockerfile; `/__healthcheck` route: gallery-server/src/server.mjs
 Existing model parser and preview: web/src/model-view.ts, web/src/model-preview.worker.ts, web/src/ModelPreview.tsx

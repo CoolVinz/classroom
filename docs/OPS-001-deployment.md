@@ -1,6 +1,6 @@
 # OPS-001 — Deployment and Operations
 
-**Status:** Docker deployment files are present; app deployment to the user's Coolify VPS has not been verified. A read-only preflight on 2026-10-08 confirmed PostgreSQL 18.6 and the existing `001_initial` migration baseline.
+**Status:** Classroom and its separate Colyseus gallery service are deployed on Coolify. The gallery HTTPS health endpoint was verified; real teacher/student room joining remains unverified.
 
 ## Deployment method
 
@@ -21,6 +21,7 @@
 - Before attaching a volume to an existing deployment, copy recoverable files from the running container into it under their existing storage UUIDs. A new empty mount hides the old container directory; mounting does not recover missing data.
 - The app applies numbered tracked migrations at startup. Migration `005_classroom_student_numbers.sql` adds classroom numbering; `006_scheduled_attendance.sql` adds timetable, dated lessons, attendance provenance, and visible-time records; `007_thumbnails_assessments.sql` adds saved-thumbnail metadata, assignment maximum scores, and private/published assessments; `008_thumbnail_media_type.sql` records PNG/WebP thumbnail formats while retaining existing PNG files; `009_working_blend_files.sql` adds Blender working files; `010_lesson_pages.sql` adds teacher-owned lesson drafts and optimized lesson-image metadata; `011_lesson_code.sql` adds editor mode and published-title snapshots; `012_quiz_builder.sql` adds quiz drafts, immutable classroom rounds, student attempts, quiz images, and optional lesson quiz-link snapshots; `013_recoverable_trash.sql` adds quiz and lesson trash timestamps. If `classroom` contains untracked objects, startup stops for inspection.
 - Migration `014_virtual_gallery.sql` adds per-classroom world settings, stable student blocks, teacher-hidden displays, likes, and short-lived room tickets. It preserves existing attendance, assignments, submissions, and files.
+- Migration `015_gallery_avatars.sql` adds default appearance settings to teacher and student accounts. The app API saves them; the Colyseus service includes them in player state and refreshes connected rooms from PostgreSQL.
 
 ## Runtime environment
 
@@ -64,7 +65,7 @@ Configure the separate Colyseus service with the same `DATABASE_URL` and `DATABA
 
 ## Deploy and initialize
 
-Back up PostgreSQL and the upload volume before release because the app applies migrations on startup. Configure the app, deploy the `gallery-server` service, set `GALLERY_WS_URL`, and enable a class world only after WSS is reachable. After deployment, verify `/health/ready`, migration 014, teacher/student admission, archived-member revocation, and a synthetic model upload appearing in its student's block. Test movement and classroom isolation with synthetic users. Uploaded file contents need their own off-server backup. See [README deployment instructions](../README.md).
+Back up PostgreSQL and the upload volume before release because the app applies migrations on startup. For character appearance changes, deploy the app first so migration 015 is applied, then deploy `gallery-server`, which reads the new account columns when admitting and refreshing players. Set `GALLERY_WS_URL` and enable a class world only after WSS is reachable. Verify `/health/ready`, teacher/student admission, saved appearances across rooms, archived-member revocation, and a synthetic model upload appearing in its student's block. Test movement and classroom isolation with synthetic users. Uploaded file contents need their own off-server backup. See [README deployment instructions](../README.md).
 
 ## Open questions
 
