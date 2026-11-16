@@ -6,12 +6,13 @@ import { StudentAttendance } from "./StudentAttendance";
 import ModelPreview from "./ModelPreview";
 import { loadModel } from "./model-view";
 import { galleryFileUrl, galleryTicketRequest } from "./gallery-api";
-import { createAvatarCharacter, defaultAvatarAppearance, disposeAvatarCharacter, type AvatarAppearance } from "./gallery-avatar";
+import { animateAvatarCharacter, createAvatarCharacter, defaultAvatarAppearance, disposeAvatarCharacter, type AvatarAppearance } from "./gallery-avatar";
+import { jumpHeight, reconcilePosition, walkingStep, type Move } from "./gallery-motion";
 
 type User = { role: "owner" | "teacher" | "student"; displayName: string };
 type GalleryModel = { id: string; studentId: string; displayName: string; studentNumber: number | null; assignmentId: string; assignmentTitle: string; originalName: string; mediaType: string; thumbnailAvailable: boolean; createdAt: string; hidden: boolean; likes: number; likedByMe: boolean };
 type Manifest = { classroomId: string; classroomName: string; blocks: { studentId: string; displayName: string; studentNumber: number | null; blockIndex: number; archived: boolean }[]; models: GalleryModel[]; nextOffset: number | null; teacher: boolean; viewerStudentId: string | null };
-type Avatar = AvatarAppearance & { displayName: string; role: string; x: number; z: number; rotation: number };
+type Avatar = AvatarAppearance & { displayName: string; role: string; x: number; z: number; rotation: number; sequence?: number; jump?: number };
 
 function apiPath(classroomId: string, suffix = "") { return `/classrooms/${classroomId}/gallery${suffix}`; }
 function blockPosition(index: number) { return { x: ((index % 4) - 1.5) * 9, z: Math.floor(index / 4) * -9 }; }
@@ -35,10 +36,14 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
   const [draftAppearance, setDraftAppearance] = useState<AvatarAppearance>(defaultAvatarAppearance);
   const [customizerOpen, setCustomizerOpen] = useState(false);
   const customizerOpenRef = useRef(false);
+  const appearanceRef = useRef(appearance);
+  const touchRef = useRef({ x: 0, z: 0 });
+  const jumpRef = useRef(false);
   const teacher = user.role !== "student";
   useEffect(() => { modelsRef.current = models; }, [models]);
   useEffect(() => { manifestRef.current = manifest; }, [manifest]);
   customizerOpenRef.current = customizerOpen;
+  appearanceRef.current = appearance;
   const load = useCallback(async (offset = 0) => {
     const value = await api<Manifest>(apiPath(classroomId, `?offset=${offset}`));
     setManifest(value); setEnabled(value.teacher ? true : true);
@@ -47,7 +52,7 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
 
   useEffect(() => {
     let alive = true;
-    void api<AvatarAppearance>("/gallery/avatar").then((value) => { if (alive) setAppearance(value); }).catch(() => {});
+    void api<AvatarAppearance>("/gallery/avatar").then((value) => { if (alive) setAppearance(value); }).catch((reason) => { if (alive) setError(reason instanceof Error ? reason.message : "โหลดตัวละครไม่สำเร็จ"); });
     void api<{ url: string }>("/gallery/config").then((server) => { if (alive) setConfig(server.url); }).catch(() => {});
     void api<Manifest>(apiPath(classroomId)).then((value) => {
       if (alive) { setManifest(value); setEnabled(true); setModels(value.models); }
@@ -65,6 +70,7 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
     let renderer: THREE.WebGLRenderer;
     try { renderer = new THREE.WebGLRenderer({ canvas, antialias: true }); }
     catch { setError("อุปกรณ์นี้ไม่รองรับการแสดงโลกสามมิติ"); return; }
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     const scene = new THREE.Scene(); scene.background = new THREE.Color("#cce7ed");
     scene.fog = new THREE.Fog("#cce7ed", 45, 150);
     scene.add(new THREE.HemisphereLight(0xeafaff, 0x667263, 2.2));
@@ -73,6 +79,14 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
     const grid = new THREE.GridHelper(1000, 100, 0x9eaf9b, 0xb7c6b5); grid.position.y = 0; scene.add(grid);
     const camera = new THREE.PerspectiveCamera(58, 1, 0.1, 800);
     const avatarMeshes = new Map<string, THREE.Group>();
+    const syncAppearance = (avatar: THREE.Group, value: AvatarAppearance) => {
+      const signature = [value.skinColor, value.hairColor, value.shirtColor, value.trousersColor, value.hairStyle].join(":");
+      if (avatar.userData.appearance === signature) return;
+      const previous = avatar.userData.character as THREE.Group | undefined;
+      if (previous) { avatar.remove(previous); disposeAvatarCharacter(previous); }
+      const character = createAvatarCharacter(value); avatar.add(character);
+      avatar.userData.character = character; avatar.userData.appearance = signature;
+    };
     const modelMeshes = new Map<string, THREE.Object3D>();
     const renderedModels = new Set<string>();
     const raycastables: THREE.Object3D[] = [];
@@ -95,7 +109,7 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
     const syncBlocks = () => {
       const blocks = manifestRef.current?.blocks ?? [], current = new Set(blocks.map((block) => block.studentId));
       for (const block of blocks) if (!blockGroups.has(block.studentId)) addBlock(block);
-      for (const [studentId, group] of blockGroups) if (!current.has(studentId)) { scene.remove(group); blockGroups.delete(studentId); blockMap.delete(studentId); }
+      for (const [studentId, group] of blockGroups) if (!current.has(studentId)) { scene.remove(group); disposeAvatarCharacter(group); blockGroups.delete(studentId); blockMap.delete(studentId); }
     };
     syncBlocks();
     const addExhibit = (item: GalleryModel) => {
@@ -115,45 +129,70 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
       for (const item of modelsRef.current) if (!item.hidden && !renderedModels.has(item.id)) addExhibit(item);
       const visible = new Set(modelsRef.current.filter((item) => !item.hidden).map((item) => item.id));
       for (const modelId of renderedModels) if (!visible.has(modelId)) {
-        const exhibit = modelMeshes.get(modelId); if (exhibit) { scene.remove(exhibit); modelMeshes.delete(modelId); }
+        const exhibit = modelMeshes.get(modelId); if (exhibit) { scene.remove(exhibit); disposeAvatarCharacter(exhibit); modelMeshes.delete(modelId); }
         for (let i = raycastables.length - 1; i >= 0; i--) if (raycastables[i].userData.model?.id === modelId) raycastables.splice(i, 1);
         renderedModels.delete(modelId);
       }
     };
     syncExhibits();
     const raycaster = new THREE.Raycaster(); const pointer = new THREE.Vector2(); let drag = false; let lastX = 0; let startX = 0; let startY = 0; let yaw = 0; let cameraPitch = 0.34;
-    const keys = new Set<string>(); const keyDown = (event: KeyboardEvent) => { if (["w", "a", "s", "d", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) { event.preventDefault(); if (customizerOpenRef.current) return; keys.add(event.key.toLowerCase()); } };
+    const keys = new Set<string>(); const keyDown = (event: KeyboardEvent) => {
+      if (customizerOpenRef.current || (event.target instanceof HTMLElement && (event.target.matches("input, textarea, select, button") || event.target.isContentEditable))) return;
+      const key = event.key.toLowerCase();
+      if (["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(key)) {
+        event.preventDefault(); if (key === " ") { if (!event.repeat) jumpRef.current = true; } else keys.add(key);
+      }
+    };
     const keyUp = (event: KeyboardEvent) => keys.delete(event.key.toLowerCase());
-    const onBlur = () => keys.clear();
+    const onBlur = () => { keys.clear(); touchRef.current = { x: 0, z: 0 }; jumpRef.current = false; };
+    const onVisibility = () => { if (document.hidden) onBlur(); };
     const onPointerDown = (event: PointerEvent) => { if (customizerOpenRef.current) return; drag = true; lastX = event.clientX; startX = event.clientX; startY = event.clientY; canvas.setPointerCapture(event.pointerId); };
     const onPointerMove = (event: PointerEvent) => { if (!drag || customizerOpenRef.current) return; const delta = event.clientX - lastX; yaw -= delta * 0.005; cameraPitch = THREE.MathUtils.clamp(cameraPitch - event.movementY * 0.003, 0.08, 0.85); lastX = event.clientX; };
     const onPointerUp = (event: PointerEvent) => { if (!drag) return; drag = false; if (!customizerOpenRef.current && Math.hypot(event.clientX - startX, event.clientY - startY) < 5) { const rect = canvas.getBoundingClientRect(); pointer.set((event.clientX - rect.left) / rect.width * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1); raycaster.setFromCamera(pointer, camera); const hit = raycaster.intersectObjects(raycastables, false)[0]; if (hit?.object.userData.model) setSelected(hit.object.userData.model as GalleryModel); } };
     const resize = () => { const width = Math.max(1, canvas.clientWidth), height = Math.max(1, canvas.clientHeight); renderer.setSize(width, height, false); camera.aspect = width / height; camera.updateProjectionMatrix(); };
     const observer = new ResizeObserver(resize); observer.observe(canvas); resize();
     canvas.addEventListener("pointerdown", onPointerDown); canvas.addEventListener("pointermove", onPointerMove); canvas.addEventListener("pointerup", onPointerUp);
-    window.addEventListener("keydown", keyDown); window.addEventListener("keyup", keyUp); window.addEventListener("blur", onBlur);
+    window.addEventListener("keydown", keyDown); window.addEventListener("keyup", keyUp); window.addEventListener("blur", onBlur); document.addEventListener("visibilitychange", onVisibility);
     let alive = true, frame = 0, lastSend = 0, lastFrame = performance.now(), local = { x: 0, z: 0, rotation: 0 }, room: any;
+    let initialized = false, sequence = 0, lastAcknowledged = -1, jumpTime = -Infinity, pending: Move[] = [], unsent = { dx: 0, dz: 0 };
+    let syncedManifest = manifestRef.current, syncedModels = modelsRef.current;
     const modelAbort = new AbortController();
     const client = new Client(config);
-    const cleanup = () => { alive = false; cancelAnimationFrame(frame); room?.leave(); roomRef.current = null; observer.disconnect(); scene.traverse((object) => { const mesh = object as THREE.Mesh; mesh.geometry?.dispose?.(); const materials = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : []; materials.forEach((material) => material.dispose()); }); renderer.dispose(); renderer.forceContextLoss(); textures.forEach((texture) => texture.dispose()); avatarMeshes.clear(); window.removeEventListener("keydown", keyDown); window.removeEventListener("keyup", keyUp); window.removeEventListener("blur", onBlur); canvas.removeEventListener("pointerdown", onPointerDown); canvas.removeEventListener("pointermove", onPointerMove); canvas.removeEventListener("pointerup", onPointerUp); };
+    const cleanup = () => { alive = false; cancelAnimationFrame(frame); room?.leave(); roomRef.current = null; onBlur(); observer.disconnect(); scene.traverse((object) => { const mesh = object as THREE.Mesh; mesh.geometry?.dispose?.(); const materials = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : []; materials.forEach((material) => material.dispose()); }); renderer.dispose(); renderer.forceContextLoss(); textures.forEach((texture) => texture.dispose()); avatarMeshes.clear(); window.removeEventListener("keydown", keyDown); window.removeEventListener("keyup", keyUp); window.removeEventListener("blur", onBlur); document.removeEventListener("visibilitychange", onVisibility); canvas.removeEventListener("pointerdown", onPointerDown); canvas.removeEventListener("pointermove", onPointerMove); canvas.removeEventListener("pointerup", onPointerUp); };
     const ticketRequest = galleryTicketRequest(classroomId);
     void api<{ ticket: string; url: string }>(ticketRequest.path, ticketRequest.options).then(async ({ ticket }) => {
       if (!alive) return;
       room = await client.joinOrCreate("classroom", { classroomId, ticket });
+      if (!alive) { void room.leave(); return; }
       roomRef.current = room;
+      setError("");
+      room.onLeave(() => { if (alive) { initialized = false; setOnline(0); setError("การเชื่อมต่อโลกเสมือนสิ้นสุด กรุณาออกแล้วเข้าใหม่"); } });
       room.onMessage("gallery-refresh", () => { void load().catch((reason) => setError(reason instanceof Error ? reason.message : "โหลดผลงานใหม่ไม่สำเร็จ")); });
       room.onStateChange((state: any) => {
-        setOnline(state.players.size);
+        if (!alive) return;
+        setOnline((current) => current === state.players.size ? current : state.players.size);
         const present = new Set<string>();
         state.players.forEach((player: Avatar, id: string) => {
           present.add(id); let avatar = avatarMeshes.get(id);
-          const currentAppearance = JSON.stringify({ skinColor: player.skinColor, hairColor: player.hairColor, shirtColor: player.shirtColor, trousersColor: player.trousersColor, hairStyle: player.hairStyle });
-          if (!avatar) { avatar = new THREE.Group(); const character = createAvatarCharacter(player); character.userData.appearance = currentAppearance; avatar.add(character); avatar.userData.character = character; const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: labelTexture(player.role === "teacher" || player.role === "owner" ? `ครู ${player.displayName}` : player.displayName), transparent: true })); label.scale.set(2.6, 0.5, 1); label.position.y = 2.25; avatar.add(label); scene.add(avatar); avatarMeshes.set(id, avatar); }
-          else if (avatar.userData.character?.userData.appearance !== currentAppearance) { const previous = avatar.userData.character as THREE.Object3D | undefined; if (previous) { avatar.remove(previous); disposeAvatarCharacter(previous); } const character = createAvatarCharacter(player); character.userData.appearance = currentAppearance; avatar.add(character); avatar.userData.character = character; }
-          avatar.position.set(player.x, 0, player.z); avatar.rotation.y = player.rotation;
-          if (id === room.sessionId) local = { x: player.x, z: player.z, rotation: player.rotation };
+          if (!avatar) {
+            avatar = new THREE.Group(); avatar.position.set(player.x, 0, player.z); avatar.rotation.y = player.rotation;
+            avatar.userData.walkPhase = 0; avatar.userData.walking = 0; avatar.userData.jumpTime = -Infinity;
+            const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: labelTexture(player.role === "teacher" || player.role === "owner" ? `ครู ${player.displayName}` : player.displayName), transparent: true })); label.scale.set(2.6, 0.5, 1); label.position.y = 2.25; avatar.add(label); scene.add(avatar); avatarMeshes.set(id, avatar);
+          }
+          syncAppearance(avatar, id === room.sessionId ? appearanceRef.current : player);
+          avatar.userData.target = { x: player.x, z: player.z, rotation: player.rotation };
+          if (avatar.userData.jump !== undefined && avatar.userData.jump !== player.jump) avatar.userData.jumpTime = performance.now();
+          avatar.userData.jump = player.jump;
+          if (id === room.sessionId) {
+            if (!initialized) { local = { x: player.x, z: player.z, rotation: player.rotation }; initialized = true; }
+            // Replay movement not yet acknowledged instead of snapping to a delayed server position.
+            if (player.sequence !== undefined && player.sequence > lastAcknowledged) {
+              Object.assign(local, reconcilePosition(player, player.sequence, pending, unsent));
+              pending = pending.filter((move) => move.sequence > player.sequence!); lastAcknowledged = player.sequence;
+            }
+          }
         });
-        for (const [id, avatar] of avatarMeshes) if (!present.has(id)) { scene.remove(avatar); avatarMeshes.delete(id); }
+        for (const [id, avatar] of avatarMeshes) if (!present.has(id)) { scene.remove(avatar); disposeAvatarCharacter(avatar); avatar.traverse((object) => { if (object instanceof THREE.Sprite) object.material.map?.dispose(); }); avatarMeshes.delete(id); }
       });
     }).catch((reason) => { if (alive) setError(reason instanceof Error ? reason.message : "เชื่อมต่อโลกเสมือนไม่สำเร็จ"); });
     void (async () => {
@@ -166,6 +205,7 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
         if (modelAbort.signal.aborted) return;
         try {
           const parsed = await loadModel(item, galleryFileUrl(classroomId, item.id, "content"), modelAbort.signal);
+          if (modelAbort.signal.aborted) return;
           if (residentTriangles + parsed.triangles > 1_000_000) continue;
           residentTriangles += parsed.triangles;
           const exhibit = modelMeshes.get(item.id); if (!exhibit) continue;
@@ -185,14 +225,40 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
     })();
     const render = (time: number) => {
       if (!alive) return; frame = requestAnimationFrame(render); const dt = Math.min((time - lastFrame) / 1000, 0.05); lastFrame = time;
-      syncBlocks();
-      syncExhibits();
+      if (syncedManifest !== manifestRef.current) { syncedManifest = manifestRef.current; syncBlocks(); }
+      if (syncedModels !== modelsRef.current) { syncedModels = modelsRef.current; syncExhibits(); }
       const forward = Number(keys.has("w") || keys.has("arrowup") || touchRef.current.z < -0.15) - Number(keys.has("s") || keys.has("arrowdown") || touchRef.current.z > 0.15);
       const side = Number(keys.has("d") || keys.has("arrowright") || touchRef.current.x > 0.15) - Number(keys.has("a") || keys.has("arrowleft") || touchRef.current.x < -0.15);
-      if (customizerOpenRef.current) { keys.clear(); touchRef.current.x = 0; touchRef.current.z = 0; }
-      if (!customizerOpenRef.current && (forward || side)) { const direction = yaw; local.x += (Math.sin(direction) * forward + Math.cos(direction) * side) * 5 * dt; local.z += (-Math.cos(direction) * forward + Math.sin(direction) * side) * 5 * dt; local.rotation = Math.atan2(local.x - camera.position.x, local.z - camera.position.z); }
-      const self = room && avatarMeshes.get(room.sessionId); if (self) { self.position.set(local.x, 0, local.z); self.rotation.y = local.rotation; }
-      if (room && !customizerOpenRef.current && time - lastSend > 100) { room.send("move", local); lastSend = time; }
+      const active = initialized && room?.connection?.isOpen && !customizerOpenRef.current && !document.hidden && document.hasFocus();
+      if (!active) onBlur();
+      const step = active ? walkingStep(forward, side, yaw, dt) : { dx: 0, dz: 0 };
+      local.x += step.dx; local.z += step.dz; unsent.dx += step.dx; unsent.dz += step.dz;
+      if (step.dx || step.dz) local.rotation = Math.atan2(step.dx, step.dz);
+      if (active && jumpRef.current) {
+        jumpRef.current = false;
+        if (time - jumpTime >= 900) { jumpTime = time; room.send("jump"); }
+      }
+      for (const [id, avatar] of avatarMeshes) {
+        const self = id === room?.sessionId, target = self ? local : avatar.userData.target;
+        const previousX = avatar.position.x, previousZ = avatar.position.z;
+        const blend = self ? 1 : 1 - Math.exp(-16 * dt);
+        avatar.position.x += (target.x - avatar.position.x) * blend; avatar.position.z += (target.z - avatar.position.z) * blend;
+        avatar.rotation.y += Math.atan2(Math.sin(target.rotation - avatar.rotation.y), Math.cos(target.rotation - avatar.rotation.y)) * blend;
+        const height = jumpHeight((time - (self ? jumpTime : avatar.userData.jumpTime)) / 1000); avatar.position.y = height;
+        const speed = Math.hypot(avatar.position.x - previousX, avatar.position.z - previousZ) / Math.max(dt, 0.001);
+        avatar.userData.walking += (Math.min(1, speed / 4) - avatar.userData.walking) * (1 - Math.exp(-15 * dt));
+        avatar.userData.walkPhase += Math.min(speed, 5) * dt * 2.4;
+        if (self) syncAppearance(avatar, appearanceRef.current);
+        animateAvatarCharacter(avatar.userData.character, avatar.userData.walkPhase, avatar.userData.walking, height > 0);
+      }
+      if (initialized && room?.connection?.isOpen && time - lastSend > 100) {
+        // Keep the old position payload until the Colyseus service has the input-acknowledgement fields.
+        if (lastAcknowledged < 0) room.send("move", local);
+        else if (unsent.dx || unsent.dz) {
+          const move = { ...unsent, sequence: ++sequence }; pending.push(move); room.send("move", { ...move, rotation: local.rotation });
+        }
+        unsent = { dx: 0, dz: 0 }; lastSend = time;
+      }
       const distance = 8 + cameraPitch * 10; camera.position.set(local.x + Math.sin(yaw) * distance, 2 + cameraPitch * 10, local.z + Math.cos(yaw) * distance); camera.lookAt(local.x, 1.2, local.z);
       renderer.render(scene, camera);
     };
@@ -223,14 +289,14 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
     try {
       const saved = await api<AvatarAppearance>("/gallery/avatar", { method: "PUT", body: JSON.stringify(draftAppearance) });
       setAppearance(saved); setDraftAppearance(saved); setCustomizerOpen(false);
-      roomRef.current?.send("refresh-avatar");
+      if (roomRef.current?.connection?.isOpen) roomRef.current.send("refresh-avatar");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "บันทึกตัวละครไม่สำเร็จ"); }
     finally { setLoading(false); }
   }
 
   if (enabled === false && teacher) return <section className="panel gallery-enable"><h2>โลกเสมือน · {manifest?.classroomName ?? "ห้องเรียน"}</h2><p className="muted">เปิดโลกเพื่อให้นักเรียนและครูเดินชมผลงานโมเดล 3 มิติในห้องเรียน</p><button className="button button-primary" disabled={loading} onClick={() => void setWorld(true)}>{loading ? "กำลังเปิด…" : "เปิดโลกเสมือน"}</button>{error && <p className="form-error">{error}</p>}</section>;
   if (enabled === false && !teacher) return <main className="public-lesson-page"><section className="panel"><h2>โลกเสมือนยังไม่พร้อม</h2><p>{error || "กรุณากลับไปยังห้องเรียนแล้วลองอีกครั้ง."}</p><a href="/">กลับไปห้องเรียน</a></section></main>;
-  return <>{user.role === "student" && <div className="gallery-attendance"><StudentAttendance /></div>}<section className="gallery-shell"><header className="gallery-toolbar"><div><strong>{manifest?.classroomName ?? "โลกเสมือน"}</strong><small>{online} คนออนไลน์ · WASD เดิน · ลากหน้าจอเพื่อหมุนมุมมอง</small></div><div className="gallery-toolbar-actions"><button className="button button-quiet" onClick={() => { setDraftAppearance({ ...appearance }); setCustomizerOpen(true); }}>ปรับแต่งตัวละคร</button>{close && <button className="button button-quiet" onClick={close}>กลับ</button>}</div></header>{error && <div className="notice" role="alert">{error}</div>}{!config && <p className="gallery-service-note">ยังไม่ได้ตั้งค่า Colyseus ใน Coolify</p>}<canvas ref={canvasRef} className="gallery-canvas" aria-label="โลกเสมือนห้องเรียน กด WASD เพื่อเดินและลากหน้าจอเพื่อหมุนมุมมอง"/><div className="gallery-touch" onPointerDown={(event) => event.currentTarget.setPointerCapture(event.pointerId)} onPointerMove={(event) => { const rect = event.currentTarget.getBoundingClientRect(); touchRef.current.x = (event.clientX - rect.left) / rect.width * 2 - 1; touchRef.current.z = (event.clientY - rect.top) / rect.height * 2 - 1; }} onPointerUp={() => { touchRef.current.x = 0; touchRef.current.z = 0; }} aria-label="ควบคุมการเดินด้วยสัมผัส">◉</div>{manifest?.nextOffset !== null && <button className="gallery-more button button-quiet" onClick={() => void load(manifest?.nextOffset ?? 0)}>โหลดผลงานเพิ่ม</button>}{teacher && models.some((item) => item.hidden) && <aside className="gallery-hidden-tray"><strong>ผลงานที่ซ่อน</strong>{models.filter((item) => item.hidden).map((item) => <div key={item.id}><span>{item.displayName} · {item.originalName}</span><button className="text-button" onClick={() => void setHidden(item)}>แสดง</button></div>)}</aside>}{selected && <aside className="gallery-inspect"><button className="icon-button" onClick={() => setSelected(null)} aria-label="ปิด">×</button><p className="eyebrow">{selected.displayName} · เลขที่ {selected.studentNumber ?? "—"}</p><h3>{selected.originalName}</h3><p className="muted">{selected.assignmentTitle}</p><p>{selected.likes} ถูกใจ</p>{user.role === "student" && selected.studentId !== manifest?.viewerStudentId && <button className="button button-quiet" onClick={() => void like(selected)}>{selected.likedByMe ? "ยกเลิกถูกใจ" : "ถูกใจ"}</button>}{teacher && <button className="button button-quiet" onClick={() => void setHidden(selected)}>{selected.hidden ? "แสดงผลงาน" : "ซ่อนผลงาน"}</button>}<button className="button button-primary" onClick={() => setPreview(selected)}>เปิดดูโมเดล</button></aside>}{customizerOpen && <CharacterCustomizer appearance={draftAppearance} onChange={setDraftAppearance} onCancel={() => setCustomizerOpen(false)} onSave={() => void saveAppearance()} saving={loading} error={error} />}</section>{preview && <ModelPreview file={preview} contentPath={galleryFileUrl(classroomId, preview.id, "content")} close={() => setPreview(null)} />}</>;
+  return <>{user.role === "student" && <div className="gallery-attendance"><StudentAttendance /></div>}<section className="gallery-shell"><header className="gallery-toolbar"><div><strong>{manifest?.classroomName ?? "โลกเสมือน"}</strong><small>{online} คนออนไลน์ · WASD/ลูกศร เดิน · Space กระโดด · ลากเพื่อหมุนมุมมอง</small></div><div className="gallery-toolbar-actions"><button className="button button-quiet" onClick={() => { setDraftAppearance({ ...appearance }); setCustomizerOpen(true); }}>ปรับแต่งตัวละคร</button>{close && <button className="button button-quiet" onClick={close}>กลับ</button>}</div></header>{error && <div className="notice" role="alert">{error}</div>}{!config && <p className="gallery-service-note">ยังไม่ได้ตั้งค่า Colyseus ใน Coolify</p>}<canvas ref={canvasRef} className="gallery-canvas" aria-label="โลกเสมือนห้องเรียน กด WASD เพื่อเดิน Space เพื่อกระโดด และลากเพื่อหมุนมุมมอง"/><div className="gallery-touch" onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); const rect = event.currentTarget.getBoundingClientRect(); touchRef.current = { x: (event.clientX - rect.left) / rect.width * 2 - 1, z: (event.clientY - rect.top) / rect.height * 2 - 1 }; }} onPointerMove={(event) => { if (!event.currentTarget.hasPointerCapture(event.pointerId)) return; const rect = event.currentTarget.getBoundingClientRect(); touchRef.current = { x: (event.clientX - rect.left) / rect.width * 2 - 1, z: (event.clientY - rect.top) / rect.height * 2 - 1 }; }} onPointerUp={() => { touchRef.current = { x: 0, z: 0 }; }} onPointerCancel={() => { touchRef.current = { x: 0, z: 0 }; }} onLostPointerCapture={() => { touchRef.current = { x: 0, z: 0 }; }} aria-label="ควบคุมการเดินด้วยสัมผัส">◉</div><button className="gallery-jump button button-quiet" disabled={customizerOpen} onClick={() => { jumpRef.current = true; }}>กระโดด ↑</button>{manifest?.nextOffset !== null && <button className="gallery-more button button-quiet" onClick={() => void load(manifest?.nextOffset ?? 0)}>โหลดผลงานเพิ่ม</button>}{teacher && models.some((item) => item.hidden) && <aside className="gallery-hidden-tray"><strong>ผลงานที่ซ่อน</strong>{models.filter((item) => item.hidden).map((item) => <div key={item.id}><span>{item.displayName} · {item.originalName}</span><button className="text-button" onClick={() => void setHidden(item)}>แสดง</button></div>)}</aside>}{selected && <aside className="gallery-inspect"><button className="icon-button" onClick={() => setSelected(null)} aria-label="ปิด">×</button><p className="eyebrow">{selected.displayName} · เลขที่ {selected.studentNumber ?? "—"}</p><h3>{selected.originalName}</h3><p className="muted">{selected.assignmentTitle}</p><p>{selected.likes} ถูกใจ</p>{user.role === "student" && selected.studentId !== manifest?.viewerStudentId && <button className="button button-quiet" onClick={() => void like(selected)}>{selected.likedByMe ? "ยกเลิกถูกใจ" : "ถูกใจ"}</button>}{teacher && <button className="button button-quiet" onClick={() => void setHidden(selected)}>{selected.hidden ? "แสดงผลงาน" : "ซ่อนผลงาน"}</button>}<button className="button button-primary" onClick={() => setPreview(selected)}>เปิดดูโมเดล</button></aside>}{customizerOpen && <CharacterCustomizer appearance={draftAppearance} onChange={setDraftAppearance} onCancel={() => setCustomizerOpen(false)} onSave={() => void saveAppearance()} saving={loading} error={error} />}</section>{preview && <ModelPreview file={preview} contentPath={galleryFileUrl(classroomId, preview.id, "content")} close={() => setPreview(null)} />}</>;
 }
 
 function CharacterCustomizer({ appearance, onChange, onCancel, onSave, saving, error }: { appearance: AvatarAppearance; onChange: (value: AvatarAppearance) => void; onCancel: () => void; onSave: () => void; saving: boolean; error: string }) {
@@ -270,5 +336,3 @@ function CharacterPreview({ appearance }: { appearance: AvatarAppearance }) {
   }, [appearance]);
   return <canvas ref={canvasRef} className="character-preview" aria-label="ตัวอย่างตัวละครที่กำลังหมุน" />;
 }
-
-const touchRef = { current: { x: 0, z: 0 } };

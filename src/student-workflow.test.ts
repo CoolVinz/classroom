@@ -47,7 +47,8 @@ describe("student submission API", () => {
     await mkdir(uploadDir, { recursive: true });
 
     const { sql } = await import("./db/client");
-    const { createSession } = await import("./auth/session");
+    const { createSession, createStudentSession } = await import("./auth/session");
+    const { galleryRoutes } = await import("./routes/gallery");
     const [{ authRoutes }, { studentAuthRoutes }, { classroomRoutes }, { courseworkRoutes }, { studentCourseworkRoutes }, { attendanceScheduleRoutes }, { studentAttendanceRoutes }, { lessonPageApiRoutes }, { quizRoutes, studentQuizRoutes }, { handleAppError }] = await Promise.all([
       import("./routes/auth"), import("./routes/student-auth"), import("./routes/classrooms"),
       import("./routes/coursework"), import("./routes/student-coursework"), import("./routes/attendance-schedule"), import("./routes/student-attendance"),
@@ -56,7 +57,7 @@ describe("student submission API", () => {
       import("./error-handler"),
     ]);
     const { ensureUploadRoot, cleanupUnusedLessonImages } = await import("./file-storage");
-    const app = new Elysia().onError(handleAppError).use(authRoutes).use(studentAuthRoutes).use(classroomRoutes).use(attendanceScheduleRoutes).use(courseworkRoutes).use(studentCourseworkRoutes).use(studentAttendanceRoutes).use(quizRoutes).use(studentQuizRoutes).use(lessonPageApiRoutes);
+    const app = new Elysia().onError(handleAppError).use(authRoutes).use(studentAuthRoutes).use(classroomRoutes).use(attendanceScheduleRoutes).use(courseworkRoutes).use(studentCourseworkRoutes).use(studentAttendanceRoutes).use(quizRoutes).use(studentQuizRoutes).use(lessonPageApiRoutes).use(galleryRoutes);
     const teacherId = randomUUID(); const accountId = randomUUID();
     const roomA = randomUUID(); const roomB = randomUUID(); const emptyRoom = randomUUID();
     const studentA = randomUUID(); const studentB = randomUUID(); const studentC = randomUUID(); const studentD = randomUUID();
@@ -115,6 +116,27 @@ describe("student submission API", () => {
       });
       teacherToken = await createSession(teacherId);
       otherTeacherToken = await createSession(otherTeacherId);
+      studentToken = await createStudentSession(accountId);
+      const defaultAppearance = { skinColor: "#f3c8a6", hairColor: "#3e2d27", shirtColor: "#4f9b86", trousersColor: "#435875", hairStyle: "short" };
+      const teacherAppearance = { ...defaultAppearance, shirtColor: "#123456", hairStyle: "long" };
+      const studentAppearance = { ...defaultAppearance, skinColor: "#abcdef", hairStyle: "none" };
+      const avatarRequest = (session: string, method = "GET", body?: unknown, origin = "http://localhost:3000") => app.handle(new Request("http://localhost/api/gallery/avatar", {
+        method, headers: { cookie: `classroom_session=${session}`, origin, "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined,
+      }));
+      expect((await avatarRequest("")).status).toBe(401);
+      expect(await (await avatarRequest(teacherToken)).json()).toEqual(defaultAppearance);
+      expect((await avatarRequest(teacherToken, "PUT", teacherAppearance)).status).toBe(200);
+      expect(await (await avatarRequest(teacherToken)).json()).toEqual(teacherAppearance);
+      expect(await (await avatarRequest(otherTeacherToken)).json()).toEqual(defaultAppearance);
+      expect((await avatarRequest(studentToken, "PUT", studentAppearance)).status).toBe(200);
+      expect(await (await avatarRequest(studentToken)).json()).toEqual(studentAppearance);
+      expect(await (await avatarRequest(teacherToken)).json()).toEqual(teacherAppearance);
+      expect((await avatarRequest(teacherToken, "PUT", { ...teacherAppearance, hairStyle: "unsupported" })).status).toBe(422);
+      expect((await avatarRequest(teacherToken, "PUT", { ...teacherAppearance, shirtColor: "red" })).status).toBe(422);
+      expect((await avatarRequest(teacherToken, "PUT", studentAppearance, "https://attacker.invalid")).status).toBe(403);
+      expect(await (await avatarRequest(teacherToken)).json()).toEqual(teacherAppearance);
+      await sql`DELETE FROM classroom.student_sessions WHERE account_id=${accountId}`;
+      studentToken = "";
       const studentIdentityToken = token(accountEmail, "google-sub-" + accountId);
       const noCsrf = await googleLogin(studentIdentityToken, "csrf-token", "wrong-token");
       expect(new URL(noCsrf.headers.get("location")!).searchParams.get("error")).toBe("signin");

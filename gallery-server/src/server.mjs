@@ -8,7 +8,7 @@ import { databaseConfig } from "./database-config.mjs";
 
 if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
 const pool = new pg.Pool(databaseConfig());
-const Player = schema({ displayName: t.string(), role: t.string(), skinColor: t.string(), hairColor: t.string(), shirtColor: t.string(), trousersColor: t.string(), hairStyle: t.string(), x: t.number().default(0), z: t.number().default(0), rotation: t.number().default(0) });
+const Player = schema({ displayName: t.string(), role: t.string(), skinColor: t.string(), hairColor: t.string(), shirtColor: t.string(), trousersColor: t.string(), hairStyle: t.string(), x: t.number().default(0), z: t.number().default(0), rotation: t.number().default(0), sequence: t.number().default(0), jump: t.number().default(0) });
 const GalleryState = schema({ players: t.map(Player) });
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
@@ -56,6 +56,7 @@ class ClassroomGallery extends Room {
   movementTimes = new Map();
   movementMessages = new Map();
   appearanceTimes = new Map();
+  jumpTimes = new Map();
   accessTimer;
   galleryTimer;
 
@@ -70,7 +71,12 @@ class ClassroomGallery extends Room {
     this.classroomId ??= options.classroomId;
     this.setMetadata({ classroomId: this.classroomId });
     this.onMessage("move", (client, message) => this.move(client, message));
-    this.onMessage("refresh-avatar", (client) => { void this.refreshAvatar(client); });
+    this.onMessage("jump", (client) => {
+      const player = this.state.players.get(client.sessionId), now = Date.now();
+      if (!player || now - (this.jumpTimes.get(client.sessionId) ?? 0) < 900) return;
+      this.jumpTimes.set(client.sessionId, now); player.jump++;
+    });
+    this.onMessage("refresh-avatar", (client) => { void this.refreshAvatar(client).catch(() => {}); });
     const readSignature = async () => {
       const { rows } = await pool.query(`SELECT
         (SELECT COUNT(*)::int FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id WHERE f.classroom_id=$1 AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj)$' AND s.archived_at IS NULL AND a.archived_at IS NULL) AS files,
@@ -113,7 +119,7 @@ class ClassroomGallery extends Room {
 
   move(client, message) {
     const player = this.state.players.get(client.sessionId);
-    if (!player || !message || !Number.isFinite(message.x) || !Number.isFinite(message.z) || !Number.isFinite(message.rotation)) return;
+    if (!player || !message) return;
     const now = Date.now();
     const count = this.movementMessages.get(client.sessionId) ?? { start: now, total: 0 };
     if (now - count.start > 1000) { count.start = now; count.total = 0; }
@@ -121,11 +127,12 @@ class ClassroomGallery extends Room {
     this.movementMessages.set(client.sessionId, count);
     const elapsed = Math.min(1, Math.max(0.05, (now - (this.movementTimes.get(client.sessionId) ?? now)) / 1000));
     const next = boundedMove(player, message, elapsed);
+    if (Number.isSafeInteger(message.sequence) && message.sequence > player.sequence) player.sequence = message.sequence;
+    this.movementTimes.set(client.sessionId, now);
     if (!next) return;
     player.x = next.x;
     player.z = next.z;
     player.rotation = next.rotation;
-    this.movementTimes.set(client.sessionId, now);
   }
 
   async refreshAvatar(client) {
@@ -158,6 +165,7 @@ class ClassroomGallery extends Room {
     this.movementTimes.delete(client.sessionId);
     this.movementMessages.delete(client.sessionId);
     this.appearanceTimes.delete(client.sessionId);
+    this.jumpTimes.delete(client.sessionId);
   }
 
   onDispose() { clearInterval(this.accessTimer); clearInterval(this.galleryTimer); }

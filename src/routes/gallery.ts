@@ -60,12 +60,12 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     checkRequestOrigin(request);
     const teacher = await readActor(request);
     if (teacher) {
-      await sql`UPDATE classroom.teachers SET avatar_settings=${JSON.stringify(body)}::jsonb WHERE id=${teacher.id}`;
+      await sql`UPDATE classroom.teachers SET avatar_settings=${sql.json(body)} WHERE id=${teacher.id}`;
       return body;
     }
     const student = await readStudentActor(request);
     if (student) {
-      await sql`UPDATE classroom.student_accounts SET avatar_settings=${JSON.stringify(body)}::jsonb WHERE id=${student.id}`;
+      await sql`UPDATE classroom.student_accounts SET avatar_settings=${sql.json(body)} WHERE id=${student.id}`;
       return body;
     }
     throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");

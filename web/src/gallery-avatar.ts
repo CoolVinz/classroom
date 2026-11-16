@@ -19,10 +19,14 @@ export function createAvatarCharacter(appearance: AvatarAppearance) {
     const mesh = new THREE.Mesh(geometry, material(color)); mesh.position.set(x, y, z); character.add(mesh); return mesh;
   };
   add(new THREE.CapsuleGeometry(0.31, 0.48, 4, 8), appearance.shirtColor, 0, 1.03, 0);
-  add(new THREE.CapsuleGeometry(0.15, 0.34, 3, 6), appearance.trousersColor, -0.17, 0.42, 0);
-  add(new THREE.CapsuleGeometry(0.15, 0.34, 3, 6), appearance.trousersColor, 0.17, 0.42, 0);
-  add(new THREE.CapsuleGeometry(0.095, 0.43, 3, 6), appearance.shirtColor, -0.39, 1.03, 0);
-  add(new THREE.CapsuleGeometry(0.095, 0.43, 3, 6), appearance.shirtColor, 0.39, 1.03, 0);
+  const limb = (name: string, geometry: THREE.BufferGeometry, color: string, x: number, y: number, length: number) => {
+    const pivot = new THREE.Group(); pivot.name = name; pivot.position.set(x, y, 0);
+    const mesh = new THREE.Mesh(geometry, material(color)); mesh.position.y = -length; pivot.add(mesh); character.add(pivot);
+  };
+  limb("leftLeg", new THREE.CapsuleGeometry(0.15, 0.34, 3, 6), appearance.trousersColor, -0.17, 0.7, 0.28);
+  limb("rightLeg", new THREE.CapsuleGeometry(0.15, 0.34, 3, 6), appearance.trousersColor, 0.17, 0.7, 0.28);
+  limb("leftArm", new THREE.CapsuleGeometry(0.095, 0.43, 3, 6), appearance.shirtColor, -0.39, 1.28, 0.25);
+  limb("rightArm", new THREE.CapsuleGeometry(0.095, 0.43, 3, 6), appearance.shirtColor, 0.39, 1.28, 0.25);
   add(new THREE.SphereGeometry(0.24, 12, 10), appearance.skinColor, 0, 1.64, 0);
   if (appearance.hairStyle !== "none") {
     add(new THREE.SphereGeometry(0.245, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.53), appearance.hairColor, 0, 1.68, 0);
@@ -32,6 +36,14 @@ export function createAvatarCharacter(appearance: AvatarAppearance) {
     }
   }
   return character;
+}
+
+export function animateAvatarCharacter(character: THREE.Group, phase: number, walking: number, airborne: boolean) {
+  const swing = Math.sin(phase) * 0.65 * walking;
+  character.getObjectByName("leftLeg")!.rotation.x = airborne ? -0.25 : swing;
+  character.getObjectByName("rightLeg")!.rotation.x = airborne ? 0.25 : -swing;
+  character.getObjectByName("leftArm")!.rotation.x = airborne ? -0.9 : -swing;
+  character.getObjectByName("rightArm")!.rotation.x = airborne ? -0.9 : swing;
 }
 
 export function disposeAvatarCharacter(character: THREE.Object3D) {

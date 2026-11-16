@@ -17,9 +17,11 @@ Give each classroom a shared third-person world where teachers and active studen
 - Student likes are unique per model/student; self-likes are rejected. Likes do not affect assessment.
 - Each classroom has one Colyseus room capped at 50 connections and one connection per account. Room positions are temporary; PostgreSQL retains settings, blocks, hidden displays, and likes.
 - Colyseus admission uses a single-use 60-second ticket tied to the existing session. The service validates sessions and membership and rechecks access periodically. Movement is server-bounded and rate-limited.
+- WASD/arrows and touch controls move at the same speed, including diagonals. The local character predicts movement and replays inputs after server acknowledgement; other visitors interpolate received positions. Walking animates the limbs. Space or **กระโดด** starts a fixed-height jump, rate-limited by Colyseus; jumping does not change horizontal speed or grant access to displays.
 - Saved thumbnails show all models in the loaded page. At most 12 nearby model files are parsed in sequence at a time, with a one-million-triangle resident budget; individual previews retain the existing 500,000-triangle and 10-second limits.
 - On the student world page, the existing attendance panel continues to apply its visibility/focus rules. World movement and likes do not affect attendance.
 - Teachers and students can save one account-level character appearance shared across classrooms. The builder changes hair style and colors only; the Colyseus player state broadcasts appearance without changing identity, role, or position.
+- Appearance writes use JSON objects in PostgreSQL, preserving selections on a failed save. Movement pauses in the editor and when the page loses focus. Display lists synchronize when their data changes rather than on each animation frame; removed characters release geometry and materials.
 
 ## Dependencies and Code Map
 
@@ -27,14 +29,14 @@ Give each classroom a shared third-person world where teachers and active studen
 **used_by:** teacher classroom workspace and student portal
 
 ```text
-Teacher UI and Three.js world: web/src/App.tsx, web/src/GalleryWorld.tsx, web/src/gallery-avatar.ts
+Teacher UI and Three.js world: web/src/App.tsx, web/src/GalleryWorld.tsx, web/src/gallery-avatar.ts, web/src/gallery-motion.ts
 Student entry: web/src/StudentPortal.tsx
 Authenticated world APIs and model file reads: src/routes/gallery.ts
 Migrations: src/db/migrations/014_virtual_gallery.sql, src/db/migrations/015_gallery_avatars.sql
 Colyseus service and bounded movement: gallery-server/src/server.mjs, gallery-server/src/movement.mjs
 Service deployment: gallery-server/Dockerfile; `/__healthcheck` route: gallery-server/src/server.mjs
 Existing model parser and preview: web/src/model-view.ts, web/src/model-preview.worker.ts, web/src/ModelPreview.tsx
-Tests: web/src/gallery-api.test.ts, gallery-server/src/movement-check.mjs, gallery-server/src/health-check.mjs; API integration needs isolated PostgreSQL 18
+Tests: web/src/gallery-api.test.ts, web/src/gallery-motion.test.ts, web/src/gallery-avatar.test.ts, src/student-workflow.test.ts, gallery-server/src/movement-check.mjs, gallery-server/src/health-check.mjs; API integration needs an isolated migrated database
 ```
 
 ## Warnings and open questions
