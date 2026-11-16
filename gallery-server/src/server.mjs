@@ -4,13 +4,10 @@ import { schema, t } from "@colyseus/schema";
 import pg from "pg";
 import { boundedMove } from "./movement.mjs";
 import { applyAppearance } from "./avatar.mjs";
+import { databaseConfig } from "./database-config.mjs";
 
 if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
-const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_SSL === "disable" ? false : { rejectUnauthorized: false },
-  max: 8,
-});
+const pool = new pg.Pool(databaseConfig());
 const Player = schema({ displayName: t.string(), role: t.string(), skinColor: t.string(), hairColor: t.string(), shirtColor: t.string(), trousersColor: t.string(), hairStyle: t.string(), x: t.number().default(0), z: t.number().default(0), rotation: t.number().default(0) });
 const GalleryState = schema({ players: t.map(Player) });
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
