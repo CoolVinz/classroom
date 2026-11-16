@@ -136,7 +136,7 @@ class ClassroomGallery extends Room {
   onDispose() { clearInterval(this.accessTimer); clearInterval(this.galleryTimer); }
 }
 
-const gameServer = new Server();
+const gameServer = new Server({ express: (app) => app.get("/__healthcheck", (_request, response) => response.status(200).type("text").send("OK")) });
 gameServer.define("classroom", ClassroomGallery).filterBy(["classroomId"]);
 await gameServer.listen(Number(process.env.PORT ?? 2567));
 console.log(`Classroom Colyseus server listening on ${process.env.PORT ?? 2567}`);

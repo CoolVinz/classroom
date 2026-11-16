@@ -31,14 +31,14 @@ Student entry: web/src/StudentPortal.tsx
 Authenticated world APIs and model file reads: src/routes/gallery.ts
 Migration: src/db/migrations/014_virtual_gallery.sql
 Colyseus service and bounded movement: gallery-server/src/server.mjs, gallery-server/src/movement.mjs
-Service deployment: gallery-server/Dockerfile
+Service deployment: gallery-server/Dockerfile; `/__healthcheck` route: gallery-server/src/server.mjs
 Existing model parser and preview: web/src/model-view.ts, web/src/model-preview.worker.ts, web/src/ModelPreview.tsx
-Tests: web/src/gallery-api.test.ts, gallery-server/src/movement-check.mjs; API integration needs isolated PostgreSQL 18
+Tests: web/src/gallery-api.test.ts, gallery-server/src/movement-check.mjs, gallery-server/src/health-check.mjs; API integration needs isolated PostgreSQL 18
 ```
 
 ## Warnings and open questions
 
-- Coolify needs a second service for `gallery-server`, pointed at `gallery-server/Dockerfile`, plus `GALLERY_WS_URL` on the app. Production WSS, real student accounts, simultaneous users, and VPS load have not been verified.
+- Coolify uses a separate single-instance service for `gallery-server`, pointed at `gallery-server/Dockerfile`, plus `GALLERY_WS_URL` on the app. Configure its health check at `/__healthcheck`. Production WSS, real student accounts, simultaneous users, and VPS load have not been verified.
 - Realtime service rooms are in-memory on one instance. Adding replicas requires shared Colyseus presence/matchmaking and load-balancer configuration.
 - STL/OBJ files without saved previews or beyond model limits fall back to a thumbnail or an explanatory preview error. Models stay in the app's persistent upload volume.
 - Network latency, school WebSocket filtering, and browser graphics performance may vary by device.
