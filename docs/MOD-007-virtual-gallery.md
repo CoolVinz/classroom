@@ -33,7 +33,7 @@ Migration: src/db/migrations/014_virtual_gallery.sql
 Colyseus service and bounded movement: gallery-server/src/server.mjs, gallery-server/src/movement.mjs
 Service deployment: gallery-server/Dockerfile
 Existing model parser and preview: web/src/model-view.ts, web/src/model-preview.worker.ts, web/src/ModelPreview.tsx
-Tests: gallery-server/src/movement-check.mjs; API integration needs isolated PostgreSQL 18
+Tests: web/src/gallery-api.test.ts, gallery-server/src/movement-check.mjs; API integration needs isolated PostgreSQL 18
 ```
 
 ## Warnings and open questions
