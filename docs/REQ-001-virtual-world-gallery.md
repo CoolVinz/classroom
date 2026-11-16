@@ -1,6 +1,6 @@
 # REQ-001 — Shared Classroom Virtual World
 
-**Status:** Planned; no gallery functionality is implemented.
+**Status:** Implemented as MOD-007; production deployment is not live-verified.
 
 ## Confirmed behavior
 
@@ -13,14 +13,15 @@
 - Likes are peer reactions, separate from teacher assessment. Ratings, voting, and comments are not in scope.
 - The gallery reuses stable model-file UUIDs from MOD-004. It must not require students to upload the same file again.
 - The world loads lightweight display models progressively so one class's full collection does not load at once.
+- The first release uses a third-person walkable gallery with keyboard and touch controls, stable display blocks, teacher hide/restore, and a 50-visitor room cap.
 
 ## Preparation available in MOD-004
 
 Model files link to a classroom, assignment, student, and uploading teacher separately. Each file has a stable UUID and remains stored with its original content. The current preview shares STL/OBJ parsing and geometry rendering primitives intended for later reuse.
 
-## Open questions for the gallery phase
+## Deployment and limits
 
-- What floor plan, block size, and navigation controls should the shared world use?
-- Should teachers be able to hide or remove student models from the world?
-- What student sign-in and account recovery workflow will fit the school's roster?
-- What maximum model count and performance target should each world meet?
+- Gallery APIs and the React/Three.js viewer live in this repository. Colyseus runs as a separate Coolify service and checks one-time tickets against the same PostgreSQL database.
+- Stable student blocks and teacher-hidden flags are persisted; visitor positions are temporary.
+- The initial performance target is 50 concurrent visitors in one classroom room. Live capacity and device performance require load and browser checks after deployment.
+- See MOD-007 for current routes, access boundaries, movement limits, and rendering caps.

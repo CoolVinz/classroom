@@ -29,13 +29,13 @@ Each assignment has an editable maximum score (default 100). Scores allow zero a
 - Thumbnails share the `/app/uploads/thumbnails` persistent volume. File and student removal stage thumbnails with originals, restore them on database rollback, and let startup reconciliation finish interrupted cleanup.
 - Assignment archival hides work from students while preserving associated files. Earlier models and submissions are never replaced by later uploads.
 - Removing a student from one classroom removes their files only in that classroom; shared Google accounts and records in other classes remain. Individual-file removal and student removal coordinate with uploads, move stored content to `.deleting` before database commit, restore staged content on rollback, and unlink after commit. Missing physical files do not block record deletion.
-- Student uploads use the same private storage and UUIDs as teacher files. STL/OBJ remain distinguishable for future gallery use; the gallery itself is not implemented here.
+- Student uploads use the same private storage and UUIDs as teacher files. MOD-007 reuses eligible STL/OBJ model/submission records and saved thumbnails for the classroom gallery through its own membership-checked endpoints.
 
 ## Dependencies and consumers
 
 **dependencies:** MOD-001, MOD-002, DAT-001, TEC-001
 
-**used_by:** future REQ-001
+**used_by:** MOD-007
 
 **Code Map:**
 
@@ -64,4 +64,4 @@ Tests: web/src/model-view.test.ts, src/file-storage.test.ts, src/student-workflo
 ## Open questions
 
 - What storage capacity and off-site backup schedule will production use?
-- What model-size and device-performance limits should the future classroom world impose?
+- The gallery currently loads up to 12 nearby models within a one-million-triangle budget. What additional device-performance targets should be measured before increasing those limits?

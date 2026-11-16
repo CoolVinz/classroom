@@ -6,7 +6,8 @@
 
 - Coolify Git application using the repository-root `Dockerfile`.
 - Multi-stage image builds locked Bun dependencies, builds the React/Vite frontend, checks TypeScript, then runs Bun 1.4.2 in a slim runtime image.
-- One application container listens on `0.0.0.0:3000`; Coolify terminates HTTPS and routes the app domain to this port.
+- The application container listens on `0.0.0.0:3000`; Coolify terminates HTTPS and routes the app domain to this port.
+- The virtual gallery has a second Coolify service built from `gallery-server/Dockerfile` with build context `gallery-server/`. It runs Node.js 22 and listens on port `2567`; publish it behind an HTTPS/WSS domain. Keep one service instance because room presence is in memory.
 - Docker defines a database-aware health check. Coolify readiness path is `/health/ready`; liveness is `/health/live`.
 
 ## Services and data
@@ -19,6 +20,7 @@
 - Persistent volumes survive container replacement but are not backups. Back up uploaded files off the VPS as well as PostgreSQL.
 - Before attaching a volume to an existing deployment, copy recoverable files from the running container into it under their existing storage UUIDs. A new empty mount hides the old container directory; mounting does not recover missing data.
 - The app applies numbered tracked migrations at startup. Migration `005_classroom_student_numbers.sql` adds classroom numbering; `006_scheduled_attendance.sql` adds timetable, dated lessons, attendance provenance, and visible-time records; `007_thumbnails_assessments.sql` adds saved-thumbnail metadata, assignment maximum scores, and private/published assessments; `008_thumbnail_media_type.sql` records PNG/WebP thumbnail formats while retaining existing PNG files; `009_working_blend_files.sql` adds Blender working files; `010_lesson_pages.sql` adds teacher-owned lesson drafts and optimized lesson-image metadata; `011_lesson_code.sql` adds editor mode and published-title snapshots; `012_quiz_builder.sql` adds quiz drafts, immutable classroom rounds, student attempts, quiz images, and optional lesson quiz-link snapshots; `013_recoverable_trash.sql` adds quiz and lesson trash timestamps. If `classroom` contains untracked objects, startup stops for inspection.
+- Migration `014_virtual_gallery.sql` adds per-classroom world settings, stable student blocks, teacher-hidden displays, likes, and short-lived room tickets. It preserves existing attendance, assignments, submissions, and files.
 
 ## Runtime environment
 
@@ -36,12 +38,15 @@ UPLOAD_MAX_FILE_BYTES (defaults to 50 MiB)
 UPLOAD_MAX_TOTAL_BYTES (defaults to 5 GiB)
 GOOGLE_CLIENT_ID (required to enable student sign-in)
 GOOGLE_WORKSPACE_DOMAIN (defaults to banjan.ac.th)
+GALLERY_WS_URL (public HTTPS URL for the Colyseus service)
 OWNER_USERNAME (first-owner setup only)
 OWNER_DISPLAY_NAME (first-owner setup only)
 OWNER_PASSWORD (first-owner setup only)
 ```
 
 `APP_URL` must be the public HTTPS origin. Initial owner variables create an owner only if none exists; remove them from Coolify after the first successful startup.
+
+Configure the separate Colyseus service with the same `DATABASE_URL` and `DATABASE_SSL` used by the app, plus `PORT=2567`. Set `GALLERY_WS_URL` on the app to the public HTTPS origin routed to this service. The browser SDK upgrades the connection to WSS. Keep database credentials in Coolify variables only.
 
 ## Operational constraints
 
@@ -55,11 +60,11 @@ OWNER_PASSWORD (first-owner setup only)
 - Google sign-in uses a Web application client. Add the public app origin as an authorized JavaScript origin and the exact `${APP_URL}/api/auth/student/google` callback as an authorized redirect URI. The callback uses the visible app host (Vite's `/api` proxy in local development); the client ID is public and this ID-token flow needs no client secret.
 - Set `GOOGLE_WORKSPACE_DOMAIN=banjan.ac.th`. The endpoint rejects unverified email, missing or wrong `hd`, wrong audience/issuer/expiry, invalid CSRF, and accounts without active roster matches.
 - Google Workspace for Education may require school administrator approval before students, particularly under-18 users, can use the app.
-- No Coolify volume declaration, compose file, CI pipeline, external monitoring, object storage, or cache is configured in the repository. Configure the volume in Coolify directly.
+- No Coolify deployment manifest, CI pipeline, external monitoring, object storage, cache, or shared Colyseus presence service is configured. Configure the existing app volume and the separate WebSocket service in Coolify.
 
 ## Deploy and initialize
 
-Back up PostgreSQL and the upload volume before release because the app applies migrations on startup. Migration `007_thumbnail_assessments.sql` gives existing assignments a maximum score of 100 and leaves historical files without thumbnails; they are generated lazily when visible. Migration `008_thumbnail_media_type.sql` backfills existing saved previews as PNG without rewriting their files. After deployment, verify `/health/ready`, confirm migrations through `013_recoverable_trash` are tracked, test assignment marking and quiz answer privacy/release, PNG/WebP thumbnails, Blender working-file persistence, quiz-image persistence, lesson links in both editor modes, sandbox restrictions, trusted CDN/YouTube loading, public images, and quiz/lesson trash, restore, and permanent deletion. Uploaded file contents need their own off-server backup. See [README deployment instructions](../README.md).
+Back up PostgreSQL and the upload volume before release because the app applies migrations on startup. Configure the app, deploy the `gallery-server` service, set `GALLERY_WS_URL`, and enable a class world only after WSS is reachable. After deployment, verify `/health/ready`, migration 014, teacher/student admission, archived-member revocation, and a synthetic model upload appearing in its student's block. Test movement and classroom isolation with synthetic users. Uploaded file contents need their own off-server backup. See [README deployment instructions](../README.md).
 
 ## Open questions
 

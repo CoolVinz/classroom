@@ -1,0 +1,11 @@
+{
+  "name": "classroom-gallery-server",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node src/server.mjs", "test": "node --test src/movement-check.mjs" },
+  "dependencies": {
+    "@colyseus/schema": "5.0.8",
+    "colyseus": "0.18.0",
+    "pg": "8.16.3"
+  }
+}

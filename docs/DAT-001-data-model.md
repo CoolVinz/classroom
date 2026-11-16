@@ -26,6 +26,9 @@ PostgreSQL 18 or newer stores app data in an app-owned `classroom` schema in the
 - **Classroom quiz round:** UUID, classroom/owner/quiz references, immutable title and published-content snapshot, optional duration, state (`awaiting_open`, `open`, `closed`), and open/close/solutions-release times. A new round copies the then-published quiz; later library edits do not change it.
 - **Quiz attempt:** UUID, round/classroom/student composite references, JSON answer map, revision, server start/deadline/finish times, finish reason, and total score. Unique `(classroom_quiz_id, student_id)` permits one attempt per student per round. Student removal cascades only that student's attempt in that classroom.
 - **Lesson quiz links:** JSON draft and published snapshots on a lesson page store quiz UUIDs and button labels. Publishing snapshots links with the lesson title/content; the link renders outside custom-code frames. Buttons are hidden while their quiz is trashed. Permanent quiz deletion removes matching references and increments affected lesson revisions.
+- **Gallery world:** one optional enabled flag per classroom. `gallery_blocks` assigns a stable per-student block index; blocks are created under a classroom advisory lock and retained through roster archival.
+- **Gallery display state:** `gallery_hidden_models` stores teacher-hidden file UUIDs. `gallery_likes` is unique per model/student and scoped to that student's classroom membership. File/student deletion removes likes and hidden metadata through existing file/roster references.
+- **Gallery admission ticket:** a SHA-256 token hash, classroom, actor kind/account, optional roster student, existing session hash, and 60-second expiry/consumption timestamps. Tickets are single-use; the Colyseus service checks the active session and membership again after admission.
 
 ## Constraints and behavior
 
@@ -50,9 +53,10 @@ PostgreSQL 18 or newer stores app data in an app-owned `classroom` schema in the
 - Original files and generated 256 × 192 thumbnails share the persistent upload volume. Existing thumbnail files may be PNG; new previews are WebP. The database records thumbnail size and media type plus assessment-reviewed file UUIDs. Original and thumbnail bytes both count toward the configured storage quota.
 - A roster import requires student IDs even though manual student creation still permits a blank code.
 - The API enforces classroom ownership for classroom, roster, attendance, and summary access. PostgreSQL row-level security is not configured.
+- Gallery files remain in the shared upload volume and are served only through gallery routes that recheck classroom ownership/membership, active roster and assignment state, supported model kind, and teacher-hidden state. Existing private submission routes are unchanged.
 
 ## Open questions
 
 - Student names are edited in place, so historical summaries show the student's current name. Should historical names be snapshotted?
 - What student information or retention limits are required beyond name and optional code?
-- The future gallery's blocks and likes do not exist yet. Student accounts and student submissions now exist, and the gallery can reference their existing model file UUIDs later.
+- Gallery display blocks and likes are separate from assessment. They reference current model/submission files and do not expose score, feedback, or Blender working-file records.

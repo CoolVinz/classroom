@@ -29,11 +29,12 @@ Authenticate owner and teacher accounts with passwords and students with verifie
 - Teacher login throttling uses process-local memory keyed by username.
 - Student access is limited to active classroom roster rows linked to the account. Archiving a student or classroom removes that membership from student APIs and clears its active attendance-tracking lease.
 - Student quiz links preserve a validated same-origin `/quizzes/<id>` return route through Google redirect sign-in. Quiz APIs recheck active roster membership; see MOD-006.
+- Gallery tickets bind a single Colyseus connection to the current teacher/student session and active classroom membership. The separate service consumes each short-lived ticket once and periodically disconnects revoked sessions or memberships; see MOD-007.
 
 ## Dependencies and consumers
 
 **dependencies:** `src/db/client.ts`, DAT-001, `src/security.ts`
-**used_by:** MOD-002, MOD-003, MOD-004, MOD-005, MOD-006; every protected API route
+**used_by:** MOD-002, MOD-003, MOD-004, MOD-005, MOD-006, MOD-007; every protected API route
 
 **Code Map:**
 

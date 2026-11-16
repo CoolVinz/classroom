@@ -4,9 +4,9 @@
 
 **Name:** Classroom (`classroom` repository)
 
-**Description:** Teacher-facing classroom app for rosters, attendance, assignments, shareable lessons, reusable quizzes, worksheets, and student 3D model submissions.
+**Description:** Classroom management app for rosters, attendance, assignments, shareable lessons, reusable quizzes, student submissions, and a shared 3D model gallery.
 
-**Status:** Student submissions and Google-only student sign-in are implemented in this revision. Production deployment and live school sign-in are not verified; set up the Google OAuth client and Workspace approval described in `docs/OPS-001-deployment.md`.
+**Status:** Student submissions, Google-only student sign-in, and gallery code are implemented. The separate Colyseus service still needs Coolify configuration; live school sign-in, WebSocket routing, and gallery behavior are not verified.
 
 **Documentation Status:** Retrofitted; see `PROJECT_INDEX.md` for selective retrieval.
 
@@ -42,7 +42,7 @@ Migration system: Ordered tracked SQL files under `src/db/migrations/`; startup 
 
 Hosting: User's Coolify-enabled VPS (target; PostgreSQL 18.6 connection verified read-only, app deployment not verified)
 Deployment: Repository-root multi-stage Dockerfile
-Containers: One Bun application container; PostgreSQL is external and file data is stored on a persistent Coolify volume
+Containers: Bun/Elysia application plus separate Node.js Colyseus gallery service; PostgreSQL is external and file data uses a persistent Coolify volume
 Reverse proxy: Coolify domain/HTTPS proxy, configured outside this repository
 File storage: Local `./uploads` by default in development; Coolify persistent volume at `/app/uploads` in production. PostgreSQL stores file metadata and ownership.
 Cache: None
@@ -58,7 +58,7 @@ Runtime: Bun
 Package manager: Bun
 Lock file: `bun.lock`
 
-Important resolved dependencies include Elysia 1.4.30, Google Auth Library 11.3.1, React 19.3.0, Vite 8.3.3, Three.js 0.186.1, SheetJS CE 0.20.3, `@vitejs/plugin-react` 6.1.2, TypeScript 5.9.3, and Postgres.js 3.4.9.
+Important resolved dependencies include Elysia 1.4.30, Google Auth Library 11.3.1, React 19.3.0, Vite 8.3.3, Three.js 0.186.1, Colyseus SDK 0.18.0, SheetJS CE 0.20.3, `@vitejs/plugin-react` 6.1.2, TypeScript 5.9.3, and Postgres.js 3.4.9. The separately locked `gallery-server/` uses Colyseus 0.18 and Node PostgreSQL client `pg` 8.16.
 
 ---
 
@@ -69,6 +69,8 @@ src/server.ts                 Elysia application, health routes, static files
 src/routes/                   Teacher/student authentication, classroom, attendance, teacher, assignment/file APIs
 src/routes/lesson-pages.ts    Teacher-owned block/custom-code lesson drafts and published APIs
 src/routes/quizzes.ts         Quiz drafts, classroom snapshots, student attempts, scoring, and quiz images
+src/routes/gallery.ts         Classroom gallery manifests, tickets, likes, moderation, and restricted model reads
+gallery-server/               Separate Colyseus server and room movement checks
 src/content-security-policy.ts App frame allowlist for sign-in, lesson previews, and YouTube
 src/auth/session.ts           Session cookies, lookup, and access checks
 src/db/                       PostgreSQL client, startup migration, owner setup
@@ -89,7 +91,7 @@ web/index.html                Vite frontend entry
 Dockerfile                    Coolify-ready application image
 README.md                     Local setup, database provisioning, and deployment
 docs/MOD-*.md                 Functional-module maps and behavior
-docs/REQ-001-virtual-world-gallery.md Confirmed future gallery requirements
+docs/MOD-007-virtual-gallery.md Gallery behavior, access rules, and limits
 docs/PROJ-001-overview.md     Product purpose and user workflows
 docs/DAT-001-data-model.md    Entity relationships and ownership
 docs/TEC-001-architecture.md Current application architecture

@@ -176,6 +176,7 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
         await tx`DELETE FROM classroom.attendance WHERE classroom_id = ${params.classroomId} AND student_id = ${params.studentId}`;
         await tx`DELETE FROM classroom.attendance_presence WHERE classroom_id = ${params.classroomId} AND student_id = ${params.studentId}`;
         await tx`DELETE FROM classroom.student_auth_tokens WHERE student_id = ${params.studentId}`;
+        await tx`DELETE FROM classroom.gallery_tickets WHERE classroom_id = ${params.classroomId} AND student_id = ${params.studentId}`;
         await tx`DELETE FROM classroom.files WHERE classroom_id = ${params.classroomId} AND student_id = ${params.studentId}`;
         await tx`DELETE FROM classroom.students WHERE id = ${params.studentId} AND classroom_id = ${params.classroomId}`;
       });

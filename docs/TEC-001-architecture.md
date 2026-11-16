@@ -17,7 +17,11 @@ Browser
         │                 └── persistent Coolify volume
         ├── public /lessons/:id reader
         ├── authenticated /quizzes/:id student attempt page
-        └── browser-only model parsing worker
+        ├── browser-only model parsing worker
+        └── Colyseus WebSocket client
+              └── separate Node.js gallery server
+                    ├── one filtered room per classroom (50 clients max)
+                    └── PostgreSQL session/ticket/member checks
 ```
 
 ## Data flow and boundaries
@@ -39,6 +43,8 @@ Browser
 - Student accounts use Google's stable subject and retain their existing UUID when a verified matching email safely links a legacy account. The migration adds the subject field, backfills numeric student IDs, and invalidates old student sessions and email tokens; it preserves teacher sessions, attendance, assignments, and files.
 - XLSX/CSV workbooks are parsed in the browser with SheetJS and are not uploaded or retained. The server revalidates mapped rows before inserting students in a transaction.
 - Three.js and its loaders are loaded only when a teacher opens a model preview. A dedicated worker parses STL/OBJ and transfers bounded geometry to the renderer.
+- The gallery viewer loads Three.js only when opened. It fetches a paged, authorized manifest and model thumbnails from Elysia, then uses the Colyseus SDK for temporary avatar state. The separate Node.js service consumes one-use tickets and revalidates PostgreSQL sessions/membership; it cannot use the app's HttpOnly cookie directly.
+- Gallery settings, stable blocks, hidden displays, likes, and short-lived ticket hashes use tracked migration 014. Existing file UUIDs and thumbnail metadata are reused; gallery-specific content endpoints protect peer model reads while leaving private coursework routes unchanged.
 
 ## Code Map
 
@@ -46,28 +52,29 @@ Browser
 Web entry and screen workflows: web/src/main.tsx, web/src/App.tsx
 Styles and HTML: web/src/styles.css, web/index.html
 API server and production static files: src/server.ts
-API routes: src/routes/auth.ts, src/routes/student-auth.ts, src/routes/classrooms.ts, src/routes/coursework.ts, src/routes/student-coursework.ts, src/routes/quizzes.ts, src/routes/teachers.ts
+API routes: src/routes/auth.ts, src/routes/student-auth.ts, src/routes/classrooms.ts, src/routes/coursework.ts, src/routes/student-coursework.ts, src/routes/quizzes.ts, src/routes/gallery.ts, src/routes/teachers.ts
 Lesson routes and published quiz-link snapshots: src/routes/lesson-pages.ts
 Auth and database: src/auth/session.ts, src/db/client.ts, src/db/bootstrap.ts
-Schema: src/db/migrations/001_initial.sql, src/db/migrations/002_assignments_files.sql, src/db/migrations/003_student_submissions.sql, src/db/migrations/004_google_student_auth.sql, src/db/migrations/010_lesson_pages.sql, src/db/migrations/011_lesson_code.sql, src/db/migrations/012_quiz_builder.sql
+Schema: src/db/migrations/001_initial.sql, src/db/migrations/002_assignments_files.sql, src/db/migrations/003_student_submissions.sql, src/db/migrations/004_google_student_auth.sql, src/db/migrations/010_lesson_pages.sql, src/db/migrations/011_lesson_code.sql, src/db/migrations/012_quiz_builder.sql, src/db/migrations/014_virtual_gallery.sql
 Files and quiz images: src/file-storage.ts, web/src/ClassroomWork.tsx, web/src/StudentPortal.tsx, web/src/LessonLibrary.tsx
 Quiz interfaces and scoring: web/src/QuizLibrary.tsx, web/src/StudentQuizPage.tsx, src/quiz-core.ts
 Public and code lesson reader: web/src/PublicLessonPage.tsx, web/src/LessonContent.tsx, web/src/CodeLesson.tsx, web/src/code-lesson.ts
 Frame policy: src/content-security-policy.ts
 Google identity: src/routes/student-auth.ts, google-auth-library
 Roster import: web/src/StudentRosterImport.tsx, web/src/roster-import.ts
-Model preview: web/src/ModelPreview.tsx, web/src/model-preview.worker.ts
+Model preview and gallery: web/src/ModelPreview.tsx, web/src/model-preview.worker.ts, web/src/GalleryWorld.tsx, gallery-server/src/server.mjs
 Security helpers: src/security.ts, src/http-error.ts
 Build/deploy: vite.config.ts, Dockerfile
-Tests: src/file-storage.test.ts, src/student-workflow.test.ts, web/src/roster-import.test.ts
+Tests: src/file-storage.test.ts, src/student-workflow.test.ts, web/src/roster-import.test.ts, gallery-server/src/movement-check.mjs
 ```
 
 ## Runtime boundaries
 
-- One Bun process serves the API and built UI; the initial Coolify deployment is a single app container.
+- One Bun process serves the API and built UI. The Colyseus Node.js service is a separate Coolify container sharing PostgreSQL; one instance is required because active room state is in memory.
 - PostgreSQL is external. A persistent Coolify mount is required for uploads; no cache or job queue exists.
 - Liveness is exposed at `/health/live`; readiness checks PostgreSQL at `/health/ready`.
 - There is no ORM, separate service layer, or client router. Google Workspace is the external student identity provider; no client ID or Workspace administrator approval is provisioned by the repository.
+- The gallery service needs the app's database connection plus an externally reachable HTTPS/WSS address configured through `GALLERY_WS_URL`. Live proxy, capacity, and student-browser checks remain pending.
 
 ## Technical debt and warnings
 
