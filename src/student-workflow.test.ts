@@ -326,14 +326,14 @@ describe("student submission API", () => {
       await sql.unsafe(`CREATE FUNCTION classroom.${trashFunctionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced quiz delete failure'; END $$`).simple();
       await sql.unsafe(`CREATE TRIGGER ${trashTriggerName} BEFORE DELETE ON classroom.quizzes FOR EACH ROW EXECUTE FUNCTION classroom.${trashFunctionName}()`).simple();
       trashTriggerInstalled = true;
-      const rolledBackQuizDelete = await app.handle(new Request(`http://localhost/api/quizzes/${createdQuizBody.id}`, { method: "DELETE", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: finalTrashRevision, confirmTitle: quizTitle }) }));
+      const rolledBackQuizDelete = await app.handle(new Request(`http://localhost/api/quizzes/${createdQuizBody.id}`, { method: "DELETE", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: finalTrashRevision, confirmTitle: "Changed library title" }) }));
       expect(rolledBackQuizDelete.status).toBe(500);
       expect(await Bun.file(resolve(uploadDir, quizImage.id)).exists()).toBe(true);
       expect(await Bun.file(resolve(uploadDir, quizImage.id + ".deleting")).exists()).toBe(false);
       await sql.unsafe(`DROP TRIGGER ${trashTriggerName} ON classroom.quizzes`).simple();
       await sql.unsafe(`DROP FUNCTION classroom.${trashFunctionName}()`).simple();
       trashTriggerInstalled = false;
-      const permanentDelete = await app.handle(new Request(`http://localhost/api/quizzes/${createdQuizBody.id}`, { method: "DELETE", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: finalTrashRevision, confirmTitle: quizTitle }) }));
+      const permanentDelete = await app.handle(new Request(`http://localhost/api/quizzes/${createdQuizBody.id}`, { method: "DELETE", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: finalTrashRevision, confirmTitle: "Changed library title" }) }));
       expect(permanentDelete.status).toBe(200);
       expect(await permanentDelete.json()).toEqual({ ok: true, cleanupPending: false });
       expect(await Bun.file(resolve(uploadDir, quizImage.id)).exists()).toBe(false);
@@ -787,10 +787,18 @@ describe("student submission API", () => {
       expect(upload.status).toBe(200);
       const uploaded = await upload.json() as { id: string };
       const modelForm = new FormData();
-      modelForm.set("file", new File(["solid student model\nendsolid student model"], "model.stl", { type: "model/stl" }));
+      modelForm.set("file", new File(["v 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl blue\nf 1 2 3"], "model.obj", { type: "model/obj" }));
+      const modelMaterial = "newmtl blue\nKd 0.1 0.3 0.9\nmap_Kd should-never-load.png";
+      modelForm.set("materialFile", new File([modelMaterial], "model.mtl", { type: "text/plain" }));
       const modelUpload = await app.handle(new Request(`http://localhost/api/student/classrooms/${roomA}/assignments/${assignmentA}/files`, { method: "POST", headers: studentHeaders, body: modelForm }));
       expect(modelUpload.status).toBe(200);
-      const uploadedModel = await modelUpload.json() as { id: string };
+      const uploadedModel = await modelUpload.json() as { id: string; materialAvailable: boolean };
+      expect(uploadedModel.materialAvailable).toBe(true);
+      const modelMaterialRead = await app.handle(new Request(`http://localhost/api/student/files/${uploadedModel.id}/material`, { headers: studentHeaders }));
+      expect(modelMaterialRead.status).toBe(200);
+      expect(await modelMaterialRead.text()).toBe(modelMaterial);
+      expect((await app.handle(new Request(`http://localhost/api/student/files/${uploadedModel.id}/material`, { headers: { cookie: peerSessionCookie } }))).status).toBe(404);
+      expect((await app.handle(new Request(`http://localhost/api/files/${uploadedModel.id}/material`, { headers: teacherHeaders }))).status).toBe(200);
 
       const workingPath = `/api/student/classrooms/${roomA}/assignments/${assignmentA}/working-file`;
       const legacyBlend = Buffer.from("BLENDER-v300");
@@ -975,16 +983,17 @@ describe("student submission API", () => {
       await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/assignments/${assignmentA}`, {
         method: "PATCH", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ archived: false }),
       }));
-      const storageName = randomUUID(); const removedFileId = randomUUID(); const missingFileId = randomUUID(); const missingStorageName = randomUUID();
+      const storageName = randomUUID(); const materialStorageName = randomUUID() + ".mtl"; const removedFileId = randomUUID(); const missingFileId = randomUUID(); const missingStorageName = randomUUID();
       await Bun.write(resolve(uploadDir, storageName), "synthetic student model");
+      await Bun.write(resolve(uploadDir, materialStorageName), "newmtl red\nKd 1 0 0");
       const removedThumbnail = syntheticThumbnail();
       await mkdir(resolve(uploadDir, "thumbnails"), { recursive: true });
       await Bun.write(resolve(uploadDir, "thumbnails", removedFileId + ".png"), removedThumbnail);
       await sql.begin(async (tx) => {
         if (lessonPageIds.length) await tx`DELETE FROM classroom.lesson_pages WHERE id = ANY(${lessonPageIds}::uuid[])`;
         await tx`INSERT INTO classroom.attendance (classroom_id, student_id, attendance_date, status) VALUES (${roomB}, ${studentC}, '2025-01-15', 'present')`;
-        await tx`INSERT INTO classroom.files (id, classroom_id, assignment_id, student_id, uploaded_by, kind, original_name, storage_name, media_type, size_bytes, thumbnail_size_bytes, thumbnail_media_type)
-          VALUES (${removedFileId}, ${roomB}, ${assignmentB}, ${studentC}, ${teacherId}, 'model', 'student.stl', ${storageName}, 'model/stl', 23, ${removedThumbnail.byteLength}, 'image/png')`;
+        await tx`INSERT INTO classroom.files (id, classroom_id, assignment_id, student_id, uploaded_by, kind, original_name, storage_name, media_type, size_bytes, thumbnail_size_bytes, thumbnail_media_type, material_storage_name, material_original_name, material_size_bytes)
+          VALUES (${removedFileId}, ${roomB}, ${assignmentB}, ${studentC}, ${teacherId}, 'model', 'student.obj', ${storageName}, 'model/obj', 23, ${removedThumbnail.byteLength}, 'image/png', ${materialStorageName}, 'student.mtl', 19)`;
         await tx`INSERT INTO classroom.files (id, classroom_id, assignment_id, student_id, uploaded_by, kind, original_name, storage_name, media_type, size_bytes)
           VALUES (${missingFileId}, ${roomB}, ${assignmentB}, ${studentC}, ${teacherId}, 'model', 'missing.stl', ${missingStorageName}, 'model/stl', 1)`;
       });
@@ -1000,6 +1009,7 @@ describe("student submission API", () => {
       expect(await sql`SELECT student_id FROM classroom.attendance WHERE student_id = ${studentC}`).toHaveLength(1);
       expect(await sql`SELECT id FROM classroom.files WHERE id = ${removedFileId}`).toHaveLength(1);
       expect(await Bun.file(resolve(uploadDir, storageName)).exists()).toBe(true);
+      expect(await Bun.file(resolve(uploadDir, materialStorageName)).exists()).toBe(true);
       expect(await Bun.file(resolve(uploadDir, "thumbnails", removedFileId + ".png")).exists()).toBe(true);
       await rm(blockedTombstone, { recursive: true, force: true });
 
@@ -1013,8 +1023,10 @@ describe("student submission API", () => {
       expect(await sql`SELECT id FROM classroom.students WHERE id = ${studentC}`).toHaveLength(1);
       expect(await sql`SELECT id FROM classroom.files WHERE id = ${removedFileId}`).toHaveLength(1);
       expect(await Bun.file(resolve(uploadDir, storageName)).exists()).toBe(true);
+      expect(await Bun.file(resolve(uploadDir, materialStorageName)).exists()).toBe(true);
       expect(await Bun.file(resolve(uploadDir, "thumbnails", removedFileId + ".png")).exists()).toBe(true);
       expect(await Bun.file(resolve(uploadDir, storageName + ".deleting")).exists()).toBe(false);
+      expect(await Bun.file(resolve(uploadDir, materialStorageName + ".deleting")).exists()).toBe(false);
       expect(await Bun.file(resolve(uploadDir, "thumbnails", removedFileId + ".png.deleting")).exists()).toBe(false);
       await sql.unsafe(`DROP TRIGGER ${deleteTriggerName} ON classroom.students`).simple();
       await sql.unsafe(`DROP FUNCTION classroom.${deleteFunctionName}()`).simple();
@@ -1037,6 +1049,7 @@ describe("student submission API", () => {
       const concurrentUploadData = concurrentUpload.status === 200 ? await concurrentUpload.json() as { id: string } : null;
       expect(await removedStudent.json()).toEqual({ ok: true, cleanupPending: false });
       expect(await Bun.file(resolve(uploadDir, storageName)).exists()).toBe(false);
+      expect(await Bun.file(resolve(uploadDir, materialStorageName)).exists()).toBe(false);
       expect(await Bun.file(resolve(uploadDir, "thumbnails", removedFileId + ".png")).exists()).toBe(false);
       expect(await sql`SELECT id FROM classroom.students WHERE id = ${studentC}`).toHaveLength(0);
       expect(await sql`SELECT student_id FROM classroom.attendance WHERE student_id = ${studentC}`).toHaveLength(0);

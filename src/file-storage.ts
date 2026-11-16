@@ -131,7 +131,7 @@ export async function saveFileThumbnail(fileId: string, bytes: Uint8Array, role:
         }
       }
       const [usage] = await tx<{ used: string }[]>`
-        SELECT ((SELECT COALESCE(SUM(size_bytes + COALESCE(thumbnail_size_bytes, 0)), 0) FROM classroom.files) +
+        SELECT ((SELECT COALESCE(SUM(size_bytes + COALESCE(material_size_bytes, 0) + COALESCE(thumbnail_size_bytes, 0)), 0) FROM classroom.files) +
           (SELECT COALESCE(SUM(size_bytes), 0) FROM classroom.lesson_page_images) +
           (SELECT COALESCE(SUM(size_bytes), 0) FROM classroom.quiz_images))::text AS used
       `;
@@ -184,6 +184,7 @@ export async function ensureUploadRoot() {
   const { sql } = await import("./db/client");
   const records = await sql<{ storageName: string; id: string; thumbnailSizeBytes: number | null; thumbnailMediaType: "image/png" | "image/webp" | null }[]>`
     SELECT storage_name AS "storageName", id, thumbnail_size_bytes AS "thumbnailSizeBytes", thumbnail_media_type AS "thumbnailMediaType" FROM classroom.files
+    UNION ALL SELECT material_storage_name AS "storageName", id, NULL::bigint, NULL::text FROM classroom.files WHERE material_storage_name IS NOT NULL
     UNION ALL SELECT storage_name AS "storageName", id, NULL::bigint AS "thumbnailSizeBytes", NULL::text AS "thumbnailMediaType" FROM classroom.lesson_page_images
     UNION ALL SELECT storage_name AS "storageName", id, NULL::bigint AS "thumbnailSizeBytes", NULL::text AS "thumbnailMediaType" FROM classroom.quiz_images
   `;
@@ -195,13 +196,13 @@ export async function ensureUploadRoot() {
     const path = resolve(root, entry.name);
     const fileStat = await stat(path);
     if (fileStat.mtimeMs > expired) continue;
-    if (/^[0-9a-f-]{36}\.deleting$/.test(entry.name)) {
+    if (/^[0-9a-f-]{36}(?:\.mtl)?\.deleting$/.test(entry.name)) {
       const storedName = entry.name.slice(0, -".deleting".length);
       if (referenced.has(storedName)) {
         const original = resolve(root, storedName);
         try { await access(original); } catch { await rename(path, original); }
       } else await rm(path, { force: true });
-    } else if (/^[0-9a-f-]{36}(?:\.upload)?$/.test(entry.name) && !referenced.has(entry.name)) {
+    } else if (/^[0-9a-f-]{36}(?:\.mtl)?(?:\.upload)?$/.test(entry.name) && !referenced.has(entry.name)) {
       await rm(path, { force: true });
     }
   }
@@ -304,6 +305,18 @@ export async function validateUpload(file: File, kind: UploadKind) {
   const safeName = file.name.replace(/[\\/\0-\x1f\x7f]/g, "_").trim().slice(-255);
   if (!safeName) throw new HttpError(422, "กรุณาตรวจสอบชื่อไฟล์");
   return { mediaType: type.mediaType, originalName: safeName };
+}
+
+export async function validateMaterialUpload(file: File, objBytes: number) {
+  if (objBytes + file.size > maxUploadBytes()) throw new HttpError(413, "ไฟล์ OBJ และ MTL รวมกันต้องมีขนาดไม่เกิน " + Math.floor(maxUploadBytes() / (1024 * 1024)) + " MB");
+  if (!file.name.toLowerCase().endsWith(".mtl") || file.size < 1 || file.size > 1024 * 1024) throw new HttpError(422, "ไฟล์วัสดุต้องเป็น .mtl ขนาดไม่เกิน 1 MB");
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer());
+    if (text.includes("\0") || text.split(/\r?\n/).some((line) => line.length > 4096)) throw new Error("invalid MTL");
+    const originalName = file.name.replace(/[\\/\0-\x1f\x7f]/g, "_").trim().slice(-255);
+    if (!originalName) throw new Error("invalid name");
+    return { originalName };
+  } catch { throw new HttpError(422, "ไฟล์ MTL ต้องเป็นข้อความ UTF-8 ที่ถูกต้อง"); }
 }
 
 export async function validateStudentUpload(file: File) {
@@ -440,7 +453,7 @@ export async function saveStudentWorkingFile(input: {
       `;
       if ((existing?.id ?? null) !== input.expectedFileId) throw new HttpError(409, "ไฟล์ทำงานเปลี่ยนไปแล้ว กรุณาโหลดข้อมูลใหม่");
       const [usage] = await tx<{ used: string }[]>`
-          SELECT ((SELECT COALESCE(SUM(size_bytes + COALESCE(thumbnail_size_bytes, 0)), 0) FROM classroom.files) +
+          SELECT ((SELECT COALESCE(SUM(size_bytes + COALESCE(material_size_bytes, 0) + COALESCE(thumbnail_size_bytes, 0)), 0) FROM classroom.files) +
             (SELECT COALESCE(SUM(size_bytes), 0) FROM classroom.lesson_page_images) +
             (SELECT COALESCE(SUM(size_bytes), 0) FROM classroom.quiz_images))::text AS used
       `;
@@ -498,8 +511,8 @@ export async function deleteStoredFile(fileId: string, scope: { teacherId: strin
   try {
     await sql.begin(async (tx) => {
       await tx`SELECT pg_advisory_xact_lock(870010022)`;
-      const [file] = await tx<{ storageName: string; thumbnailMediaType: "image/png" | "image/webp" | null }[]>`
-        SELECT f.storage_name AS "storageName", f.thumbnail_media_type AS "thumbnailMediaType"
+      const [file] = await tx<{ storageName: string; materialStorageName: string | null; thumbnailMediaType: "image/png" | "image/webp" | null }[]>`
+        SELECT f.storage_name AS "storageName", f.material_storage_name AS "materialStorageName", f.thumbnail_media_type AS "thumbnailMediaType"
         FROM classroom.files f JOIN classroom.classrooms c ON c.id = f.classroom_id
         WHERE f.id = ${fileId} AND (
           (${teacherId}::uuid IS NOT NULL AND c.owner_id = ${teacherId})
@@ -511,7 +524,7 @@ export async function deleteStoredFile(fileId: string, scope: { teacherId: strin
         ) FOR UPDATE OF f
       `;
       if (!file) throw new HttpError(404, "ไม่พบไฟล์นี้");
-      const paths = [resolve(root, file.storageName), ...(file.thumbnailMediaType ? [uploadThumbnailPath(fileId, file.thumbnailMediaType)] : [])];
+      const paths = [resolve(root, file.storageName), ...(file.materialStorageName ? [resolve(root, file.materialStorageName)] : []), ...(file.thumbnailMediaType ? [uploadThumbnailPath(fileId, file.thumbnailMediaType)] : [])];
       for (const path of paths) {
         const tombstone = path + ".deleting";
         staged.push({ path, tombstone });

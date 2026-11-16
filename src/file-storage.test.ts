@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { deflateSync, gzipSync } from "node:zlib";
 import sharp from "sharp";
-import { storedFilePath, validateStudentUpload, validateThumbnail, validateUpload, validateWorkingFile } from "./file-storage";
+import { storedFilePath, validateMaterialUpload, validateStudentUpload, validateThumbnail, validateUpload, validateWorkingFile } from "./file-storage";
 
 function pngChunk(type: string, data: Buffer) {
   const chunk = Buffer.alloc(data.length + 12);
@@ -80,6 +80,17 @@ describe("file upload validation", () => {
     await expect(validateUpload(doc, "worksheet")).resolves.toMatchObject({ mediaType: "application/msword" });
     await expect(validateUpload(new File(["solid test\nendsolid test"], "model.stl"), "model")).resolves.toMatchObject({ mediaType: "model/stl" });
     await expect(validateUpload(new File(["v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3"], "model.obj"), "model")).resolves.toMatchObject({ mediaType: "model/obj" });
+  });
+
+  test("accepts bounded UTF-8 MTL companions and enforces pair size limits", async () => {
+    const material = new File(["newmtl red\nKd 1.0 0.0 0.0\nmap_Kd external.png"], "paint.mtl");
+    await expect(validateMaterialUpload(material, 1024)).resolves.toMatchObject({ originalName: "paint.mtl" });
+    await expect(validateMaterialUpload(new File([Uint8Array.of(0xff)], "bad.mtl"), 10)).rejects.toThrow("UTF-8");
+    await expect(validateMaterialUpload(new File(["Kd 1 0 0"], "paint.txt"), 10)).rejects.toThrow(".mtl");
+    const oldLimit = process.env.UPLOAD_MAX_FILE_BYTES;
+    process.env.UPLOAD_MAX_FILE_BYTES = "20";
+    try { await expect(validateMaterialUpload(new File(["Kd 1 0 0"], "paint.mtl"), 15)).rejects.toMatchObject({ status: 413 }); }
+    finally { if (oldLimit === undefined) delete process.env.UPLOAD_MAX_FILE_BYTES; else process.env.UPLOAD_MAX_FILE_BYTES = oldLimit; }
   });
 
   test("detects supported student submission types without a client-selected kind", async () => {

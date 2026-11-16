@@ -5,7 +5,7 @@ import { FileThumbnail } from "./FileThumbnail";
 type WorkFile = {
   id: string; studentId: string; studentName: string; kind: "model" | "submission" | "working";
   originalName: string; mediaType: string; sizeBytes: number | string; createdAt: string;
-  studentSubmission: boolean; thumbnailAvailable: boolean;
+  studentSubmission: boolean; thumbnailAvailable: boolean; materialAvailable: boolean;
 };
 type AssessedWorkFile = Omit<WorkFile, "kind"> & { kind: "model" | "submission" };
 type AssessmentStudent = {

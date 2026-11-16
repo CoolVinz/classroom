@@ -11,4 +11,5 @@ test("gallery ticket uses the authenticated POST route", () => {
 test("gallery content and thumbnails use app API URLs", () => {
   expect(galleryFileUrl("class-1", "file-1", "content")).toBe("/api/classrooms/class-1/gallery/files/file-1/content");
   expect(galleryFileUrl("class-1", "file-1", "thumbnail")).toBe("/api/classrooms/class-1/gallery/files/file-1/thumbnail");
+  expect(galleryFileUrl("class-1", "file-1", "material")).toBe("/api/classrooms/class-1/gallery/files/file-1/material");
 });

@@ -36,7 +36,7 @@ async function ownedPage(id: string, ownerId: string) {
 async function usedStorageBytes(tx: postgres.ISql) {
   const [usage] = await tx<{ used: string }[]>`
     SELECT (
-      (SELECT COALESCE(SUM(size_bytes + COALESCE(thumbnail_size_bytes, 0)), 0) FROM classroom.files) +
+      (SELECT COALESCE(SUM(size_bytes + COALESCE(material_size_bytes, 0) + COALESCE(thumbnail_size_bytes, 0)), 0) FROM classroom.files) +
       (SELECT COALESCE(SUM(size_bytes), 0) FROM classroom.lesson_page_images) +
       (SELECT COALESCE(SUM(size_bytes), 0) FROM classroom.quiz_images)
     )::text AS used

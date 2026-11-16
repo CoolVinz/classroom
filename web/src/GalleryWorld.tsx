@@ -10,7 +10,7 @@ import { animateAvatarCharacter, createAvatarCharacter, defaultAvatarAppearance,
 import { jumpHeight, reconcilePosition, walkingStep, type Move } from "./gallery-motion";
 
 type User = { role: "owner" | "teacher" | "student"; displayName: string };
-type GalleryModel = { id: string; studentId: string; displayName: string; studentNumber: number | null; assignmentId: string; assignmentTitle: string; originalName: string; mediaType: string; thumbnailAvailable: boolean; createdAt: string; hidden: boolean; likes: number; likedByMe: boolean };
+type GalleryModel = { id: string; studentId: string; displayName: string; studentNumber: number | null; assignmentId: string; assignmentTitle: string; originalName: string; mediaType: string; materialAvailable: boolean; thumbnailAvailable: boolean; createdAt: string; hidden: boolean; likes: number; likedByMe: boolean };
 type Manifest = { classroomId: string; classroomName: string; blocks: { studentId: string; displayName: string; studentNumber: number | null; blockIndex: number; archived: boolean }[]; models: GalleryModel[]; nextOffset: number | null; teacher: boolean; viewerStudentId: string | null };
 type Avatar = AvatarAppearance & { displayName: string; role: string; x: number; z: number; rotation: number; sequence?: number; jump?: number };
 
@@ -68,9 +68,9 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
     const canvas = canvasRef.current;
     if (!canvas || !manifest || !config) return;
     let renderer: THREE.WebGLRenderer;
-    try { renderer = new THREE.WebGLRenderer({ canvas, antialias: true }); }
+    try { renderer = new THREE.WebGLRenderer({ canvas, antialias: false }); }
     catch { setError("อุปกรณ์นี้ไม่รองรับการแสดงโลกสามมิติ"); return; }
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    renderer.setPixelRatio(1);
     const scene = new THREE.Scene(); scene.background = new THREE.Color("#cce7ed");
     scene.fog = new THREE.Fog("#cce7ed", 45, 150);
     scene.add(new THREE.HemisphereLight(0xeafaff, 0x667263, 2.2));
@@ -80,7 +80,7 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
     const camera = new THREE.PerspectiveCamera(58, 1, 0.1, 800);
     const avatarMeshes = new Map<string, THREE.Group>();
     const syncAppearance = (avatar: THREE.Group, value: AvatarAppearance) => {
-      const signature = [value.skinColor, value.hairColor, value.shirtColor, value.trousersColor, value.hairStyle].join(":");
+      const signature = value.skinColor + ":" + value.hairColor + ":" + value.shirtColor + ":" + value.trousersColor + ":" + value.hairStyle;
       if (avatar.userData.appearance === signature) return;
       const previous = avatar.userData.character as THREE.Group | undefined;
       if (previous) { avatar.remove(previous); disposeAvatarCharacter(previous); }
@@ -129,6 +129,7 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
       for (const item of modelsRef.current) if (!item.hidden && !renderedModels.has(item.id)) addExhibit(item);
       const visible = new Set(modelsRef.current.filter((item) => !item.hidden).map((item) => item.id));
       for (const modelId of renderedModels) if (!visible.has(modelId)) {
+        evictModel(modelId);
         const exhibit = modelMeshes.get(modelId); if (exhibit) { scene.remove(exhibit); disposeAvatarCharacter(exhibit); modelMeshes.delete(modelId); }
         for (let i = raycastables.length - 1; i >= 0; i--) if (raycastables[i].userData.model?.id === modelId) raycastables.splice(i, 1);
         renderedModels.delete(modelId);
@@ -145,20 +146,57 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
     };
     const keyUp = (event: KeyboardEvent) => keys.delete(event.key.toLowerCase());
     const onBlur = () => { keys.clear(); touchRef.current = { x: 0, z: 0 }; jumpRef.current = false; };
-    const onVisibility = () => { if (document.hidden) onBlur(); };
     const onPointerDown = (event: PointerEvent) => { if (customizerOpenRef.current) return; drag = true; lastX = event.clientX; startX = event.clientX; startY = event.clientY; canvas.setPointerCapture(event.pointerId); };
     const onPointerMove = (event: PointerEvent) => { if (!drag || customizerOpenRef.current) return; const delta = event.clientX - lastX; yaw -= delta * 0.005; cameraPitch = THREE.MathUtils.clamp(cameraPitch - event.movementY * 0.003, 0.08, 0.85); lastX = event.clientX; };
     const onPointerUp = (event: PointerEvent) => { if (!drag) return; drag = false; if (!customizerOpenRef.current && Math.hypot(event.clientX - startX, event.clientY - startY) < 5) { const rect = canvas.getBoundingClientRect(); pointer.set((event.clientX - rect.left) / rect.width * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1); raycaster.setFromCamera(pointer, camera); const hit = raycaster.intersectObjects(raycastables, false)[0]; if (hit?.object.userData.model) setSelected(hit.object.userData.model as GalleryModel); } };
     const resize = () => { const width = Math.max(1, canvas.clientWidth), height = Math.max(1, canvas.clientHeight); renderer.setSize(width, height, false); camera.aspect = width / height; camera.updateProjectionMatrix(); };
     const observer = new ResizeObserver(resize); observer.observe(canvas); resize();
-    canvas.addEventListener("pointerdown", onPointerDown); canvas.addEventListener("pointermove", onPointerMove); canvas.addEventListener("pointerup", onPointerUp);
-    window.addEventListener("keydown", keyDown); window.addEventListener("keyup", keyUp); window.addEventListener("blur", onBlur); document.addEventListener("visibilitychange", onVisibility);
     let alive = true, frame = 0, lastSend = 0, lastFrame = performance.now(), local = { x: 0, z: 0, rotation: 0 }, room: any;
     let initialized = false, sequence = 0, lastAcknowledged = -1, jumpTime = -Infinity, pending: Move[] = [], unsent = { dx: 0, dz: 0 };
+    let hiddenAt = document.hidden ? performance.now() : 0;
     let syncedManifest = manifestRef.current, syncedModels = modelsRef.current;
     const modelAbort = new AbortController();
+    const loadedModels = new Map<string, { object: THREE.Group; triangles: number }>();
+    const deferredModels = new Map<string, number>();
+    let residentTriangles = 0, activeModelLoad: { id: string; controller: AbortController } | null = null, lastModelScan = 0;
+    const evictModel = (id: string) => {
+      const loaded = loadedModels.get(id); if (!loaded) return;
+      modelMeshes.get(id)?.remove(loaded.object); disposeAvatarCharacter(loaded.object);
+      residentTriangles -= loaded.triangles; loadedModels.delete(id);
+    };
+    const updateNearbyModels = () => {
+      const candidates = modelsRef.current.filter((item) => !item.hidden && blockMap.has(item.studentId)).map((item) => {
+        const position = blockPosition(blockMap.get(item.studentId)!.blockIndex);
+        return { item, distance: Math.hypot(position.x - local.x, position.z - local.z) };
+      });
+      const desired = new Set(candidates.filter((candidate) => candidate.distance < 62).map((candidate) => candidate.item.id));
+      for (const id of loadedModels.keys()) if (!desired.has(id)) evictModel(id);
+      if (activeModelLoad && !desired.has(activeModelLoad.id)) activeModelLoad.controller.abort();
+      if (activeModelLoad || document.hidden) return;
+      const next = candidates.filter((candidate) => candidate.distance < 50 && !loadedModels.has(candidate.item.id) && deferredModels.get(candidate.item.id) !== residentTriangles).sort((a, b) => a.distance - b.distance)[0];
+      if (!next) return;
+      const controller = new AbortController(); activeModelLoad = { id: next.item.id, controller };
+      void loadModel(next.item, galleryFileUrl(classroomId, next.item.id, "content"), controller.signal,
+        next.item.materialAvailable ? galleryFileUrl(classroomId, next.item.id, "material") : undefined).then((parsed) => {
+        if (controller.signal.aborted || !alive || !desired.has(next.item.id)) return;
+        if (residentTriangles + parsed.triangles > 1_000_000) { deferredModels.set(next.item.id, residentTriangles); return; }
+        const exhibit = modelMeshes.get(next.item.id); if (!exhibit) return;
+        const object = new THREE.Group();
+        for (const part of parsed.parts) {
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute("position", new THREE.BufferAttribute(part.positions, 3)); geometry.setAttribute("normal", new THREE.BufferAttribute(part.normals, 3));
+          if (part.indices) geometry.setIndex(new THREE.BufferAttribute(part.indices, 1));
+          if (part.colors) geometry.setAttribute("color", new THREE.BufferAttribute(part.colors, 3));
+          object.add(new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: part.colors ? 0xffffff : 0x4b9a80, vertexColors: Boolean(part.colors), roughness: 0.72 })));
+        }
+        const bounds = new THREE.Box3().setFromObject(object), center = bounds.getCenter(new THREE.Vector3()), radius = Math.max(bounds.getBoundingSphere(new THREE.Sphere()).radius, 0.1);
+        object.position.sub(center); object.scale.setScalar(1.2 / radius); object.position.y += 0.25;
+        exhibit.add(object); loadedModels.set(next.item.id, { object, triangles: parsed.triangles }); residentTriangles += parsed.triangles; deferredModels.delete(next.item.id);
+      }).catch(() => { /* The saved thumbnail remains available when a model cannot be parsed. */ })
+        .finally(() => { if (activeModelLoad?.controller === controller) activeModelLoad = null; });
+    };
     const client = new Client(config);
-    const cleanup = () => { alive = false; cancelAnimationFrame(frame); room?.leave(); roomRef.current = null; onBlur(); observer.disconnect(); scene.traverse((object) => { const mesh = object as THREE.Mesh; mesh.geometry?.dispose?.(); const materials = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : []; materials.forEach((material) => material.dispose()); }); renderer.dispose(); renderer.forceContextLoss(); textures.forEach((texture) => texture.dispose()); avatarMeshes.clear(); window.removeEventListener("keydown", keyDown); window.removeEventListener("keyup", keyUp); window.removeEventListener("blur", onBlur); document.removeEventListener("visibilitychange", onVisibility); canvas.removeEventListener("pointerdown", onPointerDown); canvas.removeEventListener("pointermove", onPointerMove); canvas.removeEventListener("pointerup", onPointerUp); };
+    const cleanup = () => { alive = false; cancelAnimationFrame(frame); modelAbort.abort(); activeModelLoad?.controller.abort(); room?.leave(); roomRef.current = null; onBlur(); observer.disconnect(); scene.traverse((object) => { const mesh = object as THREE.Mesh; mesh.geometry?.dispose?.(); const materials = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : []; materials.forEach((material) => material.dispose()); }); renderer.dispose(); renderer.forceContextLoss(); textures.forEach((texture) => texture.dispose()); avatarMeshes.clear(); window.removeEventListener("keydown", keyDown); window.removeEventListener("keyup", keyUp); window.removeEventListener("blur", onBlur); document.removeEventListener("visibilitychange", onVisibilityChange); canvas.removeEventListener("pointerdown", onPointerDown); canvas.removeEventListener("pointermove", onPointerMove); canvas.removeEventListener("pointerup", onPointerUp); };
     const ticketRequest = galleryTicketRequest(classroomId);
     void api<{ ticket: string; url: string }>(ticketRequest.path, ticketRequest.options).then(async ({ ticket }) => {
       if (!alive) return;
@@ -195,36 +233,9 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
         for (const [id, avatar] of avatarMeshes) if (!present.has(id)) { scene.remove(avatar); disposeAvatarCharacter(avatar); avatar.traverse((object) => { if (object instanceof THREE.Sprite) object.material.map?.dispose(); }); avatarMeshes.delete(id); }
       });
     }).catch((reason) => { if (alive) setError(reason instanceof Error ? reason.message : "เชื่อมต่อโลกเสมือนไม่สำเร็จ"); });
-    void (async () => {
-      let residentTriangles = 0;
-      const nearby = [...modelsRef.current].filter((item) => !item.hidden).sort((a, b) => {
-        const pa = blockPosition(blockMap.get(a.studentId)?.blockIndex ?? 0), pb = blockPosition(blockMap.get(b.studentId)?.blockIndex ?? 0);
-        return Math.hypot(pa.x, pa.z) - Math.hypot(pb.x, pb.z);
-      }).slice(0, 12);
-      for (const item of nearby) {
-        if (modelAbort.signal.aborted) return;
-        try {
-          const parsed = await loadModel(item, galleryFileUrl(classroomId, item.id, "content"), modelAbort.signal);
-          if (modelAbort.signal.aborted) return;
-          if (residentTriangles + parsed.triangles > 1_000_000) continue;
-          residentTriangles += parsed.triangles;
-          const exhibit = modelMeshes.get(item.id); if (!exhibit) continue;
-          const object = new THREE.Group();
-          const geometries: THREE.BufferGeometry[] = [];
-          for (const part of parsed.parts) {
-            const geometry = new THREE.BufferGeometry(); geometries.push(geometry);
-            geometry.setAttribute("position", new THREE.BufferAttribute(part.positions, 3)); geometry.setAttribute("normal", new THREE.BufferAttribute(part.normals, 3));
-            if (part.indices) geometry.setIndex(new THREE.BufferAttribute(part.indices, 1));
-            object.add(new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: 0x4b9a80, roughness: 0.72 })));
-          }
-          const bounds = new THREE.Box3().setFromObject(object), center = bounds.getCenter(new THREE.Vector3()), radius = Math.max(bounds.getBoundingSphere(new THREE.Sphere()).radius, 0.1);
-          object.position.sub(center); object.scale.setScalar(1.2 / radius); object.position.y += 0.25;
-          exhibit.add(object);
-        } catch { /* The saved thumbnail remains available when a model cannot be parsed. */ }
-      }
-    })();
     const render = (time: number) => {
-      if (!alive) return; frame = requestAnimationFrame(render); const dt = Math.min((time - lastFrame) / 1000, 0.05); lastFrame = time;
+      if (!alive || document.hidden) { frame = 0; return; } frame = requestAnimationFrame(render); const dt = Math.min((time - lastFrame) / 1000, 0.05); lastFrame = time;
+      if (time - lastModelScan > 500) { lastModelScan = time; updateNearbyModels(); }
       if (syncedManifest !== manifestRef.current) { syncedManifest = manifestRef.current; syncBlocks(); }
       if (syncedModels !== modelsRef.current) { syncedModels = modelsRef.current; syncExhibits(); }
       const forward = Number(keys.has("w") || keys.has("arrowup") || touchRef.current.z < -0.15) - Number(keys.has("s") || keys.has("arrowdown") || touchRef.current.z > 0.15);
@@ -248,7 +259,6 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
         const speed = Math.hypot(avatar.position.x - previousX, avatar.position.z - previousZ) / Math.max(dt, 0.001);
         avatar.userData.walking += (Math.min(1, speed / 4) - avatar.userData.walking) * (1 - Math.exp(-15 * dt));
         avatar.userData.walkPhase += Math.min(speed, 5) * dt * 2.4;
-        if (self) syncAppearance(avatar, appearanceRef.current);
         animateAvatarCharacter(avatar.userData.character, avatar.userData.walkPhase, avatar.userData.walking, height > 0);
       }
       if (initialized && room?.connection?.isOpen && time - lastSend > 100) {
@@ -262,6 +272,19 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
       const distance = 8 + cameraPitch * 10; camera.position.set(local.x + Math.sin(yaw) * distance, 2 + cameraPitch * 10, local.z + Math.cos(yaw) * distance); camera.lookAt(local.x, 1.2, local.z);
       renderer.render(scene, camera);
     };
+    const onVisibilityChange = () => {
+      onBlur();
+      if (document.hidden) { hiddenAt = performance.now(); activeModelLoad?.controller.abort(); }
+      else {
+        const now = performance.now(), paused = hiddenAt ? now - hiddenAt : 0;
+        if (Number.isFinite(jumpTime)) jumpTime += paused;
+        for (const avatar of avatarMeshes.values()) if (Number.isFinite(avatar.userData.jumpTime)) avatar.userData.jumpTime += paused;
+        hiddenAt = 0;
+        if (alive && !frame) { lastFrame = now; frame = requestAnimationFrame(render); }
+      }
+    };
+    canvas.addEventListener("pointerdown", onPointerDown); canvas.addEventListener("pointermove", onPointerMove); canvas.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("keydown", keyDown); window.addEventListener("keyup", keyUp); window.addEventListener("blur", onBlur); document.addEventListener("visibilitychange", onVisibilityChange);
     frame = requestAnimationFrame(render);
     return () => { modelAbort.abort(); cleanup(); };
   }, [classroomId, config, Boolean(manifest), load]);
@@ -296,7 +319,7 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
 
   if (enabled === false && teacher) return <section className="panel gallery-enable"><h2>โลกเสมือน · {manifest?.classroomName ?? "ห้องเรียน"}</h2><p className="muted">เปิดโลกเพื่อให้นักเรียนและครูเดินชมผลงานโมเดล 3 มิติในห้องเรียน</p><button className="button button-primary" disabled={loading} onClick={() => void setWorld(true)}>{loading ? "กำลังเปิด…" : "เปิดโลกเสมือน"}</button>{error && <p className="form-error">{error}</p>}</section>;
   if (enabled === false && !teacher) return <main className="public-lesson-page"><section className="panel"><h2>โลกเสมือนยังไม่พร้อม</h2><p>{error || "กรุณากลับไปยังห้องเรียนแล้วลองอีกครั้ง."}</p><a href="/">กลับไปห้องเรียน</a></section></main>;
-  return <>{user.role === "student" && <div className="gallery-attendance"><StudentAttendance /></div>}<section className="gallery-shell"><header className="gallery-toolbar"><div><strong>{manifest?.classroomName ?? "โลกเสมือน"}</strong><small>{online} คนออนไลน์ · WASD/ลูกศร เดิน · Space กระโดด · ลากเพื่อหมุนมุมมอง</small></div><div className="gallery-toolbar-actions"><button className="button button-quiet" onClick={() => { setDraftAppearance({ ...appearance }); setCustomizerOpen(true); }}>ปรับแต่งตัวละคร</button>{close && <button className="button button-quiet" onClick={close}>กลับ</button>}</div></header>{error && <div className="notice" role="alert">{error}</div>}{!config && <p className="gallery-service-note">ยังไม่ได้ตั้งค่า Colyseus ใน Coolify</p>}<canvas ref={canvasRef} className="gallery-canvas" aria-label="โลกเสมือนห้องเรียน กด WASD เพื่อเดิน Space เพื่อกระโดด และลากเพื่อหมุนมุมมอง"/><div className="gallery-touch" onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); const rect = event.currentTarget.getBoundingClientRect(); touchRef.current = { x: (event.clientX - rect.left) / rect.width * 2 - 1, z: (event.clientY - rect.top) / rect.height * 2 - 1 }; }} onPointerMove={(event) => { if (!event.currentTarget.hasPointerCapture(event.pointerId)) return; const rect = event.currentTarget.getBoundingClientRect(); touchRef.current = { x: (event.clientX - rect.left) / rect.width * 2 - 1, z: (event.clientY - rect.top) / rect.height * 2 - 1 }; }} onPointerUp={() => { touchRef.current = { x: 0, z: 0 }; }} onPointerCancel={() => { touchRef.current = { x: 0, z: 0 }; }} onLostPointerCapture={() => { touchRef.current = { x: 0, z: 0 }; }} aria-label="ควบคุมการเดินด้วยสัมผัส">◉</div><button className="gallery-jump button button-quiet" disabled={customizerOpen} onClick={() => { jumpRef.current = true; }}>กระโดด ↑</button>{manifest?.nextOffset !== null && <button className="gallery-more button button-quiet" onClick={() => void load(manifest?.nextOffset ?? 0)}>โหลดผลงานเพิ่ม</button>}{teacher && models.some((item) => item.hidden) && <aside className="gallery-hidden-tray"><strong>ผลงานที่ซ่อน</strong>{models.filter((item) => item.hidden).map((item) => <div key={item.id}><span>{item.displayName} · {item.originalName}</span><button className="text-button" onClick={() => void setHidden(item)}>แสดง</button></div>)}</aside>}{selected && <aside className="gallery-inspect"><button className="icon-button" onClick={() => setSelected(null)} aria-label="ปิด">×</button><p className="eyebrow">{selected.displayName} · เลขที่ {selected.studentNumber ?? "—"}</p><h3>{selected.originalName}</h3><p className="muted">{selected.assignmentTitle}</p><p>{selected.likes} ถูกใจ</p>{user.role === "student" && selected.studentId !== manifest?.viewerStudentId && <button className="button button-quiet" onClick={() => void like(selected)}>{selected.likedByMe ? "ยกเลิกถูกใจ" : "ถูกใจ"}</button>}{teacher && <button className="button button-quiet" onClick={() => void setHidden(selected)}>{selected.hidden ? "แสดงผลงาน" : "ซ่อนผลงาน"}</button>}<button className="button button-primary" onClick={() => setPreview(selected)}>เปิดดูโมเดล</button></aside>}{customizerOpen && <CharacterCustomizer appearance={draftAppearance} onChange={setDraftAppearance} onCancel={() => setCustomizerOpen(false)} onSave={() => void saveAppearance()} saving={loading} error={error} />}</section>{preview && <ModelPreview file={preview} contentPath={galleryFileUrl(classroomId, preview.id, "content")} close={() => setPreview(null)} />}</>;
+  return <>{user.role === "student" && <div className="gallery-attendance"><StudentAttendance /></div>}<section className="gallery-shell"><header className="gallery-toolbar"><div><strong>{manifest?.classroomName ?? "โลกเสมือน"}</strong><small>{online} คนออนไลน์ · WASD/ลูกศร เดิน · Space กระโดด · ลากเพื่อหมุนมุมมอง</small></div><div className="gallery-toolbar-actions"><button className="button button-quiet" onClick={() => { setDraftAppearance({ ...appearance }); setCustomizerOpen(true); }}>ปรับแต่งตัวละคร</button>{close && <button className="button button-quiet" onClick={close}>กลับ</button>}</div></header>{error && <div className="notice" role="alert">{error}</div>}{!config && <p className="gallery-service-note">ยังไม่ได้ตั้งค่า Colyseus ใน Coolify</p>}<canvas ref={canvasRef} className="gallery-canvas" aria-label="โลกเสมือนห้องเรียน กด WASD เพื่อเดิน Space เพื่อกระโดด และลากเพื่อหมุนมุมมอง"/><div className="gallery-touch" onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); const rect = event.currentTarget.getBoundingClientRect(); touchRef.current = { x: (event.clientX - rect.left) / rect.width * 2 - 1, z: (event.clientY - rect.top) / rect.height * 2 - 1 }; }} onPointerMove={(event) => { if (!event.currentTarget.hasPointerCapture(event.pointerId)) return; const rect = event.currentTarget.getBoundingClientRect(); touchRef.current = { x: (event.clientX - rect.left) / rect.width * 2 - 1, z: (event.clientY - rect.top) / rect.height * 2 - 1 }; }} onPointerUp={() => { touchRef.current = { x: 0, z: 0 }; }} onPointerCancel={() => { touchRef.current = { x: 0, z: 0 }; }} onLostPointerCapture={() => { touchRef.current = { x: 0, z: 0 }; }} aria-label="ควบคุมการเดินด้วยสัมผัส">◉</div><button className="gallery-jump button button-quiet" disabled={customizerOpen} onClick={() => { jumpRef.current = true; }}>กระโดด ↑</button>{manifest?.nextOffset !== null && <button className="gallery-more button button-quiet" onClick={() => void load(manifest?.nextOffset ?? 0)}>โหลดผลงานเพิ่ม</button>}{teacher && models.some((item) => item.hidden) && <aside className="gallery-hidden-tray"><strong>ผลงานที่ซ่อน</strong>{models.filter((item) => item.hidden).map((item) => <div key={item.id}><span>{item.displayName} · {item.originalName}</span><button className="text-button" onClick={() => void setHidden(item)}>แสดง</button></div>)}</aside>}{selected && <aside className="gallery-inspect"><button className="icon-button" onClick={() => setSelected(null)} aria-label="ปิด">×</button><p className="eyebrow">{selected.displayName} · เลขที่ {selected.studentNumber ?? "—"}</p><h3>{selected.originalName}</h3><p className="muted">{selected.assignmentTitle}</p><p>{selected.likes} ถูกใจ</p>{user.role === "student" && selected.studentId !== manifest?.viewerStudentId && <button className="button button-quiet" onClick={() => void like(selected)}>{selected.likedByMe ? "ยกเลิกถูกใจ" : "ถูกใจ"}</button>}{teacher && <button className="button button-quiet" onClick={() => void setHidden(selected)}>{selected.hidden ? "แสดงผลงาน" : "ซ่อนผลงาน"}</button>}<button className="button button-primary" onClick={() => setPreview(selected)}>เปิดดูโมเดล</button></aside>}{customizerOpen && <CharacterCustomizer appearance={draftAppearance} onChange={setDraftAppearance} onCancel={() => setCustomizerOpen(false)} onSave={() => void saveAppearance()} saving={loading} error={error} />}</section>{preview && <ModelPreview file={preview} contentPath={galleryFileUrl(classroomId, preview.id, "content")} materialPath={preview.materialAvailable ? galleryFileUrl(classroomId, preview.id, "material") : undefined} close={() => setPreview(null)} />}</>;
 }
 
 function CharacterCustomizer({ appearance, onChange, onCancel, onSave, saving, error }: { appearance: AvatarAppearance; onChange: (value: AvatarAppearance) => void; onCancel: () => void; onSave: () => void; saving: boolean; error: string }) {

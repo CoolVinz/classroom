@@ -1,11 +1,11 @@
 import * as THREE from "three";
 
-export type ModelPart = { positions: Float32Array; normals: Float32Array; indices?: Uint32Array };
+export type ModelPart = { positions: Float32Array; normals: Float32Array; indices?: Uint32Array; colors?: Float32Array };
 type ModelData = { parts: ModelPart[]; triangles: number };
 type WorkerReply = Partial<ModelData> & { error?: string };
 type ModelFile = { id: string; originalName: string };
 
-async function parseModel(file: ModelFile, buffer: ArrayBuffer, signal: AbortSignal): Promise<ModelData> {
+async function parseModel(file: ModelFile, buffer: ArrayBuffer, signal: AbortSignal, materialText?: string): Promise<ModelData> {
   const extension = file.originalName.split(".").pop()?.toLowerCase();
   if (extension !== "stl" && extension !== "obj") throw new Error("รองรับไฟล์ STL และ OBJ เท่านั้น");
   return new Promise((resolve, reject) => {
@@ -23,24 +23,28 @@ async function parseModel(file: ModelFile, buffer: ArrayBuffer, signal: AbortSig
     worker.onerror = () => { cleanup(); reject(new Error("อ่านโมเดลไม่สำเร็จ")); };
     signal.addEventListener("abort", abort, { once: true });
     if (signal.aborted) abort();
-    else worker.postMessage({ extension, buffer }, [buffer]);
+    else worker.postMessage({ extension, buffer, materialText }, [buffer]);
   });
 }
 
-async function readModel(file: ModelFile, contentPath: string, signal: AbortSignal): Promise<ModelData> {
-  const response = await fetch(contentPath, { credentials: "same-origin", signal });
+async function readModel(file: ModelFile, contentPath: string, signal: AbortSignal, materialPath?: string): Promise<ModelData> {
+  const [response, materialResponse] = await Promise.all([
+    fetch(contentPath, { credentials: "same-origin", signal }),
+    materialPath ? fetch(materialPath, { credentials: "same-origin", signal }).catch(() => null) : Promise.resolve(null),
+  ]);
   if (!response.ok) {
     const result = await response.json().catch(() => null) as { error?: unknown } | null;
     throw new Error(typeof result?.error === "string" ? result.error : "โมเดลนี้ไม่พร้อมแสดงตัวอย่าง");
   }
-  return parseModel(file, await response.arrayBuffer(), signal);
+  const materialText = materialResponse?.ok ? await materialResponse.text() : undefined;
+  return parseModel(file, await response.arrayBuffer(), signal, materialText);
 }
 
-export function loadModel(file: ModelFile, contentPath: string, signal: AbortSignal) {
-  return readModel(file, contentPath, signal);
+export function loadModel(file: ModelFile, contentPath: string, signal: AbortSignal, materialPath?: string) {
+  return readModel(file, contentPath, signal, materialPath);
 }
 
-export type ThumbnailFile = ModelFile & { mediaType: string };
+export type ThumbnailFile = ModelFile & { mediaType: string; materialAvailable?: boolean };
 let thumbnailQueue: Promise<unknown> = Promise.resolve();
 
 function enqueueThumbnail<T>(task: (signal: AbortSignal) => Promise<T>, signal: AbortSignal): Promise<T> {
@@ -108,15 +112,15 @@ async function renderImageBlob(file: File, signal: AbortSignal) {
   return canvasBlob(canvas, signal);
 }
 
-export function createThumbnailFromFile(file: File & { name: string }, mediaType: string, signal: AbortSignal) {
+export function createThumbnailFromFile(file: File & { name: string }, mediaType: string, signal: AbortSignal, materialFile?: File) {
   return enqueueThumbnail(async (activeSignal) => {
     if (mediaType.startsWith("image/")) return renderImageBlob(file, activeSignal);
-    const model = await parseModel({ id: file.name, originalName: file.name }, await file.arrayBuffer(), activeSignal);
+    const model = await parseModel({ id: file.name, originalName: file.name }, await file.arrayBuffer(), activeSignal, materialFile ? await materialFile.text() : undefined);
     return renderModelBlob(model.parts, activeSignal);
   }, signal);
 }
 
-export function createThumbnailFromUrl(file: ThumbnailFile, contentPath: string, signal: AbortSignal) {
+export function createThumbnailFromUrl(file: ThumbnailFile, contentPath: string, signal: AbortSignal, materialPath?: string) {
   return enqueueThumbnail(async (activeSignal) => {
     if (file.mediaType.startsWith("image/")) {
       const response = await fetch(contentPath, { credentials: "same-origin", signal: activeSignal });
@@ -124,7 +128,7 @@ export function createThumbnailFromUrl(file: ThumbnailFile, contentPath: string,
       const original = new File([await response.blob()], file.originalName, { type: file.mediaType });
       return renderImageBlob(original, activeSignal);
     }
-    const model = await readModel(file, contentPath, activeSignal);
+    const model = await readModel(file, contentPath, activeSignal, materialPath);
     activeSignal.throwIfAborted();
     return renderModelBlob(model.parts, activeSignal);
   }, signal);
@@ -147,7 +151,8 @@ export function createModelView(parts: ModelPart[]) {
       geometry.setAttribute("position", new THREE.BufferAttribute(part.positions, 3));
       geometry.setAttribute("normal", new THREE.BufferAttribute(part.normals, 3));
       if (part.indices) geometry.setIndex(new THREE.BufferAttribute(part.indices, 1));
-      const material = new THREE.MeshStandardMaterial({ color: 0x4b9a80, metalness: 0.05, roughness: 0.7 });
+      if (part.colors) geometry.setAttribute("color", new THREE.BufferAttribute(part.colors, 3));
+      const material = new THREE.MeshStandardMaterial({ color: part.colors ? 0xffffff : 0x4b9a80, vertexColors: Boolean(part.colors), metalness: 0.05, roughness: 0.7 });
       materials.push(material); object.add(new THREE.Mesh(geometry, material));
     }
     scene.add(object);

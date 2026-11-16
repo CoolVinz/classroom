@@ -7,7 +7,7 @@ import { generateThumbnail } from "./thumbnail-jobs";
 const ModelPreview = lazy(() => import("./ModelPreview"));
 export type StudentUser = { id: string; username: string; displayName: string; role: "student" };
 type Assignment = { assignmentId: string; classroomId: string; classroomName: string; title: string; instructions: string; submissionCount: number; publishedScore: number | string | null; publishedMaxScore: number | string | null; publishedFeedback: string | null; publishedAt: string | null; newWork: boolean };
-type StudentFile = { id: string; kind: "worksheet" | "model" | "submission" | "working"; originalName: string; mediaType: string; sizeBytes: number | string; createdAt: string; studentSubmission: boolean; thumbnailAvailable: boolean };
+type StudentFile = { id: string; kind: "worksheet" | "model" | "submission" | "working"; originalName: string; mediaType: string; sizeBytes: number | string; createdAt: string; studentSubmission: boolean; thumbnailAvailable: boolean; materialAvailable: boolean };
 type StudentQuiz = { quizId: string; title: string; classroomName: string; status: string; finishedAt: string | null; score: string | null };
 type GalleryClass = { classroomId: string; classroomName: string };
 const uploadTypes = ".pdf,.png,.jpg,.jpeg,.doc,.docx,.stl,.obj";
@@ -52,21 +52,29 @@ export function StudentPortal({ user, logout }: { user: StudentUser; logout: () 
     if (!selected) return;
     const form = event.currentTarget;
     const input = form.elements.namedItem("studentFiles") as HTMLInputElement;
+    const materialInput = form.elements.namedItem("materialFile") as HTMLInputElement;
     const picked = Array.from(input.files ?? []);
+    const objFiles = picked.filter((file) => file.name.toLowerCase().endsWith(".obj"));
+    const materialFile = materialInput.files?.[0];
     if (!picked.length) return;
+    if (materialFile && objFiles.length !== 1) { setError("เลือกไฟล์ MTL ได้เมื่อส่ง OBJ เพียงไฟล์เดียว"); return; }
     setBusy(true); setError("");
     let uploaded = 0;
     try {
       for (const file of picked) {
         const body = new FormData(); body.set("file", file);
-        const uploadedFile = await api<{ id: string; mediaType: string }>(`/student/classrooms/${selected.classroomId}/assignments/${selected.assignmentId}/files`, { method: "POST", body });
+        if (materialFile && file === objFiles[0]) body.set("materialFile", materialFile);
+        const uploadedFile = await api<{ id: string; mediaType: string; materialAvailable: boolean }>(`/student/classrooms/${selected.classroomId}/assignments/${selected.assignmentId}/files`, { method: "POST", body });
         void generateThumbnail({ id: uploadedFile.id, originalName: file.name, mediaType: uploadedFile.mediaType },
-          "/api/student/files/" + uploadedFile.id + "/content", "/student/files/" + uploadedFile.id + "/thumbnail", new AbortController().signal, file).catch(() => {});
+          "/api/student/files/" + uploadedFile.id + "/content", "/student/files/" + uploadedFile.id + "/thumbnail", new AbortController().signal, file,
+          uploadedFile.materialAvailable ? "/api/student/files/" + uploadedFile.id + "/material" : undefined, materialFile).catch(() => {});
         uploaded++;
       }
       input.value = "";
+      materialInput.value = "";
     } catch (reason) {
       input.value = "";
+      materialInput.value = "";
       setError((reason instanceof Error ? reason.message : "ส่งงานไม่สำเร็จ") + (uploaded ? ` (ส่งแล้ว ${uploaded} จาก ${picked.length} ไฟล์)` : ""));
     } finally { setBusy(false); await loadFiles(); await loadAssignments(); }
   }
@@ -112,12 +120,12 @@ export function StudentPortal({ user, logout }: { user: StudentUser; logout: () 
       </section>
       {selected && <section className="panel"><header className="panel-heading"><div><p className="eyebrow">{selected.classroomName}</p><h2>{selected.title}</h2>{selected.instructions && <p className="muted assignment-instructions">{selected.instructions}</p>}</div></header>
         {selected.publishedScore !== null && selected.publishedScore !== undefined && <div className="student-assessment"><strong>คะแนน: {Number(selected.publishedScore)} / {Number(selected.publishedMaxScore)}</strong>{selected.publishedFeedback && <p>{selected.publishedFeedback}</p>}{selected.newWork && <small>มีไฟล์งานใหม่รอครูตรวจ</small>}</div>}
-        <form className="work-upload" onSubmit={(event) => void upload(event)}><label className="work-file-input">เลือกไฟล์งาน<input name="studentFiles" type="file" accept={uploadTypes} multiple required/></label><button className="button button-primary" disabled={busy}>{busy ? "กำลังส่งงาน…" : "ส่งไฟล์"}</button><small>PDF, รูปภาพ, Word, STL หรือ OBJ · ไม่เกิน 50 MB ต่อไฟล์</small></form>
+        <form className="work-upload" onSubmit={(event) => void upload(event)}><label className="work-file-input">เลือกไฟล์งาน<input name="studentFiles" type="file" accept={uploadTypes} multiple required/></label><label className="work-file-input">ไฟล์สี MTL (ไม่บังคับ)<input name="materialFile" type="file" accept=".mtl"/><small>เลือกคู่กับ OBJ ไฟล์เดียว · สีพื้นผิวเท่านั้น ไม่รองรับรูป texture</small></label><button className="button button-primary" disabled={busy}>{busy ? "กำลังส่งงาน…" : "ส่งไฟล์"}</button><small>PDF, รูปภาพ, Word, STL หรือ OBJ · ไม่เกิน 50 MB รวม OBJ และ MTL</small></form>
         <section className="student-submission-groups"><h3>ไฟล์ทำงาน Blender — ยังไม่ใช่การส่งงาน</h3><p className="muted">ดาวน์โหลดมาแก้ไขใน Blender แล้วอัปโหลดไฟล์ใหม่เพื่อแทนที่ไฟล์เดิม · ก่อนย้ายไปใช้คอมพิวเตอร์เครื่องอื่น ให้เลือก File → External Data → Pack Resources เพื่อรวม texture ไว้ในไฟล์</p>{workingFile ? <article className="work-file"><span className="file-kind">BLEND</span><div className="work-file-copy"><strong>{workingFile.originalName}</strong><small>บันทึก {formatDate(workingFile.createdAt)} · {formatBytes(Number(workingFile.sizeBytes))}</small></div><div className="work-file-actions"><a className="text-button" href={`/api/student/files/${workingFile.id}/content`} download>ดาวน์โหลด</a><button className="text-button subdued" type="button" disabled={busy} onClick={() => void removeWorkingFile()}>ลบ</button></div></article> : <p className="muted">ยังไม่มีไฟล์ทำงานที่บันทึกไว้</p>}<form className="work-upload" onSubmit={(event) => void saveWorkingFile(event)}><label className="work-file-input">{workingFile ? "เลือกไฟล์ Blender ใหม่เพื่อแทนที่" : "เลือกไฟล์ Blender"}<input name="workingFile" type="file" accept=".blend" required/></label><button className="button button-quiet" disabled={busy}>{workingFile ? "แทนที่ไฟล์ทำงาน" : "บันทึกไฟล์ทำงาน"}</button><small>ไฟล์ .blend · ไม่เกิน 50 MB · ไม่รวมในจำนวนงานที่ส่ง</small></form></section>
         <div className="student-submission-groups"><h3>ใบงานและคำชี้แจง</h3>{worksheets.length ? worksheets.map((file) => <FileRow key={file.id} file={file} onPreview={setPreview}/>) : <p className="muted">ครูยังไม่ได้แนบใบงาน</p>}<h3>งานที่ส่งแล้ว</h3>{submissions.length ? submissions.map((file) => <FileRow key={file.id} file={file} onPreview={setPreview}/>) : <p className="muted">ยังไม่ได้ส่งงานนี้</p>}</div>
       </section>}
     </div></main>
-    {preview && <Suspense fallback={<div className="loading"><span className="spinner"/>กำลังเปิดตัวแสดงโมเดล…</div>}><ModelPreview file={preview} contentPath={"/api/student/files/" + preview.id + "/content"} close={() => setPreview(null)}/></Suspense>}
+    {preview && <Suspense fallback={<div className="loading"><span className="spinner"/>กำลังเปิดตัวแสดงโมเดล…</div>}><ModelPreview file={preview} contentPath={"/api/student/files/" + preview.id + "/content"} materialPath={preview.materialAvailable ? "/api/student/files/" + preview.id + "/material" : undefined} close={() => setPreview(null)}/></Suspense>}
   </div>;
 }
 

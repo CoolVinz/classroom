@@ -6,7 +6,7 @@ import { requireStudent } from "../auth/session";
 import { sql } from "../db/client";
 import { HttpError } from "../http-error";
 import { checkRequestOrigin } from "../security";
-import { deleteStoredFile, maxStoredBytes, saveFileThumbnail, saveStudentWorkingFile, storedFilePath, uploadRoot, uploadThumbnailPath, validateStudentUpload, validateThumbnail, validateWorkingFile } from "../file-storage";
+import { deleteStoredFile, maxStoredBytes, saveFileThumbnail, saveStudentWorkingFile, storedFilePath, uploadRoot, uploadThumbnailPath, validateMaterialUpload, validateStudentUpload, validateThumbnail, validateWorkingFile } from "../file-storage";
 
 async function activeMembership(classroomId: string, assignmentId: string, accountId: string) {
   const [membership] = await sql<{ studentId: string }[]>`
@@ -52,7 +52,7 @@ export const studentCourseworkRoutes = new Elysia({ prefix: "/api/student" })
     const studentId = await activeMembership(params.classroomId, params.assignmentId, actor.id);
     return sql`
       SELECT f.id, f.assignment_id AS "assignmentId", f.student_id AS "studentId",
-        f.kind, f.original_name AS "originalName", f.media_type AS "mediaType",
+        f.kind, f.original_name AS "originalName", f.media_type AS "mediaType", f.material_storage_name IS NOT NULL AS "materialAvailable",
         f.size_bytes AS "sizeBytes", f.created_at AS "createdAt",
         (f.kind IN ('model', 'submission') AND f.submitted_by_account_id = ${actor.id}) AS "studentSubmission",
         f.thumbnail_size_bytes IS NOT NULL AS "thumbnailAvailable"
@@ -81,17 +81,24 @@ export const studentCourseworkRoutes = new Elysia({ prefix: "/api/student" })
     checkRequestOrigin(request);
     const actor = await requireStudent(request);
     const valid = await validateStudentUpload(body.file);
+    const material = body.materialFile ? await validateMaterialUpload(body.materialFile, body.file.size) : null;
+    if (material && (valid.kind !== "model" || !valid.originalName.toLowerCase().endsWith(".obj"))) throw new HttpError(422, "ไฟล์ MTL ใช้คู่กับไฟล์ OBJ เท่านั้น");
     const studentId = await activeMembership(params.classroomId, params.assignmentId, actor.id);
     const originalName = basename(valid.originalName);
     const id = randomUUID();
     const storageName = id;
+    const materialStorageName = material ? id + ".mtl" : null;
     const root = uploadRoot();
     await mkdir(root, { recursive: true, mode: 0o750 });
     const tempPath = resolve(root, id + ".upload");
+    const materialTempPath = material ? resolve(root, id + ".mtl.upload") : null;
     const storedPath = resolve(root, storageName);
+    const materialStoredPath = materialStorageName ? resolve(root, materialStorageName) : null;
     let renamed = false;
+    let materialRenamed = false;
     try {
       await Bun.write(tempPath, body.file);
+      if (materialTempPath && body.materialFile) await Bun.write(materialTempPath, body.materialFile);
       await sql.begin(async (tx) => {
         await tx.unsafe("SELECT pg_advisory_xact_lock(870010022)");
         const [membership] = await tx<{ studentId: string }[]>`
@@ -106,34 +113,36 @@ export const studentCourseworkRoutes = new Elysia({ prefix: "/api/student" })
         `;
         if (!membership) throw new HttpError(404, "ไม่พบงานนี้");
         const [usage] = await tx<{ used: string }[]>`
-          SELECT ((SELECT COALESCE(SUM(size_bytes + COALESCE(thumbnail_size_bytes, 0)), 0) FROM classroom.files) +
+          SELECT ((SELECT COALESCE(SUM(size_bytes + COALESCE(material_size_bytes, 0) + COALESCE(thumbnail_size_bytes, 0)), 0) FROM classroom.files) +
             (SELECT COALESCE(SUM(size_bytes), 0) FROM classroom.lesson_page_images) +
             (SELECT COALESCE(SUM(size_bytes), 0) FROM classroom.quiz_images))::text AS used
         `;
-        if (Number(usage.used) + body.file.size > maxStoredBytes()) throw new HttpError(413, "พื้นที่จัดเก็บไฟล์เต็มแล้ว");
+        if (Number(usage.used) + body.file.size + (body.materialFile?.size ?? 0) > maxStoredBytes()) throw new HttpError(413, "พื้นที่จัดเก็บไฟล์เต็มแล้ว");
         await rename(tempPath, storedPath);
         renamed = true;
+        if (materialTempPath && materialStoredPath) { await rename(materialTempPath, materialStoredPath); materialRenamed = true; }
         await tx`
           INSERT INTO classroom.files
             (id, classroom_id, assignment_id, student_id, submitted_by_account_id,
-              uploaded_by, kind, original_name, storage_name, media_type, size_bytes)
+              uploaded_by, kind, original_name, storage_name, media_type, size_bytes, material_storage_name, material_original_name, material_size_bytes)
           VALUES (${id}, ${params.classroomId}, ${params.assignmentId}, ${studentId},
             ${actor.id}, NULL, ${valid.kind === "model" ? "model" : "submission"},
-            ${originalName}, ${storageName}, ${valid.mediaType}, ${body.file.size})
+            ${originalName}, ${storageName}, ${valid.mediaType}, ${body.file.size}, ${materialStorageName}, ${material?.originalName ?? null}, ${body.materialFile?.size ?? null})
         `;
       });
-      return { id, originalName, mediaType: valid.mediaType, sizeBytes: body.file.size };
+      return { id, originalName, mediaType: valid.mediaType, sizeBytes: body.file.size, materialAvailable: Boolean(material) };
     } catch (error) {
       await rm(tempPath, { force: true }).catch(() => {});
+      if (materialTempPath) await rm(materialTempPath, { force: true }).catch(() => {});
       if (renamed) {
         try {
           const [record] = await sql<{ id: string }[]>`SELECT id FROM classroom.files WHERE id = ${id}`;
-          if (!record) await rm(storedPath, { force: true });
+          if (!record) { await rm(storedPath, { force: true }); if (materialRenamed && materialStoredPath) await rm(materialStoredPath, { force: true }); }
         } catch { /* Startup reconciliation removes orphaned files when the commit result is unknown. */ }
       }
       throw error;
     }
-  }, { body: t.Object({ file: t.File() }) })
+  }, { body: t.Object({ file: t.File(), materialFile: t.Optional(t.File()) }) })
   .get("/files/:fileId/content", async ({ params, request }) => {
     const actor = await requireStudent(request);
     const [record] = await sql<{ storageName: string; mediaType: string; originalName: string }[]>`
@@ -156,6 +165,13 @@ export const studentCourseworkRoutes = new Elysia({ prefix: "/api/student" })
       "cache-control": "private, no-store",
       "x-content-type-options": "nosniff",
     } });
+  })
+  .get("/files/:fileId/material", async ({ params, request }) => {
+    const actor = await requireStudent(request);
+    const [record] = await sql<{ storageName: string; originalName: string }[]>`SELECT f.material_storage_name AS "storageName", f.material_original_name AS "originalName" FROM classroom.files f JOIN classroom.classrooms c ON c.id=f.classroom_id JOIN classroom.assignments a ON a.id=f.assignment_id WHERE f.id=${params.fileId} AND c.archived_at IS NULL AND a.archived_at IS NULL AND lower(f.original_name) ~ '\\.obj$' AND f.material_storage_name IS NOT NULL AND EXISTS (SELECT 1 FROM classroom.students s WHERE s.account_id=${actor.id} AND s.classroom_id=f.classroom_id AND s.archived_at IS NULL AND (f.kind='worksheet' OR f.student_id=s.id))`;
+    if (!record) throw new HttpError(404, "ไม่พบไฟล์วัสดุนี้");
+    const path = await storedFilePath(record.storageName);
+    return new Response(Bun.file(path), { headers: { "content-type": "text/plain; charset=utf-8", "content-disposition": "attachment; filename*=UTF-8''" + encodeURIComponent(record.originalName), "cache-control": "private, no-store", "x-content-type-options": "nosniff" } });
   })
   .get("/files/:fileId/thumbnail", async ({ params, request }) => {
     const actor = await requireStudent(request);

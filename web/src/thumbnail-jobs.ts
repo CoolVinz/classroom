@@ -4,15 +4,15 @@ import type { ThumbnailFile } from "./model-view";
 type ThumbnailJob = { promise: Promise<Blob>; controller: AbortController; consumers: number };
 const jobs = new Map<string, ThumbnailJob>();
 
-export function generateThumbnail(file: ThumbnailFile, contentPath: string, thumbnailPath: string, signal: AbortSignal, source?: File) {
+export function generateThumbnail(file: ThumbnailFile, contentPath: string, thumbnailPath: string, signal: AbortSignal, source?: File, materialPath?: string, materialSource?: File) {
   const key = file.id + ":" + thumbnailPath;
   if (signal.aborted) return Promise.reject(signal.reason ?? new DOMException("Cancelled", "AbortError"));
   let job = jobs.get(key);
   if (!job || job.controller.signal.aborted) {
     const controller = new AbortController();
     const promise = import("./model-view").then(({ createThumbnailFromFile, createThumbnailFromUrl }) => source
-      ? createThumbnailFromFile(source, file.mediaType, controller.signal)
-      : createThumbnailFromUrl(file, contentPath, controller.signal))
+      ? createThumbnailFromFile(source, file.mediaType, controller.signal, materialSource)
+      : createThumbnailFromUrl(file, contentPath, controller.signal, materialPath))
       .then(async (blob) => {
         controller.signal.throwIfAborted();
         const form = new FormData();

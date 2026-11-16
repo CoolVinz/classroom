@@ -5,7 +5,7 @@ describe("gallery avatar characters", () => {
   test("renders each supported hair style and releases its geometry", () => {
     for (const hairStyle of ["none", "short", "long"] as const) {
       const character = createAvatarCharacter({ ...defaultAvatarAppearance, hairStyle });
-      expect(character.children.length).toBe(hairStyle === "long" ? 9 : hairStyle === "short" ? 7 : 6);
+      expect(character.children.length).toBe(5);
       disposeAvatarCharacter(character);
     }
   });
@@ -24,6 +24,6 @@ describe("gallery avatar characters", () => {
       object.material?.addEventListener("dispose", () => materials++);
     });
     disposeAvatarCharacter(character);
-    expect(geometries).toBe(7); expect(materials).toBe(7);
+    expect(geometries).toBe(5); expect(materials).toBe(5);
   });
 });

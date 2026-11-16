@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type Ref } from "react";
 import { generateThumbnail } from "./thumbnail-jobs";
 
-type ThumbnailFile = { id: string; originalName: string; kind: "worksheet" | "model" | "submission"; mediaType: string; thumbnailAvailable?: boolean };
+type ThumbnailFile = { id: string; originalName: string; kind: "worksheet" | "model" | "submission"; mediaType: string; thumbnailAvailable?: boolean; materialAvailable?: boolean };
 
 export function FileThumbnail({ file, onPreview, student = false }: { file: ThumbnailFile; onPreview: () => void; student?: boolean }) {
   const element = useRef<HTMLElement>(null);
@@ -29,7 +29,7 @@ export function FileThumbnail({ file, onPreview, student = false }: { file: Thum
     if ((!model && !image) || !visible || hasThumbnail || failed) return;
     const controller = new AbortController();
     setGenerating(true);
-    void generateThumbnail(file, path, thumbnailPath, controller.signal)
+    void generateThumbnail(file, path, thumbnailPath, controller.signal, undefined, file.materialAvailable ? apiPath + "/material" : undefined)
       .then((blob) => { if (!controller.signal.aborted) { setSource(URL.createObjectURL(blob)); setHasThumbnail(true); } })
       .catch(() => { if (!controller.signal.aborted) setFailed(true); })
       .finally(() => { if (!controller.signal.aborted) setGenerating(false); });

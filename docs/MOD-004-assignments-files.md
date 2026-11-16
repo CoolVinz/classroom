@@ -8,7 +8,7 @@
 
 Let teachers create classroom assignments and attach worksheets, and let students with linked accounts submit work directly. Files keep a stable UUID, classroom/student/assignment links, and a separate student submitter identity. Teachers can still upload an STL/OBJ model on a student's behalf.
 
-Students see active assignments and attached worksheets for their classrooms, plus their own work; classmates' submissions stay private. They can submit PDF, PNG/JPEG, DOC/DOCX, STL, or OBJ files. Each upload appends a separate record and students cannot replace or delete earlier uploads. Each student can also keep one current `.blend` working file per assignment, replace or delete it, and download it later; this file is separate from submissions, review status, and marking. Teachers can download and delete the working file from the student's expanded review. Teachers review submitted work grouped by student, with 20 students per page, submission counts, latest-work thumbnails, status, score, and an expandable file list. They can save a private draft score and feedback, then publish or unpublish each student's result separately. Published score, feedback, and maximum-score snapshot are the only assessment fields returned to student APIs. New submissions remain in the file history and flag work as awaiting review without replacing prior marks. Models have an interactive browser preview with orbit controls, fit-to-model framing, and wireframe mode. Assignments can be archived and restored; teacher file deletion requires confirmation.
+Students see active assignments and attached worksheets for their classrooms, plus their own work; classmates' submissions stay private. They can submit PDF, PNG/JPEG, DOC/DOCX, STL, or OBJ files. An OBJ can include one optional MTL companion for solid material colors. Each upload appends a separate record and students cannot replace or delete earlier uploads. Each student can also keep one current `.blend` working file per assignment, replace or delete it, and download it later; this file is separate from submissions, review status, and marking. Teachers can download and delete the working file from the student's expanded review. Teachers review submitted work grouped by student, with 20 students per page, submission counts, latest-work thumbnails, status, score, and an expandable file list. They can save a private draft score and feedback, then publish or unpublish each student's result separately. Published score, feedback, and maximum-score snapshot are the only assessment fields returned to student APIs. New submissions remain in the file history and flag work as awaiting review without replacing prior marks. Models have an interactive browser preview with orbit controls, fit-to-model framing, and wireframe mode. Assignments can be archived and restored; teacher file deletion requires confirmation.
 
 Each assignment has an editable maximum score (default 100). Scores allow zero and two decimal places; the maximum cannot be lowered below any saved score. Editing a draft does not change the previously published result. Saving records the file UUIDs reviewed; later uploads remain unreviewed until the teacher saves again.
 
@@ -19,7 +19,8 @@ Each assignment has an editable maximum score (default 100). Scores allow zero a
 - Students upload one Blender `.blend` file for their active assignment. The server checks its header (including gzip/Zstandard-compressed headers), stores its bytes unchanged, and returns it as a download. Replacement uses the expected current file UUID and keeps the previous copy until the database update succeeds. Blender files do not appear as submissions, thumbnails, reviewed work, or score evidence. Students should pack external textures using Blender's File → External Data → Pack Resources before moving computers.
 - Teacher file routes check classroom ownership. Student routes require a student session and an active linked roster row; students can see worksheets and their own attributed files only. Permanent student removal deletes attributed file metadata and stages stored files for cleanup under the same storage lock used by uploads and individual file deletion.
 - An assignment, student, and file must belong to the same classroom. Models require a student; worksheets do not.
-- Submission formats: PDF, PNG, JPEG, DOC/DOCX, STL, OBJ. Working files accept only validated `.blend` files. Teacher and student uploads default to 50 MiB each and 5 GiB total; configured limits are enforced by the server and include working files, optimized lesson images (MOD-005), and quiz images (MOD-006).
+- Submission formats: PDF, PNG, JPEG, DOC/DOCX, STL, OBJ. Working files accept only validated `.blend` files. Teacher and student uploads default to 50 MiB each and 5 GiB total; configured limits are enforced by the server and include working files, OBJ material companions, optimized lesson images (MOD-005), and quiz images (MOD-006).
+- An OBJ MTL companion must be UTF-8 text, no larger than 1 MiB, and fit within the same 50 MiB combined upload limit. Its bytes count toward the shared storage quota. The app stores both originals unchanged under generated names and stages/removes them together. Only named solid diffuse `Kd` colors are read; map directives and external material resources are ignored without fetching them. Textures and Blender shader nodes do not transfer.
 - Production storage defaults to `/app/uploads`; development defaults to `./uploads`. Container storage must be mounted persistently and backed up separately.
 - Content requests check the configured upload directory and file before streaming. Authorized requests receive a clear `404` when an original is missing and a safe `503` when storage is unavailable; existing teacher/student authorization still runs first.
 - The preview uses neutral geometry and accepts up to 500,000 triangles, with a 10-second parse limit. Complex models remain downloadable.
@@ -43,13 +44,14 @@ Each assignment has an editable maximum score (default 100). Scores allow zero a
 UI and assignment limits: web/src/ClassroomWork.tsx
 Assessment list and draft/publish controls: web/src/AssignmentAssessment.tsx
 Thumbnails and job queue: web/src/FileThumbnail.tsx, web/src/thumbnail-jobs.ts
-Shared model loading/rendering: web/src/model-view.ts, web/src/model-preview.worker.ts
+Shared model loading/rendering and OBJ material colors: web/src/model-view.ts, web/src/model-preview.worker.ts, web/src/parse-obj-model.ts, web/src/obj-materials.ts
 Interactive model preview: web/src/ModelPreview.tsx
 Teacher assignments, files, and assessments: src/routes/coursework.ts
 Student submissions and published results: src/routes/student-coursework.ts, web/src/StudentPortal.tsx
-Upload and thumbnail validation/storage: src/file-storage.ts
+Upload, MTL companion, quota and thumbnail validation/storage: src/file-storage.ts
 Database: src/db/migrations/002_assignments_files.sql, src/db/migrations/003_student_submissions.sql, src/db/migrations/007_thumbnails_assessments.sql, src/db/migrations/008_thumbnail_media_type.sql
 Working file kind and per-assignment/student uniqueness: src/db/migrations/009_working_blend_files.sql
+OBJ material companion metadata: src/db/migrations/016_obj_material_files.sql
 Migration runner: src/db/bootstrap.ts
 Tests: web/src/model-view.test.ts, src/file-storage.test.ts, src/student-workflow.test.ts (PostgreSQL integration)
 ```
@@ -58,7 +60,7 @@ Tests: web/src/model-view.test.ts, src/file-storage.test.ts, src/student-workflo
 
 - Files are stored on the application host. Loss of the VPS or volume loses uploads unless an off-server copy exists.
 - Production now has a Coolify volume mounted at `/app/uploads` with `UPLOAD_DIR=/app/uploads`. An audit on 2026-11-02 found 70 file records but no corresponding uploaded contents in the active container; no old container or upload volume remained. Metadata and attribution are preserved, but missing originals must be re-uploaded.
-- OBJ textures/material libraries and browser-side file version history are unsupported.
+- OBJ textures and browser-side file version history are unsupported; companion MTL files only carry solid diffuse colors.
 - Legacy files need an initial visible thumbnail-generation pass; missing originals cannot produce thumbnails. Model thumbnails need browser WebGL; unsupported or complex files keep a fallback.
 
 ## Open questions

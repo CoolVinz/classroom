@@ -6,7 +6,7 @@ import { createModelView, loadModel } from "./model-view";
 
 type FileItem = { id: string; originalName: string };
 
-export default function ModelPreview({ file, contentPath, close }: { file: FileItem; contentPath?: string; close: () => void }) {
+export default function ModelPreview({ file, contentPath, materialPath, close }: { file: FileItem & { materialAvailable?: boolean }; contentPath?: string; materialPath?: string; close: () => void }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
   const materialsRef = useRef<THREE.MeshStandardMaterial[]>([]);
@@ -27,7 +27,7 @@ export default function ModelPreview({ file, contentPath, close }: { file: FileI
 
     async function load() {
       try {
-        const model = await loadModel(file, contentPath ?? "/api/files/" + file.id + "/content", controller.signal);
+        const model = await loadModel(file, contentPath ?? "/api/files/" + file.id + "/content", controller.signal, materialPath ?? (file.materialAvailable ? "/api/files/" + file.id + "/material" : undefined));
         if (controller.signal.aborted || !canvasElement) return;
         try { renderer = new THREE.WebGLRenderer({ canvas: canvasElement, antialias: true, alpha: true }); }
         catch { throw new Error("WebGL ไม่พร้อมใช้งานในเบราว์เซอร์นี้"); }
@@ -60,7 +60,7 @@ export default function ModelPreview({ file, contentPath, close }: { file: FileI
       view?.dispose(); renderer?.dispose(); renderer?.forceContextLoss();
       controlsRef.current = null; materialsRef.current = [];
     };
-  }, [file.id, file.originalName, contentPath]);
+  }, [file.id, file.originalName, contentPath, materialPath, file.materialAvailable]);
 
   useEffect(() => {
     materialsRef.current.forEach((material) => { material.wireframe = wireframe; material.needsUpdate = true; });
