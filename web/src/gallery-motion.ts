@@ -15,3 +15,9 @@ export function reconcilePosition(server: Position, acknowledged: number, pendin
 export function jumpHeight(seconds: number) {
   return seconds > 0 && seconds < 0.75 ? Math.max(0, 6 * seconds - 8 * seconds * seconds) : 0;
 }
+
+// Keep small server corrections visually continuous; teleport large corrections immediately.
+export function correctionOffset(previous: { x: number; z: number }, corrected: { x: number; z: number }, offset: { x: number; z: number }) {
+  const x = previous.x + offset.x - corrected.x, z = previous.z + offset.z - corrected.z;
+  return Math.hypot(x, z) > 2 ? { x: 0, z: 0 } : { x, z };
+}

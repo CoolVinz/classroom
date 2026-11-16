@@ -7,7 +7,7 @@ import ModelPreview from "./ModelPreview";
 import { loadModel } from "./model-view";
 import { galleryFileUrl, galleryTicketRequest } from "./gallery-api";
 import { animateAvatarCharacter, createAvatarCharacter, defaultAvatarAppearance, disposeAvatarCharacter, type AvatarAppearance } from "./gallery-avatar";
-import { jumpHeight, reconcilePosition, walkingStep, type Move } from "./gallery-motion";
+import { correctionOffset, jumpHeight, reconcilePosition, walkingStep, type Move } from "./gallery-motion";
 
 type User = { role: "owner" | "teacher" | "student"; displayName: string };
 type GalleryModel = { id: string; studentId: string; displayName: string; studentNumber: number | null; assignmentId: string; assignmentTitle: string; originalName: string; mediaType: string; materialAvailable: boolean; thumbnailAvailable: boolean; createdAt: string; hidden: boolean; likes: number; likedByMe: boolean };
@@ -153,6 +153,7 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
     const observer = new ResizeObserver(resize); observer.observe(canvas); resize();
     let alive = true, frame = 0, lastSend = 0, lastFrame = performance.now(), local = { x: 0, z: 0, rotation: 0 }, room: any;
     let initialized = false, sequence = 0, lastAcknowledged = -1, jumpTime = -Infinity, pending: Move[] = [], unsent = { dx: 0, dz: 0 };
+    let visualOffset = { x: 0, z: 0 };
     let hiddenAt = document.hidden ? performance.now() : 0;
     let syncedManifest = manifestRef.current, syncedModels = modelsRef.current;
     const modelAbort = new AbortController();
@@ -225,7 +226,9 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
             if (!initialized) { local = { x: player.x, z: player.z, rotation: player.rotation }; initialized = true; }
             // Replay movement not yet acknowledged instead of snapping to a delayed server position.
             if (player.sequence !== undefined && player.sequence > lastAcknowledged) {
-              Object.assign(local, reconcilePosition(player, player.sequence, pending, unsent));
+              const corrected = reconcilePosition(player, player.sequence, pending, unsent);
+              visualOffset = correctionOffset(local, corrected, visualOffset);
+              Object.assign(local, corrected);
               pending = pending.filter((move) => move.sequence > player.sequence!); lastAcknowledged = player.sequence;
             }
           }
@@ -249,14 +252,17 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
         jumpRef.current = false;
         if (time - jumpTime >= 900) { jumpTime = time; room.send("jump"); }
       }
+      const decay = Math.exp(-12 * dt);
+      visualOffset.x *= decay; visualOffset.z *= decay;
+      const visual = { x: local.x + visualOffset.x, z: local.z + visualOffset.z, rotation: local.rotation };
       for (const [id, avatar] of avatarMeshes) {
-        const self = id === room?.sessionId, target = self ? local : avatar.userData.target;
+        const self = id === room?.sessionId, target = self ? visual : avatar.userData.target;
         const previousX = avatar.position.x, previousZ = avatar.position.z;
         const blend = self ? 1 : 1 - Math.exp(-16 * dt);
         avatar.position.x += (target.x - avatar.position.x) * blend; avatar.position.z += (target.z - avatar.position.z) * blend;
         avatar.rotation.y += Math.atan2(Math.sin(target.rotation - avatar.rotation.y), Math.cos(target.rotation - avatar.rotation.y)) * blend;
         const height = jumpHeight((time - (self ? jumpTime : avatar.userData.jumpTime)) / 1000); avatar.position.y = height;
-        const speed = Math.hypot(avatar.position.x - previousX, avatar.position.z - previousZ) / Math.max(dt, 0.001);
+        const speed = (self ? Math.hypot(step.dx, step.dz) : Math.hypot(avatar.position.x - previousX, avatar.position.z - previousZ)) / Math.max(dt, 0.001);
         avatar.userData.walking += (Math.min(1, speed / 4) - avatar.userData.walking) * (1 - Math.exp(-15 * dt));
         avatar.userData.walkPhase += Math.min(speed, 5) * dt * 2.4;
         animateAvatarCharacter(avatar.userData.character, avatar.userData.walkPhase, avatar.userData.walking, height > 0);
@@ -269,7 +275,7 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
         }
         unsent = { dx: 0, dz: 0 }; lastSend = time;
       }
-      const distance = 8 + cameraPitch * 10; camera.position.set(local.x + Math.sin(yaw) * distance, 2 + cameraPitch * 10, local.z + Math.cos(yaw) * distance); camera.lookAt(local.x, 1.2, local.z);
+      const distance = 8 + cameraPitch * 10; camera.position.set(visual.x + Math.sin(yaw) * distance, 2 + cameraPitch * 10, visual.z + Math.cos(yaw) * distance); camera.lookAt(visual.x, 1.2, visual.z);
       renderer.render(scene, camera);
     };
     const onVisibilityChange = () => {
