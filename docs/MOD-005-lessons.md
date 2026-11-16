@@ -24,6 +24,8 @@ Teachers create reusable lesson pages with ordered text, image, and YouTube bloc
 - Public routes expose only published content. Public image routes require the image UUID to appear in the current published blocks or custom-code image manifest. Teacher image routes require lesson ownership.
 - These pages are public to anyone with the link. They have no listing directory and student reading progress is not recorded. Existing attendance is tracked only for authenticated students using the shared attendance component.
 - Teachers may attach quiz buttons to draft and published snapshots. Their label and quiz ID publish atomically with the lesson, and buttons render in the parent reader outside a custom-code iframe. Opening a button requires student Google sign-in and an eligible classroom round; see MOD-006.
+- Teachers can move a lesson to trash and restore it with the same public link and publication state. A trashed lesson and its images are unavailable publicly; its saved drafts and referenced images remain stored. Permanent deletion requires the exact title and removes its images, but does not delete linked quizzes. Trashed quiz buttons stay in lesson snapshots and are hidden until quiz restoration; permanent quiz deletion removes those buttons and bumps affected lesson revisions.
+- The teacher library has an explicit trash view. Trash does not expire automatically; retained image metadata continues counting toward shared storage.
 - Published source is public and visible to readers; never include secrets.
 
 ## Dependencies and consumers
@@ -41,7 +43,7 @@ Sandbox document and image markers: web/src/code-lesson.ts
 Attendance on public lesson pages: web/src/StudentAttendance.tsx
 Teacher and public APIs, including draft/published quiz links: src/routes/lesson-pages.ts
 Storage quota, startup recovery, and image cleanup: src/file-storage.ts
-Migrations: src/db/migrations/010_lesson_pages.sql, src/db/migrations/011_lesson_code.sql, src/db/migrations/012_quiz_builder.sql
+Migrations: src/db/migrations/010_lesson_pages.sql, src/db/migrations/011_lesson_code.sql, src/db/migrations/012_quiz_builder.sql, src/db/migrations/013_recoverable_trash.sql
 Frame policy: src/content-security-policy.ts, src/server.ts
 Routing and deployment: src/server.ts, web/src/App.tsx
 Tests: src/student-workflow.test.ts (isolated PostgreSQL integration), web/src/code-lesson.test.ts
@@ -56,6 +58,7 @@ YouTube URL validation: web/src/youtube-url.ts, web/src/youtube-url.test.ts
 - Lessons depend on YouTube playback and network access. Embedded videos may be unavailable if blocked by the video owner, Google Workspace, or school network.
 - Lesson quiz buttons point to existing quiz rounds but do not embed question content; see MOD-006.
 - Lesson completion records and video uploads are not implemented.
+- Permanent deletion cannot be undone. Failed filesystem cleanup is reported and reconciled at startup.
 
 ## Open questions
 

@@ -16,8 +16,14 @@ const contentBody = t.Object({ title: t.String({ minLength: 1, maxLength: 120 })
 const revisionBody = t.Object({ expectedRevision: t.Integer({ minimum: 0 }) });
 
 async function ownedQuiz(id: string, ownerId: string, tx: postgres.ISql = sql) {
-  const [quiz] = await tx`SELECT id FROM classroom.quizzes WHERE id = ${id} AND owner_id = ${ownerId}`;
+  const [quiz] = await tx`SELECT id FROM classroom.quizzes WHERE id = ${id} AND owner_id = ${ownerId} AND trashed_at IS NULL`;
   if (!quiz) throw new HttpError(404, "ไม่พบแบบทดสอบนี้");
+}
+
+async function quizTrashFailure(id: string, ownerId: string): Promise<never> {
+  const [quiz] = await sql`SELECT id FROM classroom.quizzes WHERE id = ${id} AND owner_id = ${ownerId}`;
+  if (!quiz) throw new HttpError(404, "ไม่พบแบบทดสอบในถังขยะนี้");
+  throw new HttpError(409, "แบบทดสอบถูกเปลี่ยนจากอีกหน้าต่าง กรุณาโหลดรายการใหม่");
 }
 
 async function validateImages(quizId: string, ownerId: string, content: QuizContent, tx: postgres.ISql) {
@@ -43,7 +49,8 @@ async function classOwned(classroomId: string, ownerId: string, tx: postgres.ISq
 
 async function finalizeExpired(tx: postgres.ISql, roundId: string) {
   const [round] = await tx<{ status: string; content: QuizContent }[]>`
-    SELECT status, content_snapshot AS content FROM classroom.classroom_quizzes WHERE id = ${roundId} FOR UPDATE`;
+    SELECT r.status, r.content_snapshot AS content FROM classroom.classroom_quizzes r
+      JOIN classroom.quizzes q ON q.id = r.quiz_id AND q.trashed_at IS NULL WHERE r.id = ${roundId} FOR UPDATE OF r`;
   if (!round || round.status !== "open") return;
   const expired = await tx<{ id: string; answers: QuizAnswers }[]>`
     SELECT id, answers FROM classroom.quiz_attempts WHERE classroom_quiz_id = ${roundId}
@@ -58,7 +65,8 @@ async function finalizeExpired(tx: postgres.ISql, roundId: string) {
 async function finishRound(tx: postgres.ISql, roundId: string) {
   await tx`SELECT pg_advisory_xact_lock(hashtextextended(${"quiz-round:" + roundId}, 0))`;
   const [round] = await tx<{ status: string; content: QuizContent }[]>`
-    SELECT status, content_snapshot AS content FROM classroom.classroom_quizzes WHERE id = ${roundId} FOR UPDATE`;
+    SELECT r.status, r.content_snapshot AS content FROM classroom.classroom_quizzes r
+      JOIN classroom.quizzes q ON q.id = r.quiz_id AND q.trashed_at IS NULL WHERE r.id = ${roundId} FOR UPDATE OF r`;
   if (!round) throw new HttpError(404, "ไม่พบรอบแบบทดสอบนี้");
   if (round.status === "closed") return;
   if (round.status !== "open") throw new HttpError(409, "เปิดรอบแบบทดสอบก่อนปิดรอบ");
@@ -76,10 +84,98 @@ async function finishRound(tx: postgres.ISql, roundId: string) {
 export const quizRoutes = new Elysia({ prefix: "/api" })
   .get("/quizzes", async ({ request }) => {
     const actor = await requireActor(request);
-    return sql`SELECT id, title, draft_revision AS "draftRevision", published_title AS "publishedTitle",
-      published_at AS "publishedAt", updated_at AS "updatedAt"
-      FROM classroom.quizzes WHERE owner_id = ${actor.id} ORDER BY updated_at DESC`;
+    const trashed = new URL(request.url).searchParams.get("trashed") === "true";
+    return sql`SELECT q.id, q.title, q.draft_revision AS "draftRevision", q.published_title AS "publishedTitle",
+      q.published_at AS "publishedAt", q.updated_at AS "updatedAt",
+      (SELECT COUNT(*)::int FROM classroom.classroom_quizzes r WHERE r.quiz_id = q.id) AS "roundCount",
+      (SELECT COUNT(*)::int FROM classroom.quiz_attempts a JOIN classroom.classroom_quizzes r ON r.id = a.classroom_quiz_id WHERE r.quiz_id = q.id) AS "attemptCount"
+      FROM classroom.quizzes q WHERE q.owner_id = ${actor.id} AND (q.trashed_at IS NOT NULL) = ${trashed} ORDER BY q.updated_at DESC`;
   })
+  .post("/quizzes/:id/trash", async ({ params, body, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireActor(request);
+    const trashed = await sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(870010022)`;
+      const [quiz] = await tx`SELECT id FROM classroom.quizzes WHERE id = ${params.id} AND owner_id = ${actor.id}
+        AND trashed_at IS NULL AND draft_revision = ${body.expectedRevision} FOR UPDATE`;
+      if (!quiz) return false;
+      const rounds = await tx<{ id: string }[]>`SELECT id FROM classroom.classroom_quizzes WHERE quiz_id = ${params.id} ORDER BY id`;
+      for (const round of rounds) await tx`SELECT pg_advisory_xact_lock(hashtextextended(${"quiz-round:" + round.id}, 0))`;
+      const openRounds = await tx<{ id: string }[]>`SELECT id FROM classroom.classroom_quizzes WHERE quiz_id = ${params.id} AND status = 'open' ORDER BY id`;
+      for (const round of openRounds) await finishRound(tx, round.id);
+      await tx`UPDATE classroom.quizzes SET trashed_at = NOW(), draft_revision = draft_revision + 1, updated_at = NOW()
+        WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NULL`;
+      return true;
+    });
+    if (!trashed) await quizTrashFailure(params.id, actor.id);
+    return { ok: true };
+  }, { params: t.Object({ id: t.String({ format: "uuid" }) }), body: revisionBody })
+  .post("/quizzes/:id/restore", async ({ params, body, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireActor(request);
+    const [quiz] = await sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(870010022)`;
+      return tx`UPDATE classroom.quizzes SET trashed_at = NULL, draft_revision = draft_revision + 1, updated_at = NOW()
+        WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NOT NULL
+          AND draft_revision = ${body.expectedRevision} RETURNING id`;
+    });
+    if (!quiz) await quizTrashFailure(params.id, actor.id);
+    return { ok: true };
+  }, { params: t.Object({ id: t.String({ format: "uuid" }) }), body: revisionBody })
+  .delete("/quizzes/:id", async ({ params, body, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireActor(request);
+    const quizId = params.id.toLowerCase();
+    const staged: { id: string; path: string; tombstone: string }[] = [];
+    try {
+      await sql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(870010022)`;
+        const [quiz] = await tx<{ title: string; revision: number }[]>`SELECT title, draft_revision AS revision FROM classroom.quizzes
+          WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NOT NULL FOR UPDATE`;
+        if (!quiz) throw new HttpError(404, "ไม่พบแบบทดสอบในถังขยะนี้");
+        if (quiz.revision !== body.expectedRevision) throw new HttpError(409, "แบบทดสอบถูกเปลี่ยนจากอีกหน้าต่าง กรุณาโหลดรายการใหม่");
+        if (body.confirmTitle !== quiz.title) throw new HttpError(422, "ชื่อแบบทดสอบที่ยืนยันไม่ตรงกัน");
+        const rounds = await tx<{ id: string }[]>`SELECT id FROM classroom.classroom_quizzes WHERE quiz_id = ${params.id} ORDER BY id`;
+        for (const round of rounds) await tx`SELECT pg_advisory_xact_lock(hashtextextended(${"quiz-round:" + round.id}, 0))`;
+        const images = await tx<{ id: string; storageName: string }[]>`SELECT id, storage_name AS "storageName" FROM classroom.quiz_images WHERE quiz_id = ${params.id} FOR UPDATE`;
+        for (const image of images) {
+          const path = resolve(uploadRoot(), image.storageName); const tombstone = path + ".deleting";
+          try { await rename(path, tombstone); staged.push({ id: image.id, path, tombstone }); }
+          catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; }
+        }
+        const lessons = await tx<{ id: string; draftLinks: { quizId: string; label: string }[]; publishedLinks: { quizId: string; label: string }[] | null }[]>`
+          SELECT id, draft_quiz_links AS "draftLinks", published_quiz_links AS "publishedLinks" FROM classroom.lesson_pages
+          WHERE owner_id = ${actor.id} FOR UPDATE`;
+        for (const lesson of lessons) {
+          const draftLinks = lesson.draftLinks.filter((link) => link.quizId !== quizId);
+          const publishedLinks = lesson.publishedLinks?.filter((link) => link.quizId !== quizId) ?? null;
+          const draftChanged = draftLinks.length !== lesson.draftLinks.length;
+          const publishedChanged = (publishedLinks?.length ?? 0) !== (lesson.publishedLinks?.length ?? 0);
+          if (!draftChanged && !publishedChanged) continue;
+          await tx`UPDATE classroom.lesson_pages SET draft_quiz_links = ${sql.json(draftLinks)},
+            draft_revision = draft_revision + 1,
+            published_quiz_links = ${publishedLinks === null ? null : sql.json(publishedLinks)},
+            published_revision = CASE WHEN ${publishedChanged} AND published_revision IS NOT NULL THEN published_revision + 1 ELSE published_revision END,
+            updated_at = NOW() WHERE id = ${lesson.id}`;
+        }
+        await tx`DELETE FROM classroom.classroom_quizzes WHERE quiz_id = ${params.id}`;
+        await tx`DELETE FROM classroom.quizzes WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NOT NULL`;
+      });
+    } catch (error) {
+      for (const image of staged) {
+        try {
+          const [record] = await sql`SELECT id FROM classroom.quiz_images WHERE id = ${image.id}`;
+          if (record) await rename(image.tombstone, image.path).catch(() => {});
+          else await rm(image.tombstone, { force: true }).catch(() => {});
+        } catch { /* Startup reconciliation resolves uncertain commits. */ }
+      }
+      throw error;
+    }
+    let cleanupPending = false;
+    for (const image of staged) if (await rm(image.tombstone, { force: true }).then(() => false, () => true)) cleanupPending = true;
+    void cleanupUnusedLessonImages().catch(() => {});
+    return { ok: true, cleanupPending };
+  }, { params: t.Object({ id: t.String({ format: "uuid" }) }), body: t.Object({ expectedRevision: t.Integer({ minimum: 0 }), confirmTitle: t.String({ minLength: 1, maxLength: 120 }) }) })
   .post("/quizzes", async ({ body, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
@@ -107,7 +203,7 @@ export const quizRoutes = new Elysia({ prefix: "/api" })
     const actor = await requireActor(request);
     const [quiz] = await sql`SELECT id, title, draft_content AS content, draft_revision AS revision,
       published_title AS "publishedTitle", published_at AS "publishedAt"
-      FROM classroom.quizzes WHERE id = ${params.id} AND owner_id = ${actor.id}`;
+      FROM classroom.quizzes WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NULL`;
     if (!quiz) throw new HttpError(404, "ไม่พบแบบทดสอบนี้");
     return quiz;
   }, { params: t.Object({ id: t.String({ format: "uuid" }) }) })
@@ -118,7 +214,7 @@ export const quizRoutes = new Elysia({ prefix: "/api" })
     const [quiz] = await sql.begin(async (tx) => {
       await tx`SELECT pg_advisory_xact_lock(870010022)`;
       const [current] = await tx`SELECT id FROM classroom.quizzes WHERE id = ${params.id} AND owner_id = ${actor.id}
-        AND draft_revision = ${body.expectedRevision} FOR UPDATE`;
+        AND trashed_at IS NULL AND draft_revision = ${body.expectedRevision} FOR UPDATE`;
       if (!current) return [];
       await validateImages(params.id, actor.id, content, tx);
       return tx`UPDATE classroom.quizzes SET title = ${cleanText(body.title, 120)}, draft_content = ${sql.json(content)},
@@ -139,7 +235,7 @@ export const quizRoutes = new Elysia({ prefix: "/api" })
     const [quiz] = await sql.begin(async (tx) => {
       await tx`SELECT pg_advisory_xact_lock(870010022)`;
       const [current] = await tx`SELECT id FROM classroom.quizzes WHERE id = ${params.id} AND owner_id = ${actor.id}
-        AND draft_revision = ${body.expectedRevision} FOR UPDATE`;
+        AND trashed_at IS NULL AND draft_revision = ${body.expectedRevision} FOR UPDATE`;
       if (!current) return [];
       await validateImages(params.id, actor.id, content, tx);
       return tx`UPDATE classroom.quizzes SET title = ${title}, draft_content = ${sql.json(content)},
@@ -158,7 +254,7 @@ export const quizRoutes = new Elysia({ prefix: "/api" })
     const actor = await requireActor(request);
     const [quiz] = await sql`UPDATE classroom.quizzes SET published_title = NULL, published_content = NULL,
       published_revision = NULL, published_at = NULL, updated_at = NOW()
-      WHERE id = ${params.id} AND owner_id = ${actor.id} AND draft_revision = ${body.expectedRevision} RETURNING id`;
+      WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NULL AND draft_revision = ${body.expectedRevision} RETURNING id`;
     if (!quiz) { await ownedQuiz(params.id, actor.id); throw new HttpError(409, "แบบทดสอบถูกแก้ไขอีกหน้าต่าง กรุณาโหลดใหม่"); }
     void cleanupUnusedLessonImages().catch(() => {});
     return { ok: true };
@@ -210,7 +306,7 @@ export const quizRoutes = new Elysia({ prefix: "/api" })
     const actor = await requireActor(request);
     const [image] = await sql`SELECT i.storage_name AS "storageName" FROM classroom.quiz_images i
       JOIN classroom.quizzes q ON q.id = i.quiz_id
-      WHERE q.id = ${params.id} AND i.id = ${params.imageId} AND q.owner_id = ${actor.id}`;
+      WHERE q.id = ${params.id} AND i.id = ${params.imageId} AND q.owner_id = ${actor.id} AND q.trashed_at IS NULL`;
     if (!image) throw new HttpError(404, "ไม่พบภาพนี้");
     const path = await storedFilePath(image.storageName);
     return new Response(Bun.file(path), { headers: { "content-type": "image/webp", "cache-control": "private, no-store", "x-content-type-options": "nosniff" } });
@@ -222,28 +318,36 @@ export const quizRoutes = new Elysia({ prefix: "/api" })
       r.opened_at AS "openedAt", r.closed_at AS "closedAt", r.solutions_released_at AS "solutionsReleasedAt",
       r.created_at AS "createdAt", (SELECT COUNT(*)::int FROM classroom.quiz_attempts a WHERE a.classroom_quiz_id = r.id) AS "startedCount",
       (SELECT COUNT(*)::int FROM classroom.quiz_attempts a WHERE a.classroom_quiz_id = r.id AND a.finished_at IS NOT NULL) AS "finishedCount"
-      FROM classroom.classroom_quizzes r WHERE r.classroom_id = ${params.classroomId} ORDER BY r.created_at DESC`;
+      FROM classroom.classroom_quizzes r JOIN classroom.quizzes q ON q.id = r.quiz_id AND q.trashed_at IS NULL
+      WHERE r.classroom_id = ${params.classroomId} ORDER BY r.created_at DESC`;
   }, { params: t.Object({ classroomId: t.String({ format: "uuid" }) }) })
   .post("/classrooms/:classroomId/quizzes", async ({ params, body, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
     await classOwned(params.classroomId, actor.id);
-    const [quiz] = await sql`SELECT published_title AS title, published_content AS content FROM classroom.quizzes
-      WHERE id = ${body.quizId} AND owner_id = ${actor.id} AND published_content IS NOT NULL`;
-    if (!quiz) throw new HttpError(422, "เผยแพร่แบบทดสอบก่อนนำไปใช้กับห้องเรียน");
-    const [round] = await sql`INSERT INTO classroom.classroom_quizzes
-      (classroom_id, owner_id, quiz_id, title, content_snapshot, duration_minutes)
-      VALUES (${params.classroomId}, ${actor.id}, ${body.quizId}, ${quiz.title}, ${sql.json(quiz.content)}, ${body.durationMinutes ?? null})
-      RETURNING id, quiz_id AS "quizId", title, status, duration_minutes AS "durationMinutes", created_at AS "createdAt"`;
+    const [round] = await sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(870010022)`;
+      const [quiz] = await tx`SELECT published_title AS title, published_content AS content FROM classroom.quizzes
+        WHERE id = ${body.quizId} AND owner_id = ${actor.id} AND trashed_at IS NULL AND published_content IS NOT NULL FOR SHARE`;
+      if (!quiz) throw new HttpError(422, "เผยแพร่แบบทดสอบก่อนนำไปใช้กับห้องเรียน");
+      return tx`INSERT INTO classroom.classroom_quizzes
+        (classroom_id, owner_id, quiz_id, title, content_snapshot, duration_minutes)
+        VALUES (${params.classroomId}, ${actor.id}, ${body.quizId}, ${quiz.title}, ${sql.json(quiz.content)}, ${body.durationMinutes ?? null})
+        RETURNING id, quiz_id AS "quizId", title, status, duration_minutes AS "durationMinutes", created_at AS "createdAt"`;
+    });
     return round;
   }, { params: t.Object({ classroomId: t.String({ format: "uuid" }) }), body: t.Object({ quizId: t.String({ format: "uuid" }), durationMinutes: t.Optional(t.Nullable(t.Integer({ minimum: 1, maximum: 240 }))) }) })
   .post("/classrooms/:classroomId/quizzes/:roundId/open", async ({ params, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
     await classOwned(params.classroomId, actor.id);
-    const [round] = await sql`UPDATE classroom.classroom_quizzes SET status = 'open', opened_at = NOW()
-      WHERE id = ${params.roundId} AND classroom_id = ${params.classroomId} AND owner_id = ${actor.id} AND status = 'awaiting_open'
-      RETURNING id`;
+    const [round] = await sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${"quiz-round:" + params.roundId}, 0))`;
+      return tx`UPDATE classroom.classroom_quizzes r SET status = 'open', opened_at = NOW()
+        WHERE r.id = ${params.roundId} AND r.classroom_id = ${params.classroomId} AND r.owner_id = ${actor.id} AND r.status = 'awaiting_open'
+          AND EXISTS (SELECT 1 FROM classroom.quizzes q WHERE q.id = r.quiz_id AND q.trashed_at IS NULL)
+        RETURNING id`;
+    });
     if (!round) throw new HttpError(409, "รอบนี้เปิดแล้วหรือปิดไปแล้ว");
     return { ok: true };
   }, { params: t.Object({ classroomId: t.String({ format: "uuid" }), roundId: t.String({ format: "uuid" }) }) })
@@ -251,8 +355,8 @@ export const quizRoutes = new Elysia({ prefix: "/api" })
     checkRequestOrigin(request);
     const actor = await requireActor(request);
     await classOwned(params.classroomId, actor.id);
-    const [round] = await sql`SELECT id FROM classroom.classroom_quizzes WHERE id = ${params.roundId}
-      AND classroom_id = ${params.classroomId} AND owner_id = ${actor.id}`;
+    const [round] = await sql`SELECT r.id FROM classroom.classroom_quizzes r JOIN classroom.quizzes q ON q.id = r.quiz_id
+      WHERE r.id = ${params.roundId} AND r.classroom_id = ${params.classroomId} AND r.owner_id = ${actor.id} AND q.trashed_at IS NULL`;
     if (!round) throw new HttpError(404, "ไม่พบรอบแบบทดสอบนี้");
     await sql.begin((tx) => finishRound(tx, params.roundId));
     return { ok: true };
@@ -261,33 +365,38 @@ export const quizRoutes = new Elysia({ prefix: "/api" })
     checkRequestOrigin(request);
     const actor = await requireActor(request);
     await classOwned(params.classroomId, actor.id);
-    const [round] = await sql`UPDATE classroom.classroom_quizzes SET solutions_released_at = COALESCE(solutions_released_at, NOW())
-      WHERE id = ${params.roundId} AND classroom_id = ${params.classroomId} AND owner_id = ${actor.id} AND status = 'closed' RETURNING id`;
+    const [round] = await sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${"quiz-round:" + params.roundId}, 0))`;
+      return tx`UPDATE classroom.classroom_quizzes r SET solutions_released_at = COALESCE(solutions_released_at, NOW())
+        WHERE r.id = ${params.roundId} AND r.classroom_id = ${params.classroomId} AND r.owner_id = ${actor.id} AND r.status = 'closed'
+          AND EXISTS (SELECT 1 FROM classroom.quizzes q WHERE q.id = r.quiz_id AND q.trashed_at IS NULL) RETURNING id`;
+    });
     if (!round) throw new HttpError(409, "ปิดรอบแบบทดสอบก่อนเผยแพร่เฉลย");
     return { ok: true };
   }, { params: t.Object({ classroomId: t.String({ format: "uuid" }), roundId: t.String({ format: "uuid" }) }) })
   .get("/classrooms/:classroomId/quizzes/:roundId/results", async ({ params, request }) => {
     const actor = await requireActor(request);
     await classOwned(params.classroomId, actor.id);
-    const [round] = await sql.begin(async (tx) => {
+    const result = await sql.begin(async (tx) => {
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${"quiz-round:" + params.roundId}, 0))`;
-      const [owned] = await tx<{ id: string }[]>`SELECT id FROM classroom.classroom_quizzes
-        WHERE id = ${params.roundId} AND classroom_id = ${params.classroomId} AND owner_id = ${actor.id}`;
-      if (!owned) return [];
+      const [owned] = await tx<{ id: string }[]>`SELECT r.id FROM classroom.classroom_quizzes r JOIN classroom.quizzes q ON q.id = r.quiz_id
+        WHERE r.id = ${params.roundId} AND r.classroom_id = ${params.classroomId} AND r.owner_id = ${actor.id} AND q.trashed_at IS NULL`;
+      if (!owned) return null;
       await finalizeExpired(tx, params.roundId);
-      return tx`SELECT id, quiz_id AS "quizId", title, content_snapshot AS content, status,
+      const [round] = await tx`SELECT r.id, r.quiz_id AS "quizId", r.title, r.content_snapshot AS content, r.status,
         duration_minutes AS "durationMinutes", opened_at AS "openedAt", closed_at AS "closedAt",
-        solutions_released_at AS "solutionsReleasedAt" FROM classroom.classroom_quizzes WHERE id = ${params.roundId}`;
+        solutions_released_at AS "solutionsReleasedAt" FROM classroom.classroom_quizzes r WHERE r.id = ${params.roundId}`;
+      const attempts = await tx`SELECT a.id, a.student_id AS "studentId", s.student_number AS "studentNumber",
+        s.display_name AS "displayName", a.answers, a.revision, a.started_at AS "startedAt", a.expires_at AS "expiresAt",
+        a.finished_at AS "finishedAt", a.finish_reason AS "finishReason", a.score::text AS score
+        FROM classroom.students s LEFT JOIN classroom.quiz_attempts a
+          ON a.student_id = s.id AND a.classroom_id = s.classroom_id AND a.classroom_quiz_id = ${params.roundId}
+        WHERE s.classroom_id = ${params.classroomId}
+        ORDER BY s.archived_at NULLS FIRST, s.student_number NULLS LAST, s.display_name, s.id`;
+      return { round, attempts };
     });
-    if (!round) throw new HttpError(404, "ไม่พบรอบแบบทดสอบนี้");
-    const attempts = await sql`SELECT a.id, a.student_id AS "studentId", s.student_number AS "studentNumber",
-      s.display_name AS "displayName", a.answers, a.revision, a.started_at AS "startedAt", a.expires_at AS "expiresAt",
-      a.finished_at AS "finishedAt", a.finish_reason AS "finishReason", a.score::text AS score
-      FROM classroom.students s LEFT JOIN classroom.quiz_attempts a
-        ON a.student_id = s.id AND a.classroom_id = s.classroom_id AND a.classroom_quiz_id = ${params.roundId}
-      WHERE s.classroom_id = ${params.classroomId}
-      ORDER BY s.archived_at NULLS FIRST, s.student_number NULLS LAST, s.display_name, s.id`;
-    return { round, attempts };
+    if (!result) throw new HttpError(404, "ไม่พบรอบแบบทดสอบนี้");
+    return result;
   }, { params: t.Object({ classroomId: t.String({ format: "uuid" }), roundId: t.String({ format: "uuid" }) }) });
 
 export const studentQuizRoutes = new Elysia({ prefix: "/api/student" })
@@ -305,8 +414,9 @@ export const studentQuizRoutes = new Elysia({ prefix: "/api/student" })
     const attemptId = await sql.begin(async (tx) => {
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${"quiz-round:" + params.roundId}, 0))`;
       const [round] = await tx<{ id: string; classroomId: string; status: string; durationMinutes: number | null }[]>`
-        SELECT id, classroom_id AS "classroomId", status, duration_minutes AS "durationMinutes"
-        FROM classroom.classroom_quizzes WHERE id = ${params.roundId} FOR UPDATE`;
+        SELECT r.id, r.classroom_id AS "classroomId", r.status, r.duration_minutes AS "durationMinutes"
+        FROM classroom.classroom_quizzes r JOIN classroom.quizzes q ON q.id = r.quiz_id AND q.trashed_at IS NULL
+        WHERE r.id = ${params.roundId} FOR UPDATE OF r`;
       if (!round) throw new HttpError(404, "ไม่พบรอบแบบทดสอบนี้");
       const [membership] = await tx<{ id: string }[]>`SELECT s.id FROM classroom.students s JOIN classroom.classrooms c ON c.id = s.classroom_id
         WHERE s.account_id = ${actor.id} AND s.classroom_id = ${round.classroomId} AND s.archived_at IS NULL AND c.archived_at IS NULL FOR SHARE OF s, c`;
@@ -366,6 +476,7 @@ export const studentQuizRoutes = new Elysia({ prefix: "/api/student" })
       JOIN classroom.students s ON s.id = a.student_id AND s.classroom_id = a.classroom_id
       JOIN classroom.classrooms c ON c.id = s.classroom_id
       JOIN classroom.classroom_quizzes r ON r.id = a.classroom_quiz_id
+      JOIN classroom.quizzes q ON q.id = r.quiz_id AND q.trashed_at IS NULL
       JOIN classroom.quiz_images i ON i.id = ${params.imageId} AND i.quiz_id = r.quiz_id
       WHERE a.id = ${params.attemptId} AND s.account_id = ${actor.id} AND s.archived_at IS NULL AND c.archived_at IS NULL
         AND EXISTS (SELECT 1 FROM jsonb_array_elements(r.content_snapshot->'questions') q
@@ -379,6 +490,8 @@ async function lockStudentAttempt(tx: postgres.ISql, attemptId: string, accountI
   const [identity] = await tx<{ roundId: string }[]>`SELECT a.classroom_quiz_id AS "roundId" FROM classroom.quiz_attempts a
     JOIN classroom.students s ON s.id = a.student_id AND s.classroom_id = a.classroom_id
     JOIN classroom.classrooms c ON c.id = s.classroom_id
+    JOIN classroom.classroom_quizzes r ON r.id = a.classroom_quiz_id
+    JOIN classroom.quizzes q ON q.id = r.quiz_id AND q.trashed_at IS NULL
     WHERE a.id = ${attemptId} AND s.account_id = ${accountId} AND s.archived_at IS NULL AND c.archived_at IS NULL
     FOR SHARE OF s, c`;
   if (!identity) throw new HttpError(404, "ไม่พบความพยายามนี้");
@@ -388,6 +501,7 @@ async function lockStudentAttempt(tx: postgres.ISql, attemptId: string, accountI
       a.answers, r.content_snapshot AS content, r.status, r.solutions_released_at AS "solutionsReleasedAt",
       a.score::text AS score, a.expires_at AS "expiresAt", a.started_at AS "startedAt"
     FROM classroom.quiz_attempts a JOIN classroom.classroom_quizzes r ON r.id = a.classroom_quiz_id
+      JOIN classroom.quizzes q ON q.id = r.quiz_id AND q.trashed_at IS NULL
     WHERE a.id = ${attemptId} FOR UPDATE OF a, r`;
   if (!attempt) throw new HttpError(404, "ไม่พบความพยายามนี้");
   await finalizeExpired(tx, attempt.roundId);
@@ -395,7 +509,8 @@ async function lockStudentAttempt(tx: postgres.ISql, attemptId: string, accountI
     SELECT a.id, a.classroom_quiz_id AS "roundId", a.student_id AS "studentId", a.revision, a.finished_at AS "finishedAt",
       a.answers, r.content_snapshot AS content, r.status, r.solutions_released_at AS "solutionsReleasedAt",
       a.score::text AS score, a.expires_at AS "expiresAt", a.started_at AS "startedAt"
-    FROM classroom.quiz_attempts a JOIN classroom.classroom_quizzes r ON r.id = a.classroom_quiz_id WHERE a.id = ${attemptId}`;
+    FROM classroom.quiz_attempts a JOIN classroom.classroom_quizzes r ON r.id = a.classroom_quiz_id
+      JOIN classroom.quizzes q ON q.id = r.quiz_id AND q.trashed_at IS NULL WHERE a.id = ${attemptId}`;
   return current;
 }
 
@@ -406,7 +521,8 @@ async function getStudentAttempt(attemptId: string, accountId: string) {
       SELECT a.id, a.classroom_quiz_id AS "roundId", a.revision, a.finished_at AS "finishedAt", a.answers,
         r.content_snapshot AS content, r.status, r.solutions_released_at AS "solutionsReleasedAt",
         a.score::text AS score, a.expires_at AS "expiresAt", a.started_at AS "startedAt", r.title
-      FROM classroom.quiz_attempts a JOIN classroom.classroom_quizzes r ON r.id = a.classroom_quiz_id WHERE a.id = ${attemptId}`;
+      FROM classroom.quiz_attempts a JOIN classroom.classroom_quizzes r ON r.id = a.classroom_quiz_id
+        JOIN classroom.quizzes q ON q.id = r.quiz_id AND q.trashed_at IS NULL WHERE a.id = ${attemptId}`;
     return fresh;
   });
   const released = attempt.status === "closed" && attempt.solutionsReleasedAt !== null;
@@ -426,19 +542,21 @@ async function studentRoundList(accountId: string, quizId?: string) {
     const rounds = await tx<{ roundId: string; quizId: string; classroomId: string; classroomName: string; title: string; status: string; durationMinutes: number | null; attemptId: string | null; finishedAt: string | null; score: string | null }[]>`
       SELECT r.id AS "roundId", r.quiz_id AS "quizId", r.classroom_id AS "classroomId", c.name AS "classroomName",
         r.title, r.status, r.duration_minutes AS "durationMinutes", a.id AS "attemptId", a.finished_at AS "finishedAt", a.score::text AS score
-      FROM classroom.classroom_quizzes r JOIN classroom.classrooms c ON c.id = r.classroom_id
+      FROM classroom.classroom_quizzes r JOIN classroom.quizzes q ON q.id = r.quiz_id AND q.trashed_at IS NULL
+      JOIN classroom.classrooms c ON c.id = r.classroom_id
       JOIN classroom.students s ON s.classroom_id = c.id AND s.account_id = ${accountId}
       LEFT JOIN classroom.quiz_attempts a ON a.classroom_quiz_id = r.id AND a.student_id = s.id
       WHERE (${quizId ?? null}::uuid IS NULL OR r.quiz_id = ${quizId ?? null}::uuid)
         AND s.archived_at IS NULL AND c.archived_at IS NULL
-        AND (r.status <> 'closed' OR a.id IS NOT NULL) ORDER BY r.created_at DESC`;
+        AND (r.status <> 'closed' OR a.id IS NOT NULL) ORDER BY r.id`;
     for (const round of rounds) {
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${"quiz-round:" + round.roundId}, 0))`;
       await finalizeExpired(tx, round.roundId);
     }
     return tx`SELECT r.id AS "roundId", r.quiz_id AS "quizId", r.classroom_id AS "classroomId", c.name AS "classroomName",
         r.title, r.status, r.duration_minutes AS "durationMinutes", a.id AS "attemptId", a.finished_at AS "finishedAt", a.score::text AS score
-      FROM classroom.classroom_quizzes r JOIN classroom.classrooms c ON c.id = r.classroom_id
+      FROM classroom.classroom_quizzes r JOIN classroom.quizzes q ON q.id = r.quiz_id AND q.trashed_at IS NULL
+      JOIN classroom.classrooms c ON c.id = r.classroom_id
       JOIN classroom.students s ON s.classroom_id = c.id AND s.account_id = ${accountId}
       LEFT JOIN classroom.quiz_attempts a ON a.classroom_quiz_id = r.id AND a.student_id = s.id
       WHERE (${quizId ?? null}::uuid IS NULL OR r.quiz_id = ${quizId ?? null}::uuid)

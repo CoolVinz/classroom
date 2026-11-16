@@ -20,6 +20,8 @@ Teachers maintain a reusable quiz library and assign immutable copies to classro
 - Teachers may add quiz buttons to block or custom-code lessons. Buttons are rendered by the parent lesson page, remain outside the custom-code iframe, and retain their published label/reference snapshot.
 - Quiz pictures use the shared optimized WebP upload volume and shared quota. Students can request an image only after starting an authorized attempt and only when the round snapshot references it. Saved drafts, published quiz versions, and classroom snapshots retain their referenced images; unreferenced images are cleanup candidates after 24 hours.
 - Active roster membership is checked for student access. Archiving a membership revokes access. Permanent student removal cascades only that classroom's attempts; shared accounts and other class records remain.
+- Teachers can move quizzes to trash and restore them. Trash hides rounds, attempts, results, and quiz images from students and closes open rounds using the last saved answers. Restoration does not reopen those rounds. Permanent deletion requires the exact title, removes rounds, attempts, results, and images, and removes matching buttons from lesson snapshots while increasing affected lesson revisions. Permanent deletion is limited to trashed quizzes.
+- Quiz trash does not expire. Images referenced by trashed snapshots remain retained and count toward shared storage. The trash view reports affected round and attempt counts before permanent deletion.
 
 ## Dependencies and consumers
 
@@ -36,7 +38,7 @@ Content validation, scoring, privacy projection: src/quiz-core.ts, src/quiz-core
 AI quiz import/export format and validation: src/quiz-import.ts, src/quiz-import.test.ts, POST /api/quizzes/import
 Lesson draft/published quiz links: src/routes/lesson-pages.ts, web/src/LessonLibrary.tsx, web/src/PublicLessonPage.tsx
 Storage quotas, reconciliation, and image retention: src/file-storage.ts
-Schema: src/db/migrations/012_quiz_builder.sql
+Schema: src/db/migrations/012_quiz_builder.sql, src/db/migrations/013_recoverable_trash.sql
 App routing and Google login return: src/server.ts, web/src/App.tsx, src/routes/student-auth.ts
 PostgreSQL API coverage: src/student-workflow.test.ts (optional isolated database)
 ```
@@ -47,6 +49,7 @@ PostgreSQL API coverage: src/student-workflow.test.ts (optional isolated databas
 - Autosave requires a connection; offline changes are not credited if they did not reach the server before expiry or teacher closure.
 - Result changes are not synchronized live across open teacher/student screens; reloading fetches current state.
 - Quiz images and other uploads are stored on the app host and require off-server backups.
+- Permanent deletion has no undo. If image unlinking fails after records are deleted, startup reconciliation removes staged files.
 
 ## Open questions
 

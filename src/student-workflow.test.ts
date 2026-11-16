@@ -69,6 +69,7 @@ describe("student submission API", () => {
     const otherTeacherId = randomUUID();
     let deleteTriggerName = ""; let deleteFunctionName = ""; let deleteTriggerInstalled = false;
     let workingTriggerName = ""; let workingFunctionName = ""; let workingTriggerInstalled = false;
+    let trashTriggerName = ""; let trashFunctionName = ""; let trashTriggerInstalled = false;
     let peerAccountId: string | null = null;
     const accountEmail = "student-" + accountId.slice(0, 8) + "@banjan.ac.th";
     const peerEmail = "peer-" + accountId.slice(0, 8) + "@banjan.ac.th";
@@ -244,7 +245,80 @@ describe("student submission API", () => {
       expect(results.status).toBe(200);
       expect(await results.json()).toMatchObject({ round: { title: quizTitle, content: { questions: [{ prompt: "Which answer?" }] } } });
       expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomB}/quizzes/${secondRound.id}/open`, { method: "POST", headers: teacherHeaders }))).status).toBe(200);
-      expect((await app.handle(new Request(`http://localhost/api/student/quiz-rounds/${secondRound.id}/start`, { method: "POST", headers: studentHeaders }))).status).toBe(200);
+      const secondStartedResponse = await app.handle(new Request(`http://localhost/api/student/quiz-rounds/${secondRound.id}/start`, { method: "POST", headers: studentHeaders }));
+      expect(secondStartedResponse.status).toBe(200);
+      const secondStarted = await secondStartedResponse.json() as { id: string; revision: number };
+      expect((await app.handle(new Request(`http://localhost/api/student/quiz-attempts/${secondStarted.id}/answers`, {
+        method: "PUT", headers: { ...studentHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: 0, answers: { [questionId]: correctChoiceId } }),
+      }))).status).toBe(200);
+
+      const [quizBeforeTrash] = await sql<{ revision: number }[]>`SELECT draft_revision AS revision FROM classroom.quizzes WHERE id = ${createdQuizBody.id}`;
+      expect((await app.handle(new Request(`http://localhost/api/quizzes/${createdQuizBody.id}/trash`, {
+        method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: quizBeforeTrash.revision }),
+      }))).status).toBe(200);
+      const trashRevision = quizBeforeTrash.revision + 1;
+      expect((await app.handle(new Request(`http://localhost/api/quizzes/${createdQuizBody.id}`, { headers: teacherHeaders }))).status).toBe(404);
+      const hiddenRounds = await app.handle(new Request(`http://localhost/api/student/quizzes/${createdQuizBody.id}`, { headers: studentHeaders }));
+      expect(await hiddenRounds.json()).toEqual([]);
+      expect((await app.handle(new Request(`http://localhost/api/student/quiz-attempts/${started.id}`, { headers: studentHeaders }))).status).toBe(404);
+      expect((await app.handle(new Request(`http://localhost/api/student/quiz-attempts/${secondStarted.id}`, { headers: studentHeaders }))).status).toBe(404);
+      expect((await app.handle(new Request(`http://localhost/api/student/quiz-attempts/${secondStarted.id}/images/${quizImage.id}`, { headers: studentHeaders }))).status).toBe(404);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/quizzes/${firstRound.id}/results`, { headers: teacherHeaders }))).status).toBe(404);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/quizzes`, { headers: teacherHeaders })).then((response) => response.json()) as { quizId: string }[]).some((round) => round.quizId === createdQuizBody.id)).toBe(false);
+      expect(await sql`SELECT id FROM classroom.quiz_attempts WHERE id = ${secondStarted.id} AND score = 1 AND finish_reason = 'closed'`).toHaveLength(1);
+      expect((await app.handle(new Request("http://localhost/api/quizzes?trashed=true", { headers: teacherHeaders })).then((response) => response.json()) as { id: string; roundCount: number; attemptCount: number }[]).find((item) => item.id === createdQuizBody.id)).toMatchObject({ roundCount: 2, attemptCount: 2 });
+      expect((await app.handle(new Request(`http://localhost/api/public/lesson-pages/${quizLesson.id}`)).then((response) => response.json())).quizLinks).toEqual([]);
+      expect((await app.handle(new Request(`http://localhost/api/quizzes/${createdQuizBody.id}/restore`, {
+        method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: trashRevision - 1 }),
+      }))).status).toBe(409);
+      expect((await app.handle(new Request(`http://localhost/api/quizzes/${createdQuizBody.id}/restore`, {
+        method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: trashRevision }),
+      }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/quizzes`, { headers: teacherHeaders })).then((response) => response.json()) as { id: string; status: string }[]).filter((round) => [firstRound.id, secondRound.id].includes(round.id)).every((round) => round.status === "closed")).toBe(true);
+      expect(await (await app.handle(new Request(`http://localhost/api/public/lesson-pages/${quizLesson.id}`))).json()).toMatchObject({ quizLinks: [{ quizId: createdQuizBody.id, label: "Start quiz" }] });
+      expect((await app.handle(new Request(`http://localhost/api/quizzes/${createdQuizBody.id}`, { method: "DELETE", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: trashRevision + 1, confirmTitle: "wrong title" }) }))).status).toBe(404);
+
+      const linkedLessonResponse = await app.handle(new Request("http://localhost/api/lesson-pages", { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title: "Lesson deletion preserves quiz" }) }));
+      const linkedLesson = await linkedLessonResponse.json() as { id: string; revision: number };
+      lessonPageIds.push(linkedLesson.id);
+      const linkedBody = { title: "Lesson deletion preserves quiz", blocks: [], quizLinks: [{ quizId: createdQuizBody.id, label: "Open" }], expectedRevision: linkedLesson.revision };
+      expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${linkedLesson.id}/draft`, { method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify(linkedBody) }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${linkedLesson.id}/publish`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ ...linkedBody, expectedRevision: 1 }) }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${linkedLesson.id}/trash`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: 2 }) }))).status).toBe(200);
+      const deleteLessonResponse = await app.handle(new Request(`http://localhost/api/lesson-pages/${linkedLesson.id}`, { method: "DELETE", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: 3, confirmTitle: linkedBody.title }) }));
+      expect(deleteLessonResponse.status).toBe(200);
+      const deletedLessonRead = await app.handle(new Request(`http://localhost/api/lesson-pages/${linkedLesson.id}`, { headers: teacherHeaders }));
+      expect(deletedLessonRead.status).toBe(404);
+      const retainedQuizRead = await app.handle(new Request(`http://localhost/api/quizzes/${createdQuizBody.id}`, { headers: teacherHeaders }));
+      expect(retainedQuizRead.status).toBe(200);
+
+      expect((await app.handle(new Request(`http://localhost/api/quizzes/${createdQuizBody.id}/trash`, {
+        method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: trashRevision + 1 }),
+      }))).status).toBe(200);
+      const finalTrashRevision = trashRevision + 2;
+      const wrongPermanentDelete = await app.handle(new Request(`http://localhost/api/quizzes/${createdQuizBody.id}`, { method: "DELETE", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: finalTrashRevision, confirmTitle: "wrong title" }) }));
+      expect(wrongPermanentDelete.status).toBe(422);
+      expect(await Bun.file(resolve(uploadDir, quizImage.id)).exists()).toBe(true);
+      const triggerTag = randomUUID().replaceAll("-", "");
+      trashTriggerName = "quiz_delete_fail_" + triggerTag; trashFunctionName = trashTriggerName + "_fn";
+      await sql.unsafe(`CREATE FUNCTION classroom.${trashFunctionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced quiz delete failure'; END $$`).simple();
+      await sql.unsafe(`CREATE TRIGGER ${trashTriggerName} BEFORE DELETE ON classroom.quizzes FOR EACH ROW EXECUTE FUNCTION classroom.${trashFunctionName}()`).simple();
+      trashTriggerInstalled = true;
+      const rolledBackQuizDelete = await app.handle(new Request(`http://localhost/api/quizzes/${createdQuizBody.id}`, { method: "DELETE", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: finalTrashRevision, confirmTitle: quizTitle }) }));
+      expect(rolledBackQuizDelete.status).toBe(500);
+      expect(await Bun.file(resolve(uploadDir, quizImage.id)).exists()).toBe(true);
+      expect(await Bun.file(resolve(uploadDir, quizImage.id + ".deleting")).exists()).toBe(false);
+      await sql.unsafe(`DROP TRIGGER ${trashTriggerName} ON classroom.quizzes`).simple();
+      await sql.unsafe(`DROP FUNCTION classroom.${trashFunctionName}()`).simple();
+      trashTriggerInstalled = false;
+      const permanentDelete = await app.handle(new Request(`http://localhost/api/quizzes/${createdQuizBody.id}`, { method: "DELETE", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: finalTrashRevision, confirmTitle: quizTitle }) }));
+      expect(permanentDelete.status).toBe(200);
+      expect(await permanentDelete.json()).toEqual({ ok: true, cleanupPending: false });
+      expect(await Bun.file(resolve(uploadDir, quizImage.id)).exists()).toBe(false);
+      expect(await sql`SELECT id FROM classroom.quiz_attempts WHERE classroom_quiz_id IN (${firstRound.id}, ${secondRound.id})`).toHaveLength(0);
+      expect(await sql`SELECT id FROM classroom.classroom_quizzes WHERE id IN (${firstRound.id}, ${secondRound.id})`).toHaveLength(0);
+      expect(await sql`SELECT id FROM classroom.quiz_images WHERE id = ${quizImage.id}`).toHaveLength(0);
+      expect(await (await (await app.handle(new Request(`http://localhost/api/lesson-pages/${quizLesson.id}`, { headers: teacherHeaders }))).json()).quizLinks).toEqual([]);
 
       const timetableRequest = (classroomId: string, termStartsOn: string, termEndsOn: string) => app.handle(new Request(`http://localhost/api/classrooms/${classroomId}/timetable`, {
         method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" },
@@ -611,7 +685,16 @@ describe("student submission API", () => {
       await sql`UPDATE classroom.lesson_page_images SET created_at = NOW() - INTERVAL '48 hours' WHERE id = ${codeImage.id}`;
       await cleanupUnusedLessonImages();
       expect(await sql`SELECT id FROM classroom.lesson_page_images WHERE id = ${codeImage.id}`).toHaveLength(1);
-      expect((await app.handle(new Request(`http://localhost${codePath}/unpublish`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: 3 }) }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost${codePath}/trash`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: 3 }) }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/public/lesson-pages/${codeLesson.id}`))).status).toBe(404);
+      expect((await app.handle(new Request(`http://localhost/api/public/lesson-pages/${codeLesson.id}/images/${codeImage.id}/content`))).status).toBe(404);
+      await cleanupUnusedLessonImages();
+      expect(await sql`SELECT id FROM classroom.lesson_page_images WHERE id = ${codeImage.id}`).toHaveLength(1);
+      expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${codeLesson.id}/images/${codeImage.id}/content`, { headers: teacherHeaders }))).status).toBe(404);
+      expect((await app.handle(new Request(`http://localhost/api/lesson-pages?trashed=true`, { headers: teacherHeaders })).then((response) => response.json()) as { id: string }[]).some((item) => item.id === codeLesson.id)).toBe(true);
+      expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${codeLesson.id}/restore`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: 4 }) }))).status).toBe(200);
+      expect(await (await app.handle(new Request(`http://localhost/api/public/lesson-pages/${codeLesson.id}`))).json()).toMatchObject({ title: "Public code title" });
+      expect((await app.handle(new Request(`http://localhost${codePath}/unpublish`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: 5 }) }))).status).toBe(200);
       await cleanupUnusedLessonImages();
       expect(await sql`SELECT id FROM classroom.lesson_page_images WHERE id = ${codeImage.id}`).toHaveLength(0);
       expect((await app.handle(new Request(`http://localhost/api/public/lesson-pages/${codeLesson.id}`))).status).toBe(404);
@@ -653,7 +736,12 @@ describe("student submission API", () => {
       expect(competingDrafts.map((response) => response.status).sort()).toEqual([200, 409]);
       expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/publish`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title: "Synthetic lesson", blocks: lessonBlocks, expectedRevision: 2 }) }))).status).toBe(409);
       expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/publish`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title: "Synthetic lesson", blocks: [{ type: "text", text: "Published again" }], expectedRevision: 4 }) }))).status).toBe(200);
-      expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/unpublish`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: 5 }) }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/trash`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: 5 }) }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/public/lesson-pages/${lesson.id}`))).status).toBe(404);
+      expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/images/${image.id}/content`, { headers: teacherHeaders }))).status).toBe(404);
+      expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/restore`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: 6 }) }))).status).toBe(200);
+      expect(await (await app.handle(new Request(`http://localhost/api/public/lesson-pages/${lesson.id}`))).json()).toMatchObject({ blocks: [{ text: "Published again" }] });
+      expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/unpublish`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: 7 }) }))).status).toBe(200);
       expect((await app.handle(new Request(`http://localhost/api/public/lesson-pages/${lesson.id}`))).status).toBe(404);
       expect((await app.handle(new Request(`http://localhost/api/public/lesson-pages/${lesson.id}/images/${image.id}/content`))).status).toBe(404);
       const [{ sizeBytes }] = await sql<{ sizeBytes: string }[]>`SELECT size_bytes::text AS "sizeBytes" FROM classroom.lesson_page_images WHERE id = ${image.id}`;
@@ -941,6 +1029,10 @@ describe("student submission API", () => {
       if (workingTriggerInstalled) {
         await sql.unsafe(`DROP TRIGGER IF EXISTS ${workingTriggerName} ON classroom.files`).simple().catch(() => {});
         await sql.unsafe(`DROP FUNCTION IF EXISTS classroom.${workingFunctionName}()`).simple().catch(() => {});
+      }
+      if (trashTriggerInstalled) {
+        await sql.unsafe(`DROP TRIGGER IF EXISTS ${trashTriggerName} ON classroom.quizzes`).simple().catch(() => {});
+        await sql.unsafe(`DROP FUNCTION IF EXISTS classroom.${trashFunctionName}()`).simple().catch(() => {});
       }
       if (deleteTriggerInstalled) {
         await sql.unsafe(`DROP TRIGGER IF EXISTS ${deleteTriggerName} ON classroom.students`).simple().catch(() => {});

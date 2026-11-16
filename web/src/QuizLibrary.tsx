@@ -7,7 +7,7 @@ type Choice = { id: string; text: string; imageId: string | null };
 type Question = { id: string; type: "multiple-choice" | "true-false"; prompt: string; imageId: string | null; points: number; choices: Choice[]; correctChoiceId: string | null; explanation: string };
 type Content = { description: string; questions: Question[] };
 type Quiz = { id: string; title: string; content: Content; revision: number; publishedTitle: string | null; publishedAt: string | null };
-type QuizRow = { id: string; title: string; draftRevision: number; publishedTitle: string | null; publishedAt: string | null; updatedAt: string };
+type QuizRow = { id: string; title: string; draftRevision: number; publishedTitle: string | null; publishedAt: string | null; updatedAt: string; roundCount: number; attemptCount: number };
 type Classroom = { id: string; name: string; studentCount: number };
 type Round = { id: string; quizId: string; title: string; status: "awaiting_open" | "open" | "closed"; durationMinutes: number | null; openedAt?: string | null; closedAt?: string | null; solutionsReleasedAt?: string | null; startedCount: number; finishedCount: number };
 type Result = { round: Round & { content: Content }; attempts: { id: string | null; studentId: string; studentNumber: number | null; displayName: string; answers: Record<string, string | null> | null; startedAt: string | null; expiresAt: string | null; finishedAt: string | null; finishReason: string | null; score: string | null }[] };
@@ -19,6 +19,7 @@ const newQuestion = (): Question => ({ id: uuid(), type: "multiple-choice", prom
 
 export function QuizLibrary({ classrooms, onError, onDirtyChange }: { classrooms: Classroom[]; onError: (message: string) => void; onDirtyChange: (dirty: boolean) => void }) {
   const [list, setList] = useState<QuizRow[]>([]); const [quiz, setQuiz] = useState<Quiz | null>(null);
+  const [showTrash, setShowTrash] = useState(false);
   const [title, setTitle] = useState(""); const [content, setContent] = useState<Content>({ description: "", questions: [] });
   const [classroomId, setClassroomId] = useState(""); const [rounds, setRounds] = useState<Round[]>([]);
   const [duration, setDuration] = useState(""); const [result, setResult] = useState<Result | null>(null);
@@ -35,8 +36,8 @@ export function QuizLibrary({ classrooms, onError, onDirtyChange }: { classrooms
     window.addEventListener("beforeunload", warn); return () => window.removeEventListener("beforeunload", warn);
   }, [dirty, busy]);
 
-  const loadList = useCallback(async () => setList(await api<QuizRow[]>("/quizzes")), []);
-  useEffect(() => { void loadList().catch((error) => onError(error instanceof Error ? error.message : "โหลดแบบทดสอบไม่สำเร็จ")); }, [loadList, onError]);
+  const loadList = useCallback(async (trashed = false) => setList(await api<QuizRow[]>(`/quizzes${trashed ? "?trashed=true" : ""}`)), []);
+  useEffect(() => { void loadList(showTrash).catch((error) => onError(error instanceof Error ? error.message : "โหลดแบบทดสอบไม่สำเร็จ")); }, [loadList, onError, showTrash]);
   const loadRounds = useCallback(async () => {
     if (!classroomId) { setRounds([]); return; }
     setRounds(await api<Round[]>(`/classrooms/${classroomId}/quizzes`));
@@ -69,6 +70,30 @@ export function QuizLibrary({ classrooms, onError, onDirtyChange }: { classrooms
     try { await api(`/quizzes/${quiz.id}/unpublish`, { method: "POST", body: JSON.stringify({ expectedRevision: quiz.revision }) }); await open(quiz.id); await loadList(); }
     catch (error) { onError(error instanceof Error ? error.message : "ยกเลิกเผยแพร่ไม่สำเร็จ"); }
     finally { setBusy(false); }
+  }
+  async function trashQuiz(id: string, name: string, expectedRevision: number, discardEdits = false) {
+    if (!window.confirm(`ย้าย “${name}” ไปถังขยะหรือไม่? รอบที่เปิดอยู่จะปิดและตรวจคำตอบที่บันทึกไว้ รอบและผลจะซ่อนจนกว่าจะกู้คืน${discardEdits ? " และการแก้ไขที่ยังไม่บันทึกจะหายไป" : ""}`)) return;
+    setBusy(true);
+    try {
+      await api(`/quizzes/${id}/trash`, { method: "POST", body: JSON.stringify({ expectedRevision }) });
+      setQuiz(null); setResult(null); setShowTrash(false); await loadList(false); await loadRounds();
+    } catch (error) { onError(error instanceof Error ? error.message : "ย้ายแบบทดสอบไปถังขยะไม่สำเร็จ"); }
+    finally { setBusy(false); }
+  }
+  async function restoreQuiz(item: QuizRow) {
+    try {
+      await api(`/quizzes/${item.id}/restore`, { method: "POST", body: JSON.stringify({ expectedRevision: item.draftRevision }) });
+      setShowTrash(false); await loadList(false); await loadRounds();
+    } catch (error) { onError(error instanceof Error ? error.message : "กู้คืนแบบทดสอบไม่สำเร็จ"); }
+  }
+  async function deleteQuiz(item: QuizRow) {
+    const confirmTitle = window.prompt(`ลบ “${item.title}” ถาวรหรือไม่? จะลบรอบ ${item.roundCount} รอบและความพยายามของนักเรียน ${item.attemptCount} รายการ พร้อมภาพทั้งหมด พิมพ์ชื่อแบบทดสอบเพื่อยืนยัน`);
+    if (confirmTitle === null) return;
+    try {
+      const response = await api<{ cleanupPending: boolean }>(`/quizzes/${item.id}`, { method: "DELETE", body: JSON.stringify({ expectedRevision: item.draftRevision, confirmTitle }) });
+      await loadList(true);
+      if (response.cleanupPending) onError("ลบแบบทดสอบแล้ว แต่ไฟล์ภาพบางส่วนรอการล้างข้อมูลเมื่อเริ่มระบบครั้งถัดไป");
+    } catch (error) { onError(error instanceof Error ? error.message : "ลบแบบทดสอบถาวรไม่สำเร็จ"); }
   }
   async function uploadImage(file: File, update: (id: string) => void) {
     if (!quiz) return;
@@ -146,11 +171,14 @@ export function QuizLibrary({ classrooms, onError, onDirtyChange }: { classrooms
 
   if (!quiz) return <section className="quiz-library"><header className="page-heading"><div><p className="eyebrow">แบบทดสอบสำหรับนักเรียน</p><h1>แบบทดสอบ</h1><p className="muted page-description">สร้างแบบทดสอบ แล้วทำสำเนาแยกรอบให้แต่ละห้อง</p></div></header>
     {aiTools}
-    <form className="lesson-create" onSubmit={create}><label>ชื่อแบบทดสอบ<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={120} required/></label><button className="button button-primary" disabled={busy}>＋ สร้างแบบทดสอบ</button></form>
-    {list.length ? <div className="lesson-list">{list.map((item) => <button className="lesson-list-item" key={item.id} onClick={() => void open(item.id)}><span><strong>{item.title}</strong><small>{item.publishedAt ? "เผยแพร่แล้ว" : "ฉบับร่าง"}</small></span><b>แก้ไข ↗</b></button>)}</div> : <div className="panel"><h2>ยังไม่มีแบบทดสอบ</h2><p className="muted">แบบทดสอบรองรับปรนัยเลือกคำตอบเดียวและถูก/ผิด</p></div>}
+    <div className="lesson-library-toolbar"><button className="button button-quiet" onClick={() => setShowTrash((value) => !value)}>{showTrash ? "← แบบทดสอบทั้งหมด" : "ถังขยะ"}</button></div>
+    {!showTrash && <form className="lesson-create" onSubmit={create}><label>ชื่อแบบทดสอบ<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={120} required/></label><button className="button button-primary" disabled={busy}>＋ สร้างแบบทดสอบ</button></form>}
+    <h2>{showTrash ? "ถังขยะแบบทดสอบ" : "แบบทดสอบของฉัน"}</h2>
+    {list.length ? <div className="lesson-list">{list.map((item) => <div className="lesson-library-row" key={item.id}><button className="lesson-list-item" disabled={showTrash} onClick={() => void open(item.id)}><span><strong>{item.title}</strong><small>{item.publishedAt ? "เผยแพร่แล้ว" : "ฉบับร่าง"}{showTrash ? ` · ${item.roundCount} รอบ · ${item.attemptCount} ความพยายาม` : ""}</small></span><b>{showTrash ? "อยู่ในถังขยะ" : "แก้ไข ↗"}</b></button>{showTrash ? <div className="lesson-actions"><button className="button button-quiet" onClick={() => void restoreQuiz(item)}>กู้คืน</button><button className="button button-danger" onClick={() => void deleteQuiz(item)}>ลบถาวร</button></div> : <button className="button button-quiet" onClick={() => void trashQuiz(item.id, item.title, item.draftRevision)}>ย้ายไปถังขยะ</button>}</div>)}</div> : <div className="panel"><h2>{showTrash ? "ถังขยะว่าง" : "ยังไม่มีแบบทดสอบ"}</h2><p className="muted">{showTrash ? "แบบทดสอบที่ย้ายไปถังขยะจะแสดงที่นี่" : "แบบทดสอบรองรับปรนัยเลือกคำตอบเดียวและถูก/ผิด"}</p></div>}
   </section>;
 
-  return <section className="quiz-editor"><header className="page-heading"><div><button className="text-button" onClick={() => { if (dirty && !window.confirm("ออกจากแบบทดสอบโดยไม่บันทึกหรือไม่?")) return; setQuiz(null); void loadList(); }}>← แบบทดสอบทั้งหมด</button><p className="eyebrow">{quiz.publishedAt ? "เผยแพร่แล้ว" : "ฉบับร่าง"}</p><h1>ตัวสร้างแบบทดสอบ</h1></div><div className="lesson-actions">
+  return <section className="quiz-editor"><header className="page-heading"><div><button className="text-button" onClick={() => { if (dirty && !window.confirm("ออกจากแบบทดสอบโดยไม่บันทึกหรือไม่?")) return; setQuiz(null); void loadList(false); }}>← แบบทดสอบทั้งหมด</button><p className="eyebrow">{quiz.publishedAt ? "เผยแพร่แล้ว" : "ฉบับร่าง"}</p><h1>ตัวสร้างแบบทดสอบ</h1></div><div className="lesson-actions">
+    <button className="button button-danger" disabled={busy} onClick={() => void trashQuiz(quiz.id, title, quiz.revision, dirty)}>ย้ายไปถังขยะ</button>
     <button className="button button-quiet" disabled={busy || !dirty} onClick={() => void save()}>บันทึกฉบับร่าง</button>
     <button className="button button-primary" disabled={busy || !dirty && Boolean(quiz.publishedAt)} onClick={() => void save(true)}>{quiz.publishedAt ? "บันทึกและเผยแพร่" : "เผยแพร่"}</button>
     {quiz.publishedAt && <button className="button button-danger" disabled={busy || dirty} onClick={() => void unpublish()}>ยกเลิกเผยแพร่</button>}
