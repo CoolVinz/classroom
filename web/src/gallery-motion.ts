@@ -4,7 +4,18 @@ export type Move = { sequence: number; dx: number; dz: number };
 export function walkingStep(forward: number, side: number, yaw: number, seconds: number) {
   const length = Math.max(1, Math.hypot(forward, side));
   const distance = 5 * Math.min(0.05, Math.max(0, seconds)) / length;
-  return { dx: (Math.sin(yaw) * forward + Math.cos(yaw) * side) * distance, dz: (-Math.cos(yaw) * forward + Math.sin(yaw) * side) * distance };
+  // yaw is the camera's orbit around the player; W follows the direction away from the camera.
+  return { dx: (-Math.sin(yaw) * forward + Math.cos(yaw) * side) * distance, dz: (-Math.cos(yaw) * forward - Math.sin(yaw) * side) * distance };
+}
+
+export function facingRotation(dx: number, dz: number) { return Math.atan2(dx, dz); }
+
+export function directionFromCamera(direction: { x: number; y: number; z: number }, origin: { x: number; y: number; z: number }, cameraPosition: { x: number; y: number; z: number }, distance = 30) {
+  const length = Math.hypot(direction.x, direction.y, direction.z) || 1;
+  const target = { x: cameraPosition.x + direction.x / length * distance, y: cameraPosition.y + direction.y / length * distance, z: cameraPosition.z + direction.z / length * distance };
+  const dx = target.x - origin.x, dy = target.y - origin.y, dz = target.z - origin.z;
+  const magnitude = Math.hypot(dx, dy, dz) || 1;
+  return { dx: dx / magnitude, dy: dy / magnitude, dz: dz / magnitude };
 }
 
 export function reconcilePosition(server: Position, acknowledged: number, pending: Move[], unsent: { dx: number; dz: number }) {

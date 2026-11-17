@@ -45,6 +45,16 @@ test.skipIf(!database)("stopping a world revokes students and old tickets while 
       const room = await client.joinOrCreate("classroom", { classroomId: classroom, ticket: ticket.ticket }); rooms.push(room); return room;
     };
     const teacherRoom = await join(teacherToken), studentRoom = await join(studentToken);
+    const studentCast = new Promise<{ ok: boolean }>((resolve) => studentRoom.onMessage("cast-result", resolve));
+    studentRoom.send("cast", { shotId: randomUUID(), dx: 0, dy: 0, dz: 1 });
+    expect((await Promise.race([studentCast, Bun.sleep(2000).then(() => ({ ok: true }))])).ok).toBe(false);
+    const teacherCasts: { ok: boolean }[] = [];
+    const teacherCastResults = new Promise<{ ok: boolean }[]>((resolve) => teacherRoom.onMessage("cast-result", (value: { ok: boolean }) => { teacherCasts.push(value); if (teacherCasts.length === 2) resolve(teacherCasts); }));
+    const shotId = randomUUID();
+    teacherRoom.send("cast", { shotId, dx: 0, dy: 0, dz: -1 });
+    teacherRoom.send("cast", { shotId, dx: 0, dy: 0, dz: -1 });
+    const outcomes = await Promise.race([teacherCastResults, Bun.sleep(3000).then(() => [])]);
+    expect(outcomes.map((result) => result.ok).sort()).toEqual([false, true]);
     const stale = await (await request(studentToken, "/ticket", "POST")).json();
     const departed = new Promise<number>((resolve) => studentRoom.onLeave(resolve));
     expect((await request(teacherToken, "", "PUT", { enabled: false })).status).toBe(200);

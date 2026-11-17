@@ -7,12 +7,19 @@ import { checkRequestOrigin } from "../security";
 import { storedFilePath } from "../file-storage";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+const defaultAppearance = { skinColor: "#f3c8a6", hairColor: "#3e2d27", shirtColor: "#4f9b86", trousersColor: "#435875", hairStyle: "short", hatStyle: "none", glassesStyle: "none", shoeStyle: "sneakers", hatColor: "#b84d4d", glassesColor: "#302721", shoeColor: "#303a4a" };
 const avatarSchema = t.Object({
   skinColor: t.String({ pattern: "^#[0-9a-fA-F]{6}$" }),
   hairColor: t.String({ pattern: "^#[0-9a-fA-F]{6}$" }),
   shirtColor: t.String({ pattern: "^#[0-9a-fA-F]{6}$" }),
   trousersColor: t.String({ pattern: "^#[0-9a-fA-F]{6}$" }),
-  hairStyle: t.Union([t.Literal("none"), t.Literal("short"), t.Literal("long")]),
+  hairStyle: t.Optional(t.Union([t.Literal("none"),t.Literal("short"),t.Literal("long"),t.Literal("ponytail"),t.Literal("bun"),t.Literal("spiky"),t.Literal("bob")])),
+  hatStyle: t.Optional(t.Union([t.Literal("none"), t.Literal("cap"), t.Literal("beanie"), t.Literal("wizard")])),
+  glassesStyle: t.Optional(t.Union([t.Literal("none"), t.Literal("round"), t.Literal("square")])),
+  shoeStyle: t.Optional(t.Union([t.Literal("none"), t.Literal("sneakers"), t.Literal("boots")])),
+  hatColor: t.Optional(t.String({ pattern: "^#[0-9a-fA-F]{6}$" })),
+  glassesColor: t.Optional(t.String({ pattern: "^#[0-9a-fA-F]{6}$" })),
+  shoeColor: t.Optional(t.String({ pattern: "^#[0-9a-fA-F]{6}$" })),
 });
 function cookieToken(request: Request) {
   const value = request.headers.get("cookie")?.split(";").map((part) => part.trim()).find((part) => part.startsWith("classroom_session="))?.slice("classroom_session=".length);
@@ -47,26 +54,27 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     const teacher = await readActor(request);
     if (teacher) {
       const [row] = await sql<{ avatarSettings: unknown }[]>`SELECT avatar_settings AS "avatarSettings" FROM classroom.teachers WHERE id=${teacher.id}`;
-      if (row) return row.avatarSettings;
+      if (row) return { ...defaultAppearance, ...(row.avatarSettings as object) };
     }
     const student = teacher ? null : await readStudentActor(request);
     if (student) {
       const [row] = await sql<{ avatarSettings: unknown }[]>`SELECT avatar_settings AS "avatarSettings" FROM classroom.student_accounts WHERE id=${student.id}`;
-      if (row) return row.avatarSettings;
+      if (row) return { ...defaultAppearance, ...(row.avatarSettings as object) };
     }
     throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
   })
   .put("/gallery/avatar", async ({ request, body }) => {
     checkRequestOrigin(request);
+    const appearance = { ...defaultAppearance, ...body };
     const teacher = await readActor(request);
     if (teacher) {
-      await sql`UPDATE classroom.teachers SET avatar_settings=${sql.json(body)} WHERE id=${teacher.id}`;
-      return body;
+      await sql`UPDATE classroom.teachers SET avatar_settings=${sql.json(appearance)} WHERE id=${teacher.id}`;
+      return appearance;
     }
     const student = await readStudentActor(request);
     if (student) {
-      await sql`UPDATE classroom.student_accounts SET avatar_settings=${sql.json(body)} WHERE id=${student.id}`;
-      return body;
+      await sql`UPDATE classroom.student_accounts SET avatar_settings=${sql.json(appearance)} WHERE id=${student.id}`;
+      return appearance;
     }
     throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
   }, { body: avatarSchema })

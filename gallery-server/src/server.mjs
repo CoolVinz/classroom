@@ -4,12 +4,14 @@ import { schema, t } from "@colyseus/schema";
 import pg from "pg";
 import { boundedMove } from "./movement.mjs";
 import { applyAppearance } from "./avatar.mjs";
+import { advanceBolt, knockPlayer, playerHitFraction, respawnPlayer, validAim } from "./combat.mjs";
 import { databaseConfig } from "./database-config.mjs";
 
 if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
 const pool = new pg.Pool(databaseConfig());
-const Player = schema({ displayName: t.string(), role: t.string(), skinColor: t.string(), hairColor: t.string(), shirtColor: t.string(), trousersColor: t.string(), hairStyle: t.string(), x: t.number().default(0), z: t.number().default(0), rotation: t.number().default(0), sequence: t.number().default(0), jump: t.number().default(0) });
-const GalleryState = schema({ players: t.map(Player) });
+const Player = schema({ displayName: t.string(), role: t.string(), skinColor: t.string(), hairColor: t.string(), shirtColor: t.string(), trousersColor: t.string(), hairStyle: t.string(), hatStyle: t.string(), glassesStyle: t.string(), shoeStyle: t.string(), hatColor: t.string(), glassesColor: t.string(), shoeColor: t.string(), x: t.number().default(0), z: t.number().default(0), rotation: t.number().default(0), sequence: t.number().default(0), jump: t.number().default(0), movementEpoch: t.number().default(0), knocked: t.boolean().default(false), respawnAt: t.number().default(0), protectedUntil: t.number().default(0) });
+const Bolt = schema({ id: t.string(), x: t.number(), y: t.number(), z: t.number() });
+const GalleryState = schema({ players: t.map(Player), bolts: t.map(Bolt) });
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
 async function consumeTicket(token, classroomId) {
@@ -60,6 +62,11 @@ class ClassroomGallery extends Room {
   accessTimer;
   galleryTimer;
   worldTimer;
+  jumpStarts = new Map();
+  castTimes = new Map();
+  usedShotIds = new Set();
+  lifeStates = new Map();
+  combatTimer;
 
   async onAuth(_client, options) {
     if (typeof options.classroomId !== "string") throw new ServerError(4001, "Classroom is required");
@@ -74,9 +81,10 @@ class ClassroomGallery extends Room {
     this.onMessage("move", (client, message) => this.move(client, message));
     this.onMessage("jump", (client) => {
       const player = this.state.players.get(client.sessionId), now = Date.now();
-      if (!player || now - (this.jumpTimes.get(client.sessionId) ?? 0) < 900) return;
-      this.jumpTimes.set(client.sessionId, now); player.jump++;
+      if (!player || player.knocked || now - (this.jumpTimes.get(client.sessionId) ?? 0) < 900) return;
+      this.jumpTimes.set(client.sessionId, now); this.jumpStarts.set(client.sessionId, now); player.jump++;
     });
+    this.onMessage("cast", (client, message) => { void this.cast(client, message).catch(() => client.send("cast-result", { ok: false })); });
     this.onMessage("refresh-avatar", (client) => { void this.refreshAvatar(client).catch(() => {}); });
     const readSignature = async () => {
       const { rows } = await pool.query(`SELECT
@@ -112,6 +120,7 @@ class ClassroomGallery extends Room {
         if (auth && !(await stillAllowed(auth).catch(() => false))) client.leave(4003, "Classroom access expired");
       }
     }, 15000);
+    this.combatTimer = setInterval(() => this.updateCombat(), 50);
   }
 
   async onJoin(client, _options, auth) {
@@ -125,15 +134,20 @@ class ClassroomGallery extends Room {
     player.displayName = auth.displayName;
     player.role = auth.role;
     applyAppearance(player, auth.appearance);
-    player.x = Math.random() * 4 - 2;
-    player.z = Math.random() * 4 - 2;
+    let life = this.lifeStates.get(auth.accountId);
+    if (life?.knocked && life.respawnAt <= Date.now()) {
+      life = { x: 0, z: 0, rotation: 0, knocked: false, respawnAt: 0, protectedUntil: Date.now() + 3000, movementEpoch: life.movementEpoch + 1 };
+      this.lifeStates.set(auth.accountId, life);
+    }
+    if (life && (life.knocked || life.protectedUntil > Date.now())) Object.assign(player, life);
+    else { player.x = Math.random() * 4 - 2; player.z = Math.random() * 4 - 2; }
     this.state.players.set(client.sessionId, player);
     this.movementTimes.set(client.sessionId, Date.now());
   }
 
   move(client, message) {
     const player = this.state.players.get(client.sessionId);
-    if (!player || !message) return;
+    if (!player || !message || player.knocked || message.movementEpoch !== player.movementEpoch) return;
     const now = Date.now();
     const count = this.movementMessages.get(client.sessionId) ?? { start: now, total: 0 };
     if (now - count.start > 1000) { count.start = now; count.total = 0; }
@@ -141,12 +155,68 @@ class ClassroomGallery extends Room {
     this.movementMessages.set(client.sessionId, count);
     const elapsed = Math.min(1, Math.max(0.05, (now - (this.movementTimes.get(client.sessionId) ?? now)) / 1000));
     const next = boundedMove(player, message, elapsed);
+    if (!next) return;
     if (Number.isSafeInteger(message.sequence) && message.sequence > player.sequence) player.sequence = message.sequence;
     this.movementTimes.set(client.sessionId, now);
-    if (!next) return;
     player.x = next.x;
     player.z = next.z;
     player.rotation = next.rotation;
+  }
+
+  async cast(client, message) {
+    const auth=this.members.get(client.sessionId), player=this.state.players.get(client.sessionId), aim=validAim(message), now=Date.now();
+    if (!auth || auth.role!=="teacher" || !player || !aim || now-(this.castTimes.get(auth.accountId)??0)<2000 || this.usedShotIds.has(aim.shotId)) {
+      client.send("cast-result",{ok:false}); return;
+    }
+    this.usedShotIds.add(aim.shotId);
+    if (this.usedShotIds.size > 4096) this.usedShotIds.delete(this.usedShotIds.values().next().value);
+    this.castTimes.set(auth.accountId,now);
+    if (!(await stillAllowed(auth).catch(()=>false)) || this.members.get(client.sessionId) !== auth || this.state.players.get(client.sessionId) !== player) {
+      client.send("cast-result",{ok:false}); return;
+    }
+    const bolt=new Bolt(); bolt.id=aim.shotId;
+    bolt.x=player.x+Math.sin(player.rotation)*0.45; bolt.y=1.45; bolt.z=player.z+Math.cos(player.rotation)*0.45;
+    const details={...aim,x:bolt.x,y:bolt.y,z:bolt.z,travelled:0};
+    this.state.bolts.set(bolt.id,bolt); this.boltDetails.set(bolt.id,details);
+    client.send("cast-result",{ok:true});
+  }
+
+  boltDetails = new Map();
+  updateCombat() {
+    const now=Date.now();
+    for (const [accountId, life] of this.lifeStates) {
+      if (life.knocked && life.respawnAt <= now) this.lifeStates.set(accountId,{x:0,z:0,rotation:0,knocked:false,respawnAt:0,protectedUntil:now+3000,movementEpoch:life.movementEpoch+1});
+      else if (!life.knocked && life.protectedUntil <= now && life.protectedUntil !== 0) this.lifeStates.set(accountId,{...life,protectedUntil:0});
+    }
+    for (const client of this.clients) {
+      const auth=this.members.get(client.sessionId), player=this.state.players.get(client.sessionId);
+      if (auth && player && player.knocked && respawnPlayer(player,now)) {
+        player.jump=0;
+        this.jumpStarts.delete(client.sessionId); this.lifeStates.set(auth.accountId,{x:0,z:0,rotation:0,knocked:false,respawnAt:0,protectedUntil:player.protectedUntil,movementEpoch:player.movementEpoch});
+        client.send("respawn",{movementEpoch:player.movementEpoch,x:0,z:0});
+      } else if (auth && player) this.lifeStates.set(auth.accountId,{x:player.x,z:player.z,rotation:player.rotation,knocked:player.knocked,respawnAt:player.respawnAt,protectedUntil:player.protectedUntil,movementEpoch:player.movementEpoch});
+    }
+    for (const [id,bolt] of this.state.bolts) {
+      const details=this.boltDetails.get(id); if (!details) { this.state.bolts.delete(id); continue; }
+      const {from,to,expired}=advanceBolt(details,0.05);
+      bolt.x=to.x; bolt.y=to.y; bolt.z=to.z;
+      let hit=null, nearest=1;
+      for (const [sessionId,player] of this.state.players) {
+        if (player.role!=="student" || player.knocked || player.protectedUntil>now) continue;
+        const started=this.jumpStarts.get(sessionId)??-Infinity, elapsed=(now-started)/1000;
+        const jump=elapsed>0&&elapsed<0.75?Math.max(0,6*elapsed-8*elapsed*elapsed):0;
+        const fraction=playerHitFraction(from,to,player,jump);
+        if (fraction!==null && fraction<nearest) { nearest=fraction; hit={sessionId,player,x:from.x+(to.x-from.x)*fraction,y:from.y+(to.y-from.y)*fraction,z:from.z+(to.z-from.z)*fraction}; }
+      }
+      if (hit) {
+        const targetClient=this.clients.find((candidate)=>candidate.sessionId===hit.sessionId);
+        if (knockPlayer(hit.player,now)) {
+          targetClient?.send("knocked",{respawnAt:hit.player.respawnAt});
+          this.broadcast("wand-impact",{id,x:hit.x,y:hit.y,z:hit.z});
+        }
+      }
+      if (hit || expired) { this.state.bolts.delete(id); this.boltDetails.delete(id); }
+    }
   }
 
   async refreshAvatar(client) {
@@ -174,15 +244,18 @@ class ClassroomGallery extends Room {
   }
 
   onLeave(client) {
+    const auth=this.members.get(client.sessionId), player=this.state.players.get(client.sessionId);
+    if (auth && player) this.lifeStates.set(auth.accountId,{x:player.x,z:player.z,rotation:player.rotation,knocked:player.knocked,respawnAt:player.respawnAt,protectedUntil:player.protectedUntil,movementEpoch:player.movementEpoch});
     this.state.players.delete(client.sessionId);
     this.members.delete(client.sessionId);
     this.movementTimes.delete(client.sessionId);
     this.movementMessages.delete(client.sessionId);
     this.appearanceTimes.delete(client.sessionId);
     this.jumpTimes.delete(client.sessionId);
+    this.jumpStarts.delete(client.sessionId);
   }
 
-  onDispose() { clearInterval(this.accessTimer); clearInterval(this.galleryTimer); clearInterval(this.worldTimer); }
+  onDispose() { clearInterval(this.accessTimer); clearInterval(this.galleryTimer); clearInterval(this.worldTimer); clearInterval(this.combatTimer); this.state.bolts.clear(); this.boltDetails.clear(); this.lifeStates.clear(); this.usedShotIds.clear(); }
 }
 
 const gameServer = new Server({ express: (app) => app.get("/__healthcheck", (_request, response) => response.status(200).type("text").send("OK")) });

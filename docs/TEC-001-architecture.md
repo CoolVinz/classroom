@@ -44,7 +44,7 @@ Browser
 - XLSX/CSV workbooks are parsed in the browser with SheetJS and are not uploaded or retained. The server revalidates mapped rows before inserting students in a transaction.
 - Three.js and its loaders are loaded only when a teacher opens a model preview. A dedicated worker parses STL/OBJ and transfers bounded geometry to the renderer.
 - The gallery viewer loads Three.js only when opened. It fetches a paged, authorized manifest and model thumbnails from Elysia, then uses the Colyseus SDK for temporary avatar state. The separate Node.js service consumes one-use tickets and revalidates PostgreSQL sessions/membership; it cannot use the app's HttpOnly cookie directly.
-- Gallery settings, stable blocks, hidden displays, likes, and short-lived ticket hashes use tracked migration 014. Existing file UUIDs and thumbnail metadata are reused; gallery-specific content endpoints protect peer model reads while leaving private coursework routes unchanged.
+- Gallery settings, stable blocks, hidden displays, likes, and short-lived ticket hashes use migration 014. Account appearances use migrations 015 and 017; OBJ material companions use 016. Temporary movement, projectile, knockdown, and respawn state stays in the live Colyseus room and is not persisted. Existing file UUIDs and thumbnail metadata are reused; gallery-specific content endpoints protect peer model reads while leaving private coursework routes unchanged.
 
 ## Code Map
 
