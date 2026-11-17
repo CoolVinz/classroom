@@ -1,3 +1,4 @@
+import { syntheticGLB } from "./test-fixtures/gltf";
 import { describe, expect, spyOn, test } from "bun:test";
 import { OAuth2Client } from "google-auth-library";
 import { createHash, randomUUID } from "node:crypto";
@@ -799,6 +800,21 @@ describe("student submission API", () => {
       expect(await modelMaterialRead.text()).toBe(modelMaterial);
       expect((await app.handle(new Request(`http://localhost/api/student/files/${uploadedModel.id}/material`, { headers: { cookie: peerSessionCookie } }))).status).toBe(404);
       expect((await app.handle(new Request(`http://localhost/api/files/${uploadedModel.id}/material`, { headers: teacherHeaders }))).status).toBe(200);
+
+      const glbBytes = syntheticGLB();
+      const glbForm = new FormData(); glbForm.set("file", new File([glbBytes], "synthetic.glb"));
+      const glbUpload = await app.handle(new Request(`http://localhost/api/student/classrooms/${roomA}/assignments/${assignmentA}/files`, { method: "POST", headers: studentHeaders, body: glbForm }));
+      expect(glbUpload.status).toBe(200);
+      const glbFile = await glbUpload.json() as { id: string };
+      await sql`INSERT INTO classroom.gallery_worlds(classroom_id,enabled) VALUES(${roomA},true) ON CONFLICT(classroom_id) DO UPDATE SET enabled=true`;
+      const worldContent = `http://localhost/api/classrooms/${roomA}/gallery/files/${glbFile.id}/content`;
+      const glbRead = await app.handle(new Request(worldContent, { headers: studentHeaders }));
+      expect(glbRead.status).toBe(200); expect(new Uint8Array(await glbRead.arrayBuffer())).toEqual(new Uint8Array(glbBytes));
+      await sql`UPDATE classroom.gallery_worlds SET enabled=false WHERE classroom_id=${roomA}`;
+      expect((await app.handle(new Request(worldContent, { headers: studentHeaders }))).status).toBe(404);
+      expect((await app.handle(new Request(worldContent, { headers: teacherHeaders }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/files/${glbFile.id}`, { method: "DELETE", headers: teacherHeaders }))).status).toBe(200);
+      expect((await app.handle(new Request(worldContent, { headers: teacherHeaders }))).status).toBe(404);
 
       const workingPath = `/api/student/classrooms/${roomA}/assignments/${assignmentA}/working-file`;
       const legacyBlend = Buffer.from("BLENDER-v300");

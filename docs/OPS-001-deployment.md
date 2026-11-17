@@ -72,3 +72,7 @@ Back up PostgreSQL and the upload volume before release because the app applies 
 
 - What backup schedule and recovery objective are required for attendance records?
 - Should production retain one app replica, or should login limiting be moved to a shared service before scaling out?
+
+## World controls and glTF release
+
+Deploy both Classroom and the separate Colyseus application from the same commit. No new migration, variable, dependency, or volume is required. Stopping student access keeps the classroom teacher connected and leaves other classrooms running; the gallery service checks world status every two seconds. Confirm teacher inspection while stopped, rejected student entry, and restart after deployment. GLB/glTF files remain in the existing upload volume and shared quota. Texture-heavy models may remain thumbnail-only under the 128 MiB world texture budget.

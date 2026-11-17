@@ -6,13 +6,13 @@
 
 ## Purpose and behavior
 
-Give each classroom a shared third-person world where teachers and active students can walk among stable student display blocks. Eligible STL/OBJ work from active students and assignments appears automatically using saved thumbnails; full geometry loads near the visitor and is released when it is far away. Visitors can inspect a model and its student/assignment attribution. Students can like classmates' models once and undo their like. Teachers can hide or restore a display without changing the submission or assessment.
+Give each classroom a shared third-person world where teachers and active students can walk among stable student display blocks. Eligible STL/OBJ/GLB/glTF work from active students and assignments appears automatically using saved thumbnails; full geometry loads near the visitor and is released when it is far away. Visitors can inspect a model and its student/assignment attribution. Students can like classmates' models once and undo their like. Teachers can hide or restore a display without changing the submission or assessment.
 
 ## Rules and access
 
-- A teacher enables the world for a classroom they own. Only active linked students and that classroom's teacher can enter; anonymous users cannot.
+- A teacher controls student access for a classroom they own; that teacher can also enter while stopped. Only active linked students can enter an enabled world; anonymous users cannot.
 - The first world view assigns missing active students the next available block index. Existing blocks retain their index through roster-number changes, archival, and restoration.
-- Only STL/OBJ model and submission files for active students and active assignments appear. Working files, worksheets, assessment data, and other uploads remain private.
+- Only STL/OBJ/GLB/glTF model and submission files for active students and active assignments appear. Working files, worksheets, assessment data, and other uploads remain private.
 - Student models hidden by a teacher are omitted from student manifests and content routes. Teachers can restore them from the hidden-work tray.
 - Student likes are unique per model/student; self-likes are rejected. Likes do not affect assessment.
 - Each classroom has one Colyseus room capped at 50 connections and one connection per account. Room positions are temporary; PostgreSQL retains settings, blocks, hidden displays, and likes.
@@ -48,3 +48,11 @@ Tests: web/src/gallery-api.test.ts, web/src/gallery-motion.test.ts, web/src/gall
 - FPS has not been measured on school devices, under 50 connected visitors, or in a gallery with hundreds of displays. A device may still stutter when it renders many blocks or avatars.
 - OBJ/MTL model files without saved previews or beyond model limits fall back to a thumbnail or an explanatory preview error. MTL texture maps and external resources are ignored. Model and companion files stay in the app's persistent upload volume.
 - Network latency, school WebSocket filtering, and browser graphics performance may vary by device.
+
+## Start/stop and glTF
+
+Teachers start/stop student access with the existing enabled setting. The owning teacher may inspect a stopped world. Students cannot enter, fetch gallery content, or like displays while stopped. Active rooms check status every two seconds and disconnect students with code 4403; restart does not automatically reconnect them.
+
+GLB and embedded glTF 2.0 use the shared worker and Three.js loader. External resource URIs, Draco/Meshopt/KTX2 compression, and unsupported required extensions are rejected. Default scenes render statically with transforms, materials, and embedded PNG/JPEG textures. Decoded images are limited to 16 million pixels per model; the world caps resident texture allocations including mipmaps at 128 MiB and releases textures with distant geometry. Existing triangle/time limits remain.
+
+Additional code: src/gltf.ts, web/src/parse-gltf-model.ts. Run bun test ./src/gallery-world.integration.ts separately with CLASSROOM_TEST_DATABASE_URL pointing to an isolated migrated database; it starts a local Colyseus server and verifies stop/restart, stale tickets, and teacher access.

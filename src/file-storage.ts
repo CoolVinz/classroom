@@ -1,3 +1,4 @@
+import { inspectGLTF } from "./gltf";
 import { access, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -16,6 +17,8 @@ const FILE_TYPES: Record<string, { kind: UploadKind; mediaType: string }> = {
   doc: { kind: "worksheet", mediaType: "application/msword" },
   docx: { kind: "worksheet", mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
   stl: { kind: "model", mediaType: "model/stl" },
+  glb: { kind: "model", mediaType: "model/gltf-binary" },
+  gltf: { kind: "model", mediaType: "model/gltf+json" },
   obj: { kind: "model", mediaType: "model/obj" },
 };
 
@@ -301,6 +304,20 @@ export async function validateUpload(file: File, kind: UploadKind) {
   if (extension === "docx" && !(header[0] === 80 && header[1] === 75)) throw new HttpError(422, "ไฟล์ Word ไม่ถูกต้อง");
   if (extension === "stl" && !isStl(header, file.size)) throw new HttpError(422, "ไฟล์ STL ไม่ถูกต้อง");
   if (extension === "obj" && !await isObj(file)) throw new HttpError(422, "ไฟล์ OBJ ไม่ถูกต้อง");
+
+  if (extension === "glb" || extension === "gltf") {
+    try {
+      const { images } = inspectGLTF(await file.arrayBuffer(), extension === "glb");
+      let pixels = 0;
+      for (const image of images) {
+        const metadata = await sharp(image, { limitInputPixels: 16_000_000, failOn: "error" }).metadata();
+        if (!metadata.width || !metadata.height || !["png", "jpeg"].includes(metadata.format ?? "")) throw new Error("ภาพในโมเดลต้องเป็น PNG หรือ JPEG");
+        pixels += metadata.width * metadata.height;
+        if (pixels > 16_000_000) throw new Error("ภาพในโมเดลรวมกันต้องไม่เกิน 16 ล้านพิกเซล");
+        await sharp(image, { limitInputPixels: 16_000_000, failOn: "error" }).raw().toBuffer();
+      }
+    } catch (error) { throw new HttpError(422, error instanceof Error ? error.message : "ไฟล์ glTF ไม่ถูกต้อง"); }
+  }
 
   const safeName = file.name.replace(/[\\/\0-\x1f\x7f]/g, "_").trim().slice(-255);
   if (!safeName) throw new HttpError(422, "กรุณาตรวจสอบชื่อไฟล์");

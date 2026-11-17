@@ -1,13 +1,13 @@
 import * as THREE from "three";
 
 export type ModelPart = { positions: Float32Array; normals: Float32Array; indices?: Uint32Array; colors?: Float32Array };
-type ModelData = { parts: ModelPart[]; triangles: number };
+export type ModelData = { parts: ModelPart[]; triangles: number; scene?: ReturnType<THREE.Object3D["toJSON"]>; textureBytes?: number };
 type WorkerReply = Partial<ModelData> & { error?: string };
 type ModelFile = { id: string; originalName: string };
 
 async function parseModel(file: ModelFile, buffer: ArrayBuffer, signal: AbortSignal, materialText?: string): Promise<ModelData> {
   const extension = file.originalName.split(".").pop()?.toLowerCase();
-  if (extension !== "stl" && extension !== "obj") throw new Error("รองรับไฟล์ STL และ OBJ เท่านั้น");
+  if (extension !== "stl" && extension !== "obj" && extension !== "glb" && extension !== "gltf") throw new Error("รองรับไฟล์ STL, OBJ, GLB และ glTF");
   return new Promise((resolve, reject) => {
     const worker = new Worker(new URL("./model-preview.worker.ts", import.meta.url), { type: "module" });
     const cleanup = () => { clearTimeout(timer); worker.terminate(); signal.removeEventListener("abort", abort); };
@@ -17,8 +17,8 @@ async function parseModel(file: ModelFile, buffer: ArrayBuffer, signal: AbortSig
     }, 10_000);
     worker.onmessage = ({ data }: MessageEvent<WorkerReply>) => {
       cleanup();
-      if (data.error || !data.parts?.length || !data.triangles) reject(new Error(data.error ?? "อ่านโมเดลไม่สำเร็จ"));
-      else resolve({ parts: data.parts, triangles: data.triangles });
+      if (data.error || (!data.parts?.length && !data.scene) || !data.triangles) reject(new Error(data.error ?? "อ่านโมเดลไม่สำเร็จ"));
+      else resolve({ parts: data.parts ?? [], triangles: data.triangles, scene: data.scene, textureBytes: data.textureBytes });
     };
     worker.onerror = () => { cleanup(); reject(new Error("อ่านโมเดลไม่สำเร็จ")); };
     signal.addEventListener("abort", abort, { once: true });
@@ -75,8 +75,8 @@ function canvasBlob(canvas: HTMLCanvasElement, signal: AbortSignal): Promise<Blo
   });
 }
 
-async function renderModelBlob(parts: ModelPart[], signal: AbortSignal) {
-  const view = createModelView(parts);
+async function renderModelBlob(model: ModelData, signal: AbortSignal) {
+  const view = createModelView(model);
   let renderer: THREE.WebGLRenderer | undefined;
   try {
     renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -116,7 +116,7 @@ export function createThumbnailFromFile(file: File & { name: string }, mediaType
   return enqueueThumbnail(async (activeSignal) => {
     if (mediaType.startsWith("image/")) return renderImageBlob(file, activeSignal);
     const model = await parseModel({ id: file.name, originalName: file.name }, await file.arrayBuffer(), activeSignal, materialFile ? await materialFile.text() : undefined);
-    return renderModelBlob(model.parts, activeSignal);
+    return renderModelBlob(model, activeSignal);
   }, signal);
 }
 
@@ -130,31 +130,51 @@ export function createThumbnailFromUrl(file: ThumbnailFile, contentPath: string,
     }
     const model = await readModel(file, contentPath, activeSignal, materialPath);
     activeSignal.throwIfAborted();
-    return renderModelBlob(model.parts, activeSignal);
+    return renderModelBlob(model, activeSignal);
   }, signal);
 }
 
-export function createModelView(parts: ModelPart[]) {
+export function disposeModelObject(object: THREE.Object3D) {
+  const textures = new Set<THREE.Texture>();
+  object.traverse((item) => {
+    const mesh = item as THREE.Mesh;
+    mesh.geometry?.dispose();
+    for (const material of mesh.material ? (Array.isArray(mesh.material) ? mesh.material : [mesh.material]) : []) {
+      for (const value of Object.values(material)) if (value instanceof THREE.Texture) textures.add(value);
+      material.dispose();
+    }
+  });
+  textures.forEach((texture) => texture.dispose());
+}
+
+export function createModelObject(model: ModelData): THREE.Group {
+  const object = new THREE.Group();
+  if (model.scene) object.add(new THREE.ObjectLoader().parse(model.scene));
+  else for (const part of model.parts) {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(part.positions, 3));
+    geometry.setAttribute("normal", new THREE.BufferAttribute(part.normals, 3));
+    if (part.indices) geometry.setIndex(new THREE.BufferAttribute(part.indices, 1));
+    if (part.colors) geometry.setAttribute("color", new THREE.BufferAttribute(part.colors, 3));
+    object.add(new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: part.colors ? 0xffffff : 0x4b9a80, vertexColors: Boolean(part.colors), metalness: 0.05, roughness: 0.7 })));
+  }
+  return object;
+}
+
+export function createModelView(model: ModelData) {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color("#f7faf8");
   scene.add(new THREE.HemisphereLight(0xffffff, 0x7d8d87, 2));
   const keyLight = new THREE.DirectionalLight(0xffffff, 2.2);
   keyLight.position.set(4, 7, 6); scene.add(keyLight);
-  const object = new THREE.Group();
-  const geometries: THREE.BufferGeometry[] = [];
+  const object = createModelObject(model);
   const materials: THREE.MeshStandardMaterial[] = [];
-  const dispose = () => { geometries.forEach((item) => item.dispose()); materials.forEach((item) => item.dispose()); scene.clear(); };
+  object.traverse((item) => {
+    const mesh = item as THREE.Mesh;
+    if (mesh.material) materials.push(...(Array.isArray(mesh.material) ? mesh.material : [mesh.material]) as THREE.MeshStandardMaterial[]);
+  });
+  const dispose = () => { disposeModelObject(object); scene.clear(); };
   try {
-    for (const part of parts) {
-      const geometry = new THREE.BufferGeometry();
-      geometries.push(geometry);
-      geometry.setAttribute("position", new THREE.BufferAttribute(part.positions, 3));
-      geometry.setAttribute("normal", new THREE.BufferAttribute(part.normals, 3));
-      if (part.indices) geometry.setIndex(new THREE.BufferAttribute(part.indices, 1));
-      if (part.colors) geometry.setAttribute("color", new THREE.BufferAttribute(part.colors, 3));
-      const material = new THREE.MeshStandardMaterial({ color: part.colors ? 0xffffff : 0x4b9a80, vertexColors: Boolean(part.colors), metalness: 0.05, roughness: 0.7 });
-      materials.push(material); object.add(new THREE.Mesh(geometry, material));
-    }
     scene.add(object);
     const bounds = new THREE.Box3().setFromObject(object);
     const radius = Math.max(bounds.getBoundingSphere(new THREE.Sphere()).radius, 0.1);

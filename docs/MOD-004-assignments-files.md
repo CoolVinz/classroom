@@ -67,3 +67,7 @@ Tests: web/src/model-view.test.ts, src/file-storage.test.ts, src/student-workflo
 
 - What storage capacity and off-site backup schedule will production use?
 - The gallery currently loads up to 12 nearby models within a one-million-triangle budget. What additional device-performance targets should be measured before increasing those limits?
+
+## GLB/glTF submissions
+
+Teachers and students can upload one self-contained GLB or embedded glTF 2.0 as a model submission, with unchanged storage, attribution, marking, and deletion. Recommend Blender → glTF Binary (.glb). Standard embedded PNG/JPEG textures are supported; external buffers/images and Draco/Meshopt/KTX2 compression are rejected. Validation checks GLB chunks, resource bounds, scene references, extensions, and decoded image limits before registration. Original files remain unchanged. Shared preview/thumbnail/gallery rendering uses the worker and releases model textures on disposal.

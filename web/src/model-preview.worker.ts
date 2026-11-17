@@ -1,14 +1,16 @@
+import { parseGLTFModel } from "./parse-gltf-model";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
 import { parseOBJModel } from "./parse-obj-model";
 
 type Part = { positions: Float32Array; normals: Float32Array; indices?: Uint32Array; colors?: Float32Array };
 const workerContext = self as unknown as {
-  onmessage: ((event: MessageEvent<{ extension: "stl" | "obj"; buffer: ArrayBuffer; materialText?: string }>) => void) | null;
+  onmessage: ((event: MessageEvent<{ extension: "stl" | "obj" | "glb" | "gltf"; buffer: ArrayBuffer; materialText?: string }>) => void) | null;
   postMessage: (message: unknown, options?: { transfer: Transferable[] }) => void;
 };
-workerContext.onmessage = (event) => {
+workerContext.onmessage = async (event) => {
   try {
     const { extension, buffer, materialText } = event.data;
+    if (extension === "glb" || extension === "gltf") { workerContext.postMessage(await parseGLTFModel(buffer, extension === "glb")); return; }
     const parts: Part[] = [];
     let triangles = 0;
     if (extension === "stl") {

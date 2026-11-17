@@ -5,11 +5,11 @@ import { createModelView, loadModel } from "./model-view";
 test("model framing centers offset geometry and releases its resources", () => {
   const original = new THREE.BoxGeometry(2, 3, 4);
   original.translate(100, 200, 300);
-  const view = createModelView([{
+  const view = createModelView({ triangles: 12, parts: [{
     positions: new Float32Array(original.getAttribute("position").array),
     normals: new Float32Array(original.getAttribute("normal").array),
     indices: new Uint32Array(original.getIndex()!.array),
-  }]);
+  }] });
   const bounds = new THREE.Box3().setFromObject(view.scene);
   expect(bounds.getCenter(new THREE.Vector3()).length()).toBeLessThan(0.0001);
   view.camera.updateMatrixWorld();
@@ -25,7 +25,7 @@ test("model framing centers offset geometry and releases its resources", () => {
   expect(geometriesDisposed).toBe(1);
   expect(materialsDisposed).toBe(1);
   expect(view.scene.children).toHaveLength(0);
-  expect(() => createModelView([])).toThrow("อ่านโมเดลไม่สำเร็จ");
+  expect(() => createModelView({ parts: [], triangles: 0 })).toThrow("อ่านโมเดลไม่สำเร็จ");
 });
 
 test("model loading cancels its parser and uses the private file request", async () => {

@@ -20,7 +20,7 @@ async function consumeTicket(token, classroomId) {
     const { rows } = await client.query(`SELECT gt.*, c.name AS classroom_name
       FROM classroom.gallery_tickets gt JOIN classroom.classrooms c ON c.id=gt.classroom_id
       JOIN classroom.gallery_worlds w ON w.classroom_id=c.id
-      WHERE gt.token_hash=$1 AND gt.classroom_id=$2 AND gt.expires_at>NOW() AND gt.consumed_at IS NULL AND w.enabled AND c.archived_at IS NULL
+      WHERE gt.token_hash=$1 AND gt.classroom_id=$2 AND gt.expires_at>NOW() AND gt.consumed_at IS NULL AND (w.enabled OR (gt.actor_kind='teacher' AND c.owner_id=gt.account_id)) AND c.archived_at IS NULL
       FOR UPDATE OF gt`, [sha256(token), classroomId]);
     const ticket = rows[0];
     if (!ticket) throw new ServerError(4001, "Room ticket expired or already used");
@@ -42,7 +42,7 @@ async function consumeTicket(token, classroomId) {
 
 async function stillAllowed(auth) {
   const query = auth.role === "teacher"
-    ? `SELECT EXISTS(SELECT 1 FROM classroom.sessions s JOIN classroom.teachers t ON t.id=s.teacher_id JOIN classroom.classrooms c ON c.id=$3 JOIN classroom.gallery_worlds w ON w.classroom_id=c.id WHERE s.token_hash=$1 AND s.teacher_id=$2 AND s.expires_at>NOW() AND t.active AND c.owner_id=t.id AND c.archived_at IS NULL AND w.enabled) AS allowed`
+    ? `SELECT EXISTS(SELECT 1 FROM classroom.sessions s JOIN classroom.teachers t ON t.id=s.teacher_id JOIN classroom.classrooms c ON c.id=$3 JOIN classroom.gallery_worlds w ON w.classroom_id=c.id WHERE s.token_hash=$1 AND s.teacher_id=$2 AND s.expires_at>NOW() AND t.active AND c.owner_id=t.id AND c.archived_at IS NULL) AS allowed`
     : `SELECT EXISTS(SELECT 1 FROM classroom.student_sessions ss JOIN classroom.students s ON s.id=$4 JOIN classroom.classrooms c ON c.id=s.classroom_id JOIN classroom.gallery_worlds w ON w.classroom_id=c.id WHERE ss.token_hash=$1 AND ss.account_id=$2 AND ss.expires_at>NOW() AND s.classroom_id=$3 AND s.account_id=ss.account_id AND s.archived_at IS NULL AND c.archived_at IS NULL AND w.enabled) AS allowed`;
   const values = auth.role === "teacher" ? [auth.sessionHash, auth.accountId, auth.classroomId] : [auth.sessionHash, auth.accountId, auth.classroomId, auth.studentId];
   const { rows } = await pool.query(query, values);
@@ -59,6 +59,7 @@ class ClassroomGallery extends Room {
   jumpTimes = new Map();
   accessTimer;
   galleryTimer;
+  worldTimer;
 
   async onAuth(_client, options) {
     if (typeof options.classroomId !== "string") throw new ServerError(4001, "Classroom is required");
@@ -79,7 +80,7 @@ class ClassroomGallery extends Room {
     this.onMessage("refresh-avatar", (client) => { void this.refreshAvatar(client).catch(() => {}); });
     const readSignature = async () => {
       const { rows } = await pool.query(`SELECT
-        (SELECT COUNT(*)::int FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id WHERE f.classroom_id=$1 AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj)$' AND s.archived_at IS NULL AND a.archived_at IS NULL) AS files,
+        (SELECT COUNT(*)::int FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id WHERE f.classroom_id=$1 AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$' AND s.archived_at IS NULL AND a.archived_at IS NULL) AS files,
         (SELECT COALESCE(MAX(f.created_at)::text,'') FROM classroom.files f WHERE f.classroom_id=$1 AND f.kind IN ('model','submission')) AS latest,
         (SELECT COUNT(*)::int FROM classroom.gallery_hidden_models WHERE classroom_id=$1) AS hidden,
         (SELECT COUNT(*)::int FROM classroom.gallery_likes WHERE classroom_id=$1) AS likes,
@@ -93,6 +94,18 @@ class ClassroomGallery extends Room {
       if (next !== signature) { signature = next; this.broadcast("gallery-refresh"); }
       await this.refreshAppearances().catch(() => {});
     }, 20000);
+    let checkingWorld = false;
+    this.worldTimer = setInterval(async () => {
+      if (checkingWorld) return;
+      checkingWorld = true;
+      try {
+        const { rows } = await pool.query("SELECT enabled FROM classroom.gallery_worlds WHERE classroom_id=$1", [this.classroomId]);
+        if (!rows[0]?.enabled) for (const client of [...this.clients]) {
+          if (this.members.get(client.sessionId)?.role === "student") client.leave(4403, "Teacher stopped student access");
+        }
+      } catch { /* Existing session checks fail closed if the database stays unavailable. */ }
+      finally { checkingWorld = false; }
+    }, 2000);
     this.accessTimer = setInterval(async () => {
       for (const client of [...this.clients]) {
         const auth = this.members.get(client.sessionId);
@@ -101,7 +114,8 @@ class ClassroomGallery extends Room {
     }, 15000);
   }
 
-  onJoin(client, _options, auth) {
+  async onJoin(client, _options, auth) {
+    if (!(await stillAllowed(auth).catch(() => false))) { client.leave(4003, "Classroom access expired"); return; }
     if ([...this.members.values()].some((member) => member.accountId === auth.accountId)) {
       client.leave(4009, "This account is already in the classroom world");
       return;
@@ -168,7 +182,7 @@ class ClassroomGallery extends Room {
     this.jumpTimes.delete(client.sessionId);
   }
 
-  onDispose() { clearInterval(this.accessTimer); clearInterval(this.galleryTimer); }
+  onDispose() { clearInterval(this.accessTimer); clearInterval(this.galleryTimer); clearInterval(this.worldTimer); }
 }
 
 const gameServer = new Server({ express: (app) => app.get("/__healthcheck", (_request, response) => response.status(200).type("text").send("OK")) });

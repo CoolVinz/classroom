@@ -32,7 +32,7 @@ export default function ModelPreview({ file, contentPath, materialPath, close }:
         try { renderer = new THREE.WebGLRenderer({ canvas: canvasElement, antialias: true, alpha: true }); }
         catch { throw new Error("WebGL ไม่พร้อมใช้งานในเบราว์เซอร์นี้"); }
         renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-        view = createModelView(model.parts);
+        view = createModelView(model);
         const { camera, scene, materials } = view;
         materials.forEach((material) => { material.wireframe = wireframe; });
         controls = new OrbitControls(camera, renderer.domElement);
