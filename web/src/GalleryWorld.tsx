@@ -7,7 +7,8 @@ import ModelPreview from "./ModelPreview";
 import { loadModel, createModelObject, disposeModelObject } from "./model-view";
 import { galleryFileUrl, galleryTicketRequest } from "./gallery-api";
 import { animateAvatarCharacter, createAvatarCharacter, defaultAvatarAppearance, disposeAvatarCharacter, type AvatarAppearance } from "./gallery-avatar";
-import { correctionOffset, directionFromCamera, facingRotation, jumpHeight, reconcilePosition, walkingStep, type Move } from "./gallery-motion";
+import { correctionOffset, facingRotation, jumpHeight, reconcilePosition, walkingStep, type Move } from "./gallery-motion";
+import { canvasAimPoint, wandAim } from "./gallery-aim";
 
 type User = { role: "owner" | "teacher" | "student"; displayName: string };
 type GalleryModel = { id: string; studentId: string; displayName: string; studentNumber: number | null; assignmentId: string; assignmentTitle: string; originalName: string; mediaType: string; materialAvailable: boolean; thumbnailAvailable: boolean; createdAt: string; hidden: boolean; likes: number; likedByMe: boolean };
@@ -33,6 +34,9 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
   const [loading, setLoading] = useState(false);
   const [online, setOnline] = useState(0);
   const [wandMode, setWandMode] = useState(false);
+  const [aimValid, setAimValid] = useState(false);
+  const crosshairRef = useRef<HTMLDivElement>(null);
+  const aimPoint = useRef(new THREE.Vector2());
   const [castReady, setCastReady] = useState(true);
   const [knockSeconds, setKnockSeconds] = useState(0);
   const roomRef = useRef<any>(null);
@@ -52,6 +56,11 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
   const touchRef = useRef({ x: 0, z: 0 });
   const jumpRef = useRef(false);
   const teacher = user.role !== "student";
+  useEffect(() => {
+    aimPoint.current.set(0, 0);
+    setAimValid(false);
+    if (crosshairRef.current) { crosshairRef.current.style.left = "50%"; crosshairRef.current.style.top = "50%"; }
+  }, [wandMode]);
   useEffect(() => {
     if (!knockSeconds) return;
     const timer = window.setInterval(() => {
@@ -157,7 +166,18 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
       }
     };
     syncExhibits();
-    const raycaster = new THREE.Raycaster(); const pointer = new THREE.Vector2(); let drag = false; let lastX = 0; let startX = 0; let startY = 0; let yaw = 0; let cameraPitch = 0.34;
+    const raycaster = new THREE.Raycaster(); const pointer = new THREE.Vector2();
+    let activePointer: number | null = null, dragged = false, lastX = 0, lastY = 0, startX = 0, startY = 0, yaw = 0, cameraPitch = 0.34;
+    const moveCrosshair = (event: PointerEvent) => {
+      if (!wandRef.current || customizerOpenRef.current || document.hidden) return;
+      const point = canvasAimPoint(event.clientX, event.clientY, canvas.getBoundingClientRect());
+      aimPoint.current.set(point.x, point.y);
+      if (crosshairRef.current) { crosshairRef.current.style.left = `${(point.x + 1) * 50}%`; crosshairRef.current.style.top = `${(1 - point.y) * 50}%`; }
+    };
+    const cancelPointer = () => {
+      const captured = activePointer; activePointer = null; dragged = false;
+      if (captured !== null && canvas.hasPointerCapture(captured)) canvas.releasePointerCapture(captured);
+    };
     const keys = new Set<string>(); const keyDown = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
       const target = event.target instanceof HTMLElement ? event.target : null;
@@ -168,21 +188,56 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
       }
     };
     const keyUp = (event: KeyboardEvent) => keys.delete(event.key.toLowerCase());
-    const onBlur = () => { keys.clear(); touchRef.current = { x: 0, z: 0 }; jumpRef.current = false; };
-    const onPointerDown = (event: PointerEvent) => { if (customizerOpenRef.current) return; drag = true; lastX = event.clientX; startX = event.clientX; startY = event.clientY; canvas.setPointerCapture(event.pointerId); };
-    const onPointerMove = (event: PointerEvent) => { if (!drag || customizerOpenRef.current) return; const delta = event.clientX - lastX; yaw -= delta * 0.005; cameraPitch = THREE.MathUtils.clamp(cameraPitch - event.movementY * 0.003, 0.08, 0.85); lastX = event.clientX; };
-    const onPointerUp = (event: PointerEvent) => { if (!drag) return; drag = false; if (!wandRef.current && !customizerOpenRef.current && Math.hypot(event.clientX - startX, event.clientY - startY) < 5) { const rect = canvas.getBoundingClientRect(); pointer.set((event.clientX - rect.left) / rect.width * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1); raycaster.setFromCamera(pointer, camera); const hit = raycaster.intersectObjects(raycastables, false)[0]; if (hit?.object.userData.model) setSelected(hit.object.userData.model as GalleryModel); } };
+    const onBlur = () => { keys.clear(); touchRef.current = { x: 0, z: 0 }; jumpRef.current = false; cancelPointer(); };
+    const onPointerDown = (event: PointerEvent) => {
+      if (customizerOpenRef.current || document.hidden || activePointer !== null) return;
+      activePointer = event.pointerId; dragged = false; lastX = startX = event.clientX; lastY = startY = event.clientY;
+      canvas.setPointerCapture(event.pointerId);
+      if (event.pointerType !== "touch") moveCrosshair(event);
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      if (customizerOpenRef.current || document.hidden) return;
+      if (activePointer === null) { if (event.pointerType !== "touch") moveCrosshair(event); return; }
+      if (activePointer !== event.pointerId) return;
+      dragged ||= Math.hypot(event.clientX - startX, event.clientY - startY) >= 5;
+      if (dragged) {
+        yaw -= (event.clientX - lastX) * 0.005;
+        cameraPitch = THREE.MathUtils.clamp(cameraPitch - (event.clientY - lastY) * 0.003, 0.08, 0.85);
+      }
+      lastX = event.clientX; lastY = event.clientY;
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      if (activePointer !== event.pointerId) return;
+      const tapped = !dragged && Math.hypot(event.clientX - startX, event.clientY - startY) < 5;
+      cancelPointer();
+      if (!tapped || customizerOpenRef.current || document.hidden) return;
+      if (wandRef.current) { moveCrosshair(event); return; }
+      const point = canvasAimPoint(event.clientX, event.clientY, canvas.getBoundingClientRect()); pointer.set(point.x, point.y);
+      camera.updateMatrixWorld(); raycaster.setFromCamera(pointer, camera);
+      const hit = raycaster.intersectObjects(raycastables, false)[0];
+      if (hit?.object.userData.model) setSelected(hit.object.userData.model as GalleryModel);
+    };
+    const onPointerCancel = (event: PointerEvent) => { if (activePointer === event.pointerId) cancelPointer(); };
     const resize = () => { const width = Math.max(1, canvas.clientWidth), height = Math.max(1, canvas.clientHeight); renderer.setSize(width, height, false); camera.aspect = width / height; camera.updateProjectionMatrix(); };
     const observer = new ResizeObserver(resize); observer.observe(canvas); resize();
     let alive = true, frame = 0, lastSend = 0, lastFrame = performance.now(), local = { x: 0, z: 0, rotation: 0 }, room: any;
     let initialized = false, sequence = 0, lastAcknowledged = -1, jumpTime = -Infinity, movementEpoch = 0, pending: Move[] = [], unsent = { dx: 0, dz: 0 };
     let visualOffset = { x: 0, z: 0 };
+    const aimOrigin = new THREE.Vector3(), aimBodies: THREE.Object3D[] = [];
+    let lastAimCheck = 0, cooldownTimer: number | undefined;
+    const currentAim = () => {
+      if (!teacher || !wandRef.current || !initialized || !room?.connection?.isOpen || customizerOpenRef.current || document.hidden || !document.hasFocus()) return null;
+      aimBodies.length = 0;
+      for (const avatar of avatarMeshes.values()) if (avatar.userData.role === "student" && avatar.userData.character) aimBodies.push(avatar.userData.character);
+      aimOrigin.set(local.x + Math.sin(local.rotation) * 0.45, 1.45, local.z + Math.cos(local.rotation) * 0.45);
+      return wandAim(raycaster, camera, aimPoint.current, aimOrigin, aimBodies);
+    };
     fireWandRef.current = () => {
-      if (!wandRef.current || !room?.connection?.isOpen || !initialized || Date.now() < castReadyAt.current) return;
-      const direction = new THREE.Vector3(); camera.getWorldDirection(direction);
-      const origin = { x: local.x + Math.sin(local.rotation) * 0.45, y: 1.45, z: local.z + Math.cos(local.rotation) * 0.45 };
-      room.send("cast", { shotId: crypto.randomUUID(), ...directionFromCamera(direction, origin, camera.position) });
-      castReadyAt.current = Date.now() + 2000; setCastReady(false); window.setTimeout(() => setCastReady(true), 2000);
+      if (Date.now() < castReadyAt.current) return;
+      const aim = currentAim();
+      if (!aim) { setAimValid(false); return; }
+      room.send("cast", { shotId: crypto.randomUUID(), ...aim });
+      castReadyAt.current = Date.now() + 2000; setCastReady(false); cooldownTimer = window.setTimeout(() => setCastReady(true), 2000);
     };
     let hiddenAt = document.hidden ? performance.now() : 0;
     let syncedManifest = manifestRef.current, syncedModels = modelsRef.current;
@@ -222,7 +277,7 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
         .finally(() => { if (activeModelLoad?.controller === controller) activeModelLoad = null; });
     };
     const client = new Client(config);
-    const cleanup = () => { for (const id of loadedModels.keys()) evictModel(id); alive = false; cancelAnimationFrame(frame); modelAbort.abort(); activeModelLoad?.controller.abort(); room?.leave(); roomRef.current = null; onBlur(); observer.disconnect(); scene.traverse((object) => { const mesh = object as THREE.Mesh; mesh.geometry?.dispose?.(); const materials = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : []; materials.forEach((material) => material.dispose()); }); renderer.dispose(); renderer.forceContextLoss(); textures.forEach((texture) => texture.dispose()); avatarMeshes.clear(); boltMeshes.current.clear(); effectMeshes.current=[]; window.removeEventListener("keydown", keyDown); window.removeEventListener("keyup", keyUp); window.removeEventListener("blur", onBlur); document.removeEventListener("visibilitychange", onVisibilityChange); canvas.removeEventListener("pointerdown", onPointerDown); canvas.removeEventListener("pointermove", onPointerMove); canvas.removeEventListener("pointerup", onPointerUp); };
+    const cleanup = () => { for (const id of loadedModels.keys()) evictModel(id); alive = false; cancelAnimationFrame(frame); window.clearTimeout(cooldownTimer); castReadyAt.current = 0; setCastReady(true); setAimValid(false); fireWandRef.current = () => {}; modelAbort.abort(); activeModelLoad?.controller.abort(); room?.leave(); roomRef.current = null; onBlur(); observer.disconnect(); scene.traverse((object) => { const mesh = object as THREE.Mesh; mesh.geometry?.dispose?.(); const materials = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : []; materials.forEach((material) => material.dispose()); }); renderer.dispose(); renderer.forceContextLoss(); textures.forEach((texture) => texture.dispose()); avatarMeshes.clear(); boltMeshes.current.clear(); effectMeshes.current=[]; window.removeEventListener("keydown", keyDown); window.removeEventListener("keyup", keyUp); window.removeEventListener("blur", onBlur); document.removeEventListener("visibilitychange", onVisibilityChange); canvas.removeEventListener("pointerdown", onPointerDown); canvas.removeEventListener("pointermove", onPointerMove); canvas.removeEventListener("pointerup", onPointerUp); canvas.removeEventListener("pointercancel", onPointerCancel); canvas.removeEventListener("lostpointercapture", onPointerCancel); };
     const ticketRequest = galleryTicketRequest(classroomId);
     void api<{ ticket: string; url: string }>(ticketRequest.path, ticketRequest.options).then(async ({ ticket }) => {
       if (!alive) return;
@@ -270,6 +325,7 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
           }
           syncAppearance(avatar, id === room.sessionId ? appearanceRef.current : player, id === room.sessionId && teacher);
           avatar.userData.target = { x: player.x, z: player.z, rotation: player.rotation };
+          avatar.userData.role = player.role;
           const character=avatar.userData.character as THREE.Group|undefined;
           if (character) { character.rotation.z = player.knocked ? -Math.PI/2 : 0; character.position.y = player.knocked ? 0.35 : 0; }
           avatar.userData.knocked = player.knocked;
@@ -345,11 +401,16 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
         unsent = { dx: 0, dz: 0 }; lastSend = time;
       }
       const distance = 8 + cameraPitch * 10; camera.position.set(visual.x + Math.sin(yaw) * distance, 2 + cameraPitch * 10, visual.z + Math.cos(yaw) * distance); camera.lookAt(visual.x, 1.2, visual.z);
+      if (time - lastAimCheck >= 100) {
+        lastAimCheck = time;
+        const valid = Boolean(currentAim());
+        setAimValid((current) => current === valid ? current : valid);
+      }
       renderer.render(scene, camera);
     };
     const onVisibilityChange = () => {
       onBlur();
-      if (document.hidden) { hiddenAt = performance.now(); activeModelLoad?.controller.abort(); }
+      if (document.hidden) { hiddenAt = performance.now(); activeModelLoad?.controller.abort(); setAimValid(false); }
       else {
         const now = performance.now(), paused = hiddenAt ? now - hiddenAt : 0;
         if (Number.isFinite(jumpTime)) jumpTime += paused;
@@ -359,6 +420,7 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
       }
     };
     canvas.addEventListener("pointerdown", onPointerDown); canvas.addEventListener("pointermove", onPointerMove); canvas.addEventListener("pointerup", onPointerUp);
+    canvas.addEventListener("pointercancel", onPointerCancel); canvas.addEventListener("lostpointercapture", onPointerCancel);
     window.addEventListener("keydown", keyDown); window.addEventListener("keyup", keyUp); window.addEventListener("blur", onBlur); document.addEventListener("visibilitychange", onVisibilityChange);
     frame = requestAnimationFrame(render);
     return () => { modelAbort.abort(); cleanup(); };
@@ -407,7 +469,11 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
       </header>
       {error && <div className="notice" role="alert">{error}</div>}{!config && <p className="gallery-service-note">ยังไม่ได้ตั้งค่า Colyseus ใน Coolify</p>}
       <canvas ref={canvasRef} className="gallery-canvas" aria-label="โลกเสมือนห้องเรียน กด WASD เพื่อเดิน Space เพื่อกระโดด และลากเพื่อหมุนมุมมอง" />
-      {wandMode && <><div className="gallery-crosshair" aria-hidden="true">＋</div><button className="gallery-fire button button-primary" disabled={!castReady || knockSeconds > 0} onClick={() => fireWandRef.current()}>{castReady ? "ยิงเวทมนตร์ · F" : "กำลังชาร์จ…"}</button></>}
+      {wandMode && !customizerOpen && <>
+        <div ref={crosshairRef} className={`gallery-crosshair${aimValid ? "" : " unavailable"}`} style={{ left: `${(aimPoint.current.x + 1) * 50}%`, top: `${(1 - aimPoint.current.y) * 50}%` }} aria-hidden="true">{aimValid ? "＋" : "×"}</div>
+        <p className="gallery-aim-hint">เลื่อนเมาส์หรือแตะเพื่อเล็ง · ลากเพื่อหมุนกล้อง · กด F หรือปุ่มยิง{!aimValid && <span>จุดนี้ยิงไม่ได้ — เลือกจุดเล็งใหม่</span>}</p>
+        <button className="gallery-fire button button-primary" disabled={!castReady || !aimValid || knockSeconds > 0} onClick={() => fireWandRef.current()}>{castReady ? "ยิงเวทมนตร์ · F" : "กำลังชาร์จ…"}</button>
+      </>}
       {knockSeconds > 0 && <div className="gallery-knockdown" role="status">ถูกเวทมนตร์! จะกลับเข้าโลกใน {knockSeconds} วินาที</div>}
       <div className="gallery-touch" onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); const rect = event.currentTarget.getBoundingClientRect(); touchRef.current = { x: (event.clientX - rect.left) / rect.width * 2 - 1, z: (event.clientY - rect.top) / rect.height * 2 - 1 }; }} onPointerMove={(event) => { if (!event.currentTarget.hasPointerCapture(event.pointerId)) return; const rect = event.currentTarget.getBoundingClientRect(); touchRef.current = { x: (event.clientX - rect.left) / rect.width * 2 - 1, z: (event.clientY - rect.top) / rect.height * 2 - 1 }; }} onPointerUp={() => { touchRef.current = { x: 0, z: 0 }; }} onPointerCancel={() => { touchRef.current = { x: 0, z: 0 }; }} onLostPointerCapture={() => { touchRef.current = { x: 0, z: 0 }; }} aria-label="ควบคุมการเดินด้วยสัมผัส">◉</div>
       <button className="gallery-jump button button-quiet" disabled={customizerOpen || knockSeconds > 0} onClick={() => { jumpRef.current = true; }}>กระโดด ↑</button>

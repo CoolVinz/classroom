@@ -23,9 +23,23 @@ export const defaultAvatarAppearance: AvatarAppearance = {
 export function createAvatarCharacter(appearance: AvatarAppearance, withWand = false) {
   appearance = { ...defaultAvatarAppearance, ...appearance };
   const character = new THREE.Group();
+  const tintGeometry = (geometry: THREE.BufferGeometry, color: string) => {
+    const tint = new THREE.Color(color), colors = new Float32Array(geometry.getAttribute("position").count * 3);
+    for (let i = 0; i < colors.length; i += 3) { colors[i] = tint.r; colors[i + 1] = tint.g; colors[i + 2] = tint.b; }
+    geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    return geometry;
+  };
   const limb = (name: string, geometry: THREE.BufferGeometry, color: string, x: number, y: number, length: number) => {
     const pivot = new THREE.Group(); pivot.name = name; pivot.position.set(x, y, 0);
-    const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color, roughness: 0.78 })); mesh.position.y = -length; pivot.add(mesh); character.add(pivot);
+    tintGeometry(geometry, color);
+    if (name.endsWith("Leg") && appearance.shoeStyle !== "none") {
+      const boots = appearance.shoeStyle === "boots";
+      const shoe = tintGeometry(new THREE.BoxGeometry(0.22, boots ? 0.2 : 0.12, 0.32), appearance.shoeColor);
+      shoe.translate(0, (boots ? 0.04 : 0.08) - y + length, 0.055);
+      const merged = mergeGeometries([geometry, shoe], false)!;
+      geometry.dispose(); shoe.dispose(); geometry = merged;
+    }
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.78 })); mesh.position.y = -length; pivot.add(mesh); character.add(pivot);
   };
   limb("leftLeg", new THREE.CapsuleGeometry(0.15, 0.34, 3, 6), appearance.trousersColor, -0.17, 0.7, 0.28);
   limb("rightLeg", new THREE.CapsuleGeometry(0.15, 0.34, 3, 6), appearance.trousersColor, 0.17, 0.7, 0.28);
@@ -33,9 +47,7 @@ export function createAvatarCharacter(appearance: AvatarAppearance, withWand = f
   limb("rightArm", new THREE.CapsuleGeometry(0.095, 0.43, 3, 6), appearance.shirtColor, 0.39, 1.28, 0.25);
   const headParts: THREE.BufferGeometry[] = [];
   const addHead = (geometry: THREE.BufferGeometry, color: string, x: number, y: number, z: number) => {
-    const tint = new THREE.Color(color), colors = new Float32Array(geometry.getAttribute("position").count * 3);
-    for (let i = 0; i < colors.length; i += 3) { colors[i] = tint.r; colors[i + 1] = tint.g; colors[i + 2] = tint.b; }
-    geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3)); geometry.translate(x, y, z); headParts.push(geometry); return geometry;
+    tintGeometry(geometry, color).translate(x, y, z); headParts.push(geometry); return geometry;
   };
   addHead(new THREE.CapsuleGeometry(0.31, 0.48, 4, 8), appearance.shirtColor, 0, 1.03, 0);
   addHead(new THREE.SphereGeometry(0.24, 12, 10), appearance.skinColor, 0, 1.64, 0);
@@ -70,10 +82,6 @@ export function createAvatarCharacter(appearance: AvatarAppearance, withWand = f
     }
     const bridge = new THREE.CylinderGeometry(0.012,0.012,0.06,5); bridge.rotateZ(Math.PI / 2);
     addHead(bridge, appearance.glassesColor, 0, 1.67, 0.25);
-  }
-  if (appearance.shoeStyle !== "none") for (const x of [-0.17, 0.17]) {
-    const shoe = new THREE.BoxGeometry(0.22, appearance.shoeStyle === "boots" ? 0.2 : 0.12, 0.32);
-    addHead(shoe, appearance.shoeColor, x, appearance.shoeStyle === "boots" ? 0.04 : 0.08, 0.055);
   }
   const head = mergeGeometries(headParts, false);
   headParts.forEach((geometry) => geometry.dispose());
