@@ -12,6 +12,10 @@ Give each classroom a shared third-person world where teachers and active studen
 
 - A teacher controls student access for a classroom they own; that teacher can also enter while stopped. Only active linked students can enter an enabled world; anonymous users cannot.
 - The first world view assigns missing active students the next available block index. Existing blocks retain their index through roster-number changes, archival, and restoration.
+- Active students are placed in ascending classroom-number order, then unnumbered students by name and ID. The persistent `block_index` remains the block identity; physical positions are recalculated from the current roster order. Each space is 12 × 10 units, with four spaces per row, 6-unit side gaps, a 12-unit center aisle, and 7-unit row gaps. Each space shows up to 40 exhibits in a 5 × 8 grid; visitors can page through further loaded work without putting stands in the walkways.
+- Each non-empty classroom has one shared mini train. It stops at the entrance and after every three rows, including a final partial group. The track follows the center aisle and returns along the outside. It travels at 22 units/second and waits six seconds at intermediate stops. Students and teachers may board at an open station within five units; the train has 12 seats and riders can leave at any stop.
+- Teachers choose automatic departures every one or two minutes, or start each circuit manually. Automatic service begins with a ten-second boarding countdown; after a circuit it waits until both the configured interval and the ten-second post-return minimum are met. Teachers can start at the entrance or choose a numbered student; that student's three-row group station becomes the start. A stale/archived/unnumbered choice falls back to the entrance.
+- Colyseus owns train timing, the ordered roster snapshot for each circuit, seat allocation, and rider positions. Schedule changes and roster reordering take effect when the train is empty before its next departure. Seats are released on disconnect. Riding, movement, and train timing do not change attendance or student work.
 - Only STL/OBJ/GLB/glTF model and submission files for active students and active assignments appear. Working files, worksheets, assessment data, and other uploads remain private.
 - Student models hidden by a teacher are omitted from student manifests and content routes. Teachers can restore them from the hidden-work tray.
 - Student likes are unique per model/student; self-likes are rejected. Likes do not affect assessment.
@@ -34,14 +38,14 @@ Give each classroom a shared third-person world where teachers and active studen
 **used_by:** teacher classroom workspace and student portal
 
 ```text
-Teacher UI and Three.js world: web/src/App.tsx, web/src/GalleryWorld.tsx, web/src/gallery-avatar.ts, web/src/gallery-motion.ts, web/src/gallery-aim.ts
+Teacher UI and Three.js world: web/src/App.tsx, web/src/GalleryWorld.tsx, web/src/gallery-avatar.ts, web/src/gallery-motion.ts, web/src/gallery-aim.ts; shared block/route geometry and schedule rules: gallery-server/src/train-layout.mjs, gallery-server/src/train-rules.mjs
 Student entry: web/src/StudentPortal.tsx
 Authenticated world APIs and model/material reads: src/routes/gallery.ts
-Migrations: src/db/migrations/014_virtual_gallery.sql, src/db/migrations/015_gallery_avatars.sql, src/db/migrations/016_obj_material_files.sql, src/db/migrations/017_gallery_character_options.sql
-Colyseus service, bounded movement, and temporary combat: gallery-server/src/server.mjs, gallery-server/src/movement.mjs, gallery-server/src/combat.mjs
+Migrations: src/db/migrations/014_virtual_gallery.sql, src/db/migrations/015_gallery_avatars.sql, src/db/migrations/016_obj_material_files.sql, src/db/migrations/017_gallery_character_options.sql, src/db/migrations/018_gallery_train.sql
+Colyseus service, bounded movement, temporary combat, and train simulation: gallery-server/src/server.mjs, gallery-server/src/movement.mjs, gallery-server/src/combat.mjs
 Service deployment: gallery-server/Dockerfile; `/__healthcheck` route: gallery-server/src/server.mjs
 Existing model parser and preview: web/src/model-view.ts, web/src/model-preview.worker.ts, web/src/parse-obj-model.ts, web/src/obj-materials.ts, web/src/ModelPreview.tsx
-Tests: web/src/gallery-api.test.ts, web/src/gallery-motion.test.ts, web/src/gallery-aim.test.ts, web/src/gallery-avatar.test.ts, web/src/parse-obj-model.test.ts, src/student-workflow.test.ts, gallery-server/src/movement-check.mjs, gallery-server/src/combat-check.mjs, gallery-server/src/health-check.mjs; API and live-room integration needs an isolated migrated database
+Tests: web/src/gallery-api.test.ts, web/src/gallery-motion.test.ts, web/src/gallery-aim.test.ts, web/src/gallery-avatar.test.ts, web/src/parse-obj-model.test.ts, src/student-workflow.test.ts, src/gallery-world.integration.ts, gallery-server/src/train-layout-check.mjs, gallery-server/src/train-rules-check.mjs, gallery-server/src/movement-check.mjs, gallery-server/src/combat-check.mjs, gallery-server/src/health-check.mjs; live-room integration needs an isolated database migrated through 018
 ```
 
 ## Warnings and open questions
@@ -49,6 +53,7 @@ Tests: web/src/gallery-api.test.ts, web/src/gallery-motion.test.ts, web/src/gall
 - Coolify uses a separate single-instance service for `gallery-server`, pointed at `gallery-server/Dockerfile`, plus `GALLERY_WS_URL` on the app. Configure its health check at `/__healthcheck`. Production WSS, real student accounts, simultaneous users, and VPS load have not been verified.
 - Realtime service rooms are in-memory on one instance. Adding replicas requires shared Colyseus presence/matchmaking and load-balancer configuration.
 - FPS has not been measured on school devices, under 50 connected visitors, or in a gallery with hundreds of displays. A device may still stutter when it renders many blocks or avatars.
+- Train timing, station boarding, and the 50-connected-visitor train flow have not been verified against a live Colyseus room. The train is simulated in one in-memory service instance; restarting that service resets the current route and passenger seats while preserving teacher schedule settings.
 - OBJ/MTL model files without saved previews or beyond model limits fall back to a thumbnail or an explanatory preview error. MTL texture maps and external resources are ignored. Model and companion files stay in the app's persistent upload volume.
 - Network latency, school WebSocket filtering, and browser graphics performance may vary by device.
 - The wand is a temporary classroom game feature. Rate limits and hit detection are server-authoritative, but live multiplayer timing, school-device rendering cost, and the student hit/respawn flow have not been browser-verified.

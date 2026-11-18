@@ -6,12 +6,15 @@ import { boundedMove } from "./movement.mjs";
 import { applyAppearance } from "./avatar.mjs";
 import { advanceBolt, knockPlayer, playerHitFraction, respawnPlayer, validAim } from "./combat.mjs";
 import { databaseConfig } from "./database-config.mjs";
+import { distanceToNextStation, TRAIN_BOARDING_MS, TRAIN_DWELL_MS, TRAIN_SPEED, trainTrack } from "./train-layout.mjs";
+import { canBoardTrain, firstDepartureAt, nextDepartureAt } from "./train-rules.mjs";
 
 if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
 const pool = new pg.Pool(databaseConfig());
-const Player = schema({ displayName: t.string(), role: t.string(), skinColor: t.string(), hairColor: t.string(), shirtColor: t.string(), trousersColor: t.string(), hairStyle: t.string(), hatStyle: t.string(), glassesStyle: t.string(), shoeStyle: t.string(), hatColor: t.string(), glassesColor: t.string(), shoeColor: t.string(), x: t.number().default(0), z: t.number().default(0), rotation: t.number().default(0), sequence: t.number().default(0), jump: t.number().default(0), movementEpoch: t.number().default(0), knocked: t.boolean().default(false), respawnAt: t.number().default(0), protectedUntil: t.number().default(0) });
+const Player = schema({ displayName: t.string(), role: t.string(), skinColor: t.string(), hairColor: t.string(), shirtColor: t.string(), trousersColor: t.string(), hairStyle: t.string(), hatStyle: t.string(), glassesStyle: t.string(), shoeStyle: t.string(), hatColor: t.string(), glassesColor: t.string(), shoeColor: t.string(), x: t.number().default(0), z: t.number().default(0), rotation: t.number().default(0), sequence: t.number().default(0), jump: t.number().default(0), movementEpoch: t.number().default(0), knocked: t.boolean().default(false), respawnAt: t.number().default(0), protectedUntil: t.number().default(0), trainSeat: t.number().default(-1) });
 const Bolt = schema({ id: t.string(), x: t.number(), y: t.number(), z: t.number() });
-const GalleryState = schema({ players: t.map(Player), bolts: t.map(Bolt) });
+const Train = schema({ active: t.boolean().default(false), x: t.number().default(0), z: t.number().default(2), rotation: t.number().default(0), phase: t.string().default("waiting"), stopId: t.string().default("entrance"), nextStopId: t.string().default(""), departureAt: t.number().default(0), arrivalAt: t.number().default(0), mode: t.string().default("auto"), intervalSeconds: t.number().default(120), seats: t.number().default(0), revision: t.number().default(0), startStudentId: t.string().default(""), layoutRoster: t.string().default("[]") });
+const GalleryState = schema({ players: t.map(Player), bolts: t.map(Bolt), train: Train });
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
 async function consumeTicket(token, classroomId) {
@@ -67,6 +70,15 @@ class ClassroomGallery extends Room {
   usedShotIds = new Set();
   lifeStates = new Map();
   combatTimer;
+  trainRoute = [];
+  trainConfig = null;
+  pendingTrainConfig = null;
+  trainLegIndex = 0;
+  trainCircuitActive = false;
+  trainLastTick = 0;
+  trainLastDeparture = 0;
+  trainSeats = new Map();
+  trainCommandTimes = new Map();
 
   async onAuth(_client, options) {
     if (typeof options.classroomId !== "string") throw new ServerError(4001, "Classroom is required");
@@ -81,18 +93,23 @@ class ClassroomGallery extends Room {
     this.onMessage("move", (client, message) => this.move(client, message));
     this.onMessage("jump", (client) => {
       const player = this.state.players.get(client.sessionId), now = Date.now();
-      if (!player || player.knocked || now - (this.jumpTimes.get(client.sessionId) ?? 0) < 900) return;
+      if (!player || player.knocked || player.trainSeat >= 0 || now - (this.jumpTimes.get(client.sessionId) ?? 0) < 900) return;
       this.jumpTimes.set(client.sessionId, now); this.jumpStarts.set(client.sessionId, now); player.jump++;
     });
     this.onMessage("cast", (client, message) => { void this.cast(client, message).catch(() => client.send("cast-result", { ok: false })); });
     this.onMessage("refresh-avatar", (client) => { void this.refreshAvatar(client).catch(() => {}); });
+    this.onMessage("train-start", (client, message) => { void this.startTrain(client, message).catch(() => client.send("train-result", { ok: false, message: "เริ่มรถไฟไม่ได้" })); });
+    this.onMessage("train-board", (client, message) => { void this.boardTrain(client, message).catch(() => client.send("train-result", { ok: false, message: "ขึ้นรถไฟไม่ได้" })); });
+    this.onMessage("train-leave", (client, message) => { void this.leaveTrain(client, message).catch(() => client.send("train-result", { ok: false, message: "ลงจากรถไฟไม่ได้" })); });
+    this.state.train = new Train();
+    await this.refreshTrainConfiguration(true).catch(() => {});
     const readSignature = async () => {
       const { rows } = await pool.query(`SELECT
         (SELECT COUNT(*)::int FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id WHERE f.classroom_id=$1 AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$' AND s.archived_at IS NULL AND a.archived_at IS NULL) AS files,
         (SELECT COALESCE(MAX(f.created_at)::text,'') FROM classroom.files f WHERE f.classroom_id=$1 AND f.kind IN ('model','submission')) AS latest,
         (SELECT COUNT(*)::int FROM classroom.gallery_hidden_models WHERE classroom_id=$1) AS hidden,
         (SELECT COUNT(*)::int FROM classroom.gallery_likes WHERE classroom_id=$1) AS likes,
-        (SELECT COUNT(*)::int FROM classroom.students WHERE classroom_id=$1 AND archived_at IS NULL) AS students,
+        (SELECT COALESCE(json_agg(json_build_array(id,student_number,display_name) ORDER BY student_number NULLS LAST,display_name,id)::text,'[]') FROM classroom.students WHERE classroom_id=$1 AND archived_at IS NULL) AS roster,
         (SELECT enabled FROM classroom.gallery_worlds WHERE classroom_id=$1) AS enabled`, [this.classroomId]);
       return JSON.stringify(rows[0]);
     };
@@ -120,7 +137,8 @@ class ClassroomGallery extends Room {
         if (auth && !(await stillAllowed(auth).catch(() => false))) client.leave(4003, "Classroom access expired");
       }
     }, 15000);
-    this.combatTimer = setInterval(() => this.updateCombat(), 50);
+    this.combatTimer = setInterval(() => { this.updateCombat(); this.updateTrain(); }, 50);
+    this.trainSettingsTimer = setInterval(() => { void this.refreshTrainConfiguration().catch(() => {}); }, 5000);
   }
 
   async onJoin(client, _options, auth) {
@@ -141,26 +159,168 @@ class ClassroomGallery extends Room {
     }
     if (life && (life.knocked || life.protectedUntil > Date.now())) Object.assign(player, life);
     else { player.x = Math.random() * 4 - 2; player.z = Math.random() * 4 - 2; }
+    player.trainSeat = -1;
     this.state.players.set(client.sessionId, player);
     this.movementTimes.set(client.sessionId, Date.now());
   }
 
   move(client, message) {
     const player = this.state.players.get(client.sessionId);
-    if (!player || !message || player.knocked || message.movementEpoch !== player.movementEpoch) return;
+    if (!player || !message || player.knocked || player.trainSeat >= 0 || message.movementEpoch !== player.movementEpoch) return;
     const now = Date.now();
     const count = this.movementMessages.get(client.sessionId) ?? { start: now, total: 0 };
     if (now - count.start > 1000) { count.start = now; count.total = 0; }
     if (++count.total > 20) return;
     this.movementMessages.set(client.sessionId, count);
     const elapsed = Math.min(1, Math.max(0.05, (now - (this.movementTimes.get(client.sessionId) ?? now)) / 1000));
-    const next = boundedMove(player, message, elapsed);
+    const next = boundedMove(player, message, elapsed, Math.max(2000, this.trainRoute.length ? Math.abs(Math.min(...this.trainRoute.map((point) => point.z))) + 100 : 2000));
     if (!next) return;
     if (Number.isSafeInteger(message.sequence) && message.sequence > player.sequence) player.sequence = message.sequence;
     this.movementTimes.set(client.sessionId, now);
     player.x = next.x;
     player.z = next.z;
     player.rotation = next.rotation;
+  }
+
+  async readTrainConfiguration() {
+    const [{ rows: worlds }, { rows: roster }] = await Promise.all([
+      pool.query(`SELECT w.train_mode AS mode, w.train_interval_seconds AS "intervalSeconds", CASE WHEN s.id IS NOT NULL THEN s.id ELSE NULL END AS "startStudentId"
+        FROM classroom.gallery_worlds w LEFT JOIN classroom.students s ON s.id=w.train_start_student_id AND s.classroom_id=w.classroom_id AND s.archived_at IS NULL AND s.student_number IS NOT NULL WHERE w.classroom_id=$1`, [this.classroomId]),
+      pool.query(`SELECT id, student_number AS "studentNumber", display_name AS "displayName" FROM classroom.students WHERE classroom_id=$1 AND archived_at IS NULL ORDER BY student_number NULLS LAST, display_name, id`, [this.classroomId]),
+    ]);
+    const world = worlds[0] ?? { mode: "auto", intervalSeconds: 120, startStudentId: null };
+    const startIndex = world.startStudentId ? roster.findIndex((student) => student.id === world.startStudentId) : -1;
+    const route = trainTrack(roster.length, startIndex < 0 ? null : startIndex);
+    return { mode: world.mode, intervalSeconds: Number(world.intervalSeconds), startStudentId: startIndex < 0 ? null : world.startStudentId, roster: roster.map((student) => ({ studentId: student.id, studentNumber: student.studentNumber, displayName: student.displayName })), route };
+  }
+
+  async refreshTrainConfiguration(initial = false) {
+    const config = await this.readTrainConfiguration();
+    const signature = JSON.stringify(config);
+    if (signature === this.trainConfig?.signature) return;
+    config.signature = signature;
+    if (initial || (!this.trainCircuitActive && this.trainSeats.size === 0)) this.applyTrainConfiguration(config);
+    else this.pendingTrainConfig = config;
+  }
+
+  applyTrainConfiguration(config, schedule = true) {
+    this.trainConfig = config;
+    this.trainRoute = config.route;
+    const train = this.state.train;
+    train.revision++;
+    train.active = this.trainRoute.length > 0;
+    train.mode = config.mode;
+    train.intervalSeconds = config.intervalSeconds;
+    train.startStudentId = config.startStudentId ?? "";
+    train.layoutRoster = JSON.stringify(config.roster);
+    train.seats = this.trainSeats.size;
+    this.trainLegIndex = 0;
+    this.trainCircuitActive = false;
+    this.trainLastTick = Date.now();
+    if (!train.active) { train.phase = "waiting"; train.stopId = ""; train.nextStopId = ""; train.departureAt = 0; train.arrivalAt = 0; train.x = 0; train.z = 2; return; }
+    train.x = this.trainRoute[0].x; train.z = this.trainRoute[0].z; train.rotation = 0;
+    train.stopId = this.trainRoute[0].id; train.phase = schedule && config.mode === "auto" ? "boarding" : "waiting";
+    train.departureAt = firstDepartureAt(Date.now(), config.mode);
+    train.arrivalAt = 0;
+    this.updateTrainNextStop();
+  }
+
+  updateTrainNextStop() {
+    const train = this.state.train, route = this.trainRoute;
+    if (!route.length) { train.nextStopId = ""; return; }
+    for (let step = 1; step <= route.length; step++) {
+      const point = route[(this.trainLegIndex + step) % route.length];
+      if (point.id) { train.nextStopId = point.id; return; }
+    }
+    train.nextStopId = "";
+  }
+
+  async startTrain(client, message) {
+    const auth = this.members.get(client.sessionId), train = this.state.train, now = Date.now();
+    const commandKey = auth ? `start:${auth.accountId}` : "";
+    if (!auth || auth.role !== "teacher" || !message || message.revision !== train.revision || train.mode !== "manual" || train.phase !== "waiting" || !train.active || now - (this.trainCommandTimes.get(commandKey) ?? 0) < 500) { client.send("train-result", { ok: false, message: "รถไฟไม่พร้อมออกหรือข้อมูลเปลี่ยนแล้ว" }); return; }
+    this.trainCommandTimes.set(commandKey, now);
+    if (!(await stillAllowed(auth).catch(() => false)) || this.members.get(client.sessionId) !== auth) { client.leave(4003, "Classroom access expired"); return; }
+    if (message.revision !== train.revision || train.mode !== "manual" || train.phase !== "waiting") { client.send("train-result", { ok: false, message: "รถไฟเริ่มไปแล้วหรือข้อมูลเปลี่ยนแล้ว" }); return; }
+    train.phase = "boarding"; train.departureAt = now + TRAIN_BOARDING_MS; train.stopId = this.trainRoute[this.trainLegIndex]?.id ?? "entrance";
+    client.send("train-result", { ok: true, message: "รถไฟจะออกใน 10 วินาที" });
+  }
+
+  async boardTrain(client, message) {
+    const auth = this.members.get(client.sessionId), player = this.state.players.get(client.sessionId), train = this.state.train, now = Date.now();
+    const commandKey = auth ? `board:${auth.accountId}` : "";
+    const last = auth ? this.trainCommandTimes.get(commandKey) ?? 0 : 0;
+    if (!auth || !player || !message || message.revision !== train.revision || player.trainSeat >= 0 || !canBoardTrain({ active: train.active, phase: train.phase, seats: this.trainSeats.size, distance: Math.hypot(player.x - train.x, player.z - train.z) }) || now - last < 250) { client.send("train-result", { ok: false, message: "อยู่ใกล้สถานีและรอให้รถหยุดก่อนขึ้นรถไฟ" }); return; }
+    this.trainCommandTimes.set(commandKey, now);
+    if (!(await stillAllowed(auth).catch(() => false)) || this.members.get(client.sessionId) !== auth) { client.leave(4003, "Classroom access expired"); return; }
+    if (message.revision !== train.revision || player.trainSeat >= 0 || !canBoardTrain({ active: train.active, phase: train.phase, seats: this.trainSeats.size, distance: Math.hypot(player.x - train.x, player.z - train.z) })) { client.send("train-result", { ok: false, message: "รถไฟออกแล้วหรือไม่มีที่นั่งว่าง" }); return; }
+    const occupied = new Set(this.trainSeats.values()); let seat = 0; while (occupied.has(seat)) seat++;
+    this.trainSeats.set(client.sessionId, seat); player.trainSeat = seat; player.x = train.x; player.z = train.z; player.rotation = train.rotation; player.movementEpoch++;
+    this.jumpStarts.delete(client.sessionId); train.seats = this.trainSeats.size;
+    client.send("train-result", { ok: true, message: "ขึ้นรถไฟแล้ว" });
+  }
+
+  async leaveTrain(client, message) {
+    const auth = this.members.get(client.sessionId), player = this.state.players.get(client.sessionId), train = this.state.train, now = Date.now();
+    const commandKey = auth ? `leave:${auth.accountId}` : "";
+    if (!auth || !player || !message || message.revision !== train.revision || player.trainSeat < 0 || !["waiting", "boarding", "dwell"].includes(train.phase) || now - (this.trainCommandTimes.get(commandKey) ?? 0) < 250) { client.send("train-result", { ok: false, message: "ลงจากรถได้เมื่อรถไฟจอดที่สถานี" }); return; }
+    this.trainCommandTimes.set(commandKey, now);
+    if (!(await stillAllowed(auth).catch(() => false)) || this.members.get(client.sessionId) !== auth) { client.leave(4003, "Classroom access expired"); return; }
+    if (message.revision !== train.revision || player.trainSeat < 0 || !["waiting", "boarding", "dwell"].includes(train.phase)) { client.send("train-result", { ok: false, message: "รถไฟออกจากสถานีแล้ว" }); return; }
+    const seat = this.trainSeats.get(client.sessionId) ?? 0;
+    this.trainSeats.delete(client.sessionId); player.trainSeat = -1; player.x = train.x + 2 + (seat % 3); player.z = train.z + 3; player.rotation = 0; player.movementEpoch++;
+    this.jumpStarts.delete(client.sessionId); train.seats = this.trainSeats.size;
+    client.send("train-result", { ok: true, message: "ลงจากรถไฟแล้ว" });
+  }
+
+  updateTrain() {
+    const train = this.state.train, route = this.trainRoute, now = Date.now();
+    if (!train.active || !route.length) return;
+    if (train.phase === "boarding" && now >= train.departureAt) {
+      this.trainLastDeparture = train.departureAt; this.trainCircuitActive = true; train.phase = "moving"; train.stopId = ""; train.departureAt = 0; this.updateTrainNextStop();
+      train.arrivalAt = now + distanceToNextStation(route, this.trainLegIndex, train.x, train.z) / TRAIN_SPEED * 1000;
+    } else if (train.phase === "dwell" && now >= train.departureAt) {
+      train.phase = "moving"; train.stopId = ""; train.departureAt = 0; this.updateTrainNextStop();
+      train.arrivalAt = now + distanceToNextStation(route, this.trainLegIndex, train.x, train.z) / TRAIN_SPEED * 1000;
+    }
+    if (train.phase !== "moving") { this.trainLastTick = now; return; }
+    let remaining = TRAIN_SPEED * Math.min(0.1, Math.max(0, (now - this.trainLastTick) / 1000)); this.trainLastTick = now;
+    while (remaining > 0) {
+      const nextIndex = (this.trainLegIndex + 1) % route.length, target = route[nextIndex], dx = target.x - train.x, dz = target.z - train.z, distance = Math.hypot(dx, dz);
+      if (distance <= remaining + 0.001) {
+        train.x = target.x; train.z = target.z; if (distance > 0) train.rotation = Math.atan2(dx, dz);
+        remaining -= distance; this.trainLegIndex = nextIndex;
+        if (nextIndex === 0) { void this.finishTrainCircuit(now); return; }
+        if (target.id) { train.phase = "dwell"; train.stopId = target.id; train.arrivalAt = now; train.departureAt = now + TRAIN_DWELL_MS; this.updateTrainNextStop(); this.syncTrainRiders(); return; }
+        continue;
+      }
+      const fraction = remaining / distance; train.x += dx * fraction; train.z += dz * fraction; train.rotation = Math.atan2(dx, dz); remaining = 0;
+    }
+    this.syncTrainRiders();
+  }
+
+  syncTrainRiders() {
+    const train = this.state.train;
+    for (const sessionId of this.trainSeats.keys()) {
+      const player = this.state.players.get(sessionId);
+      if (player) { player.x = train.x; player.z = train.z; player.rotation = train.rotation; }
+    }
+  }
+
+  async finishTrainCircuit(now) {
+    const train = this.state.train;
+    if (train.phase !== "moving") return;
+    train.phase = "waiting"; train.stopId = this.trainRoute[0]?.id ?? "entrance"; train.arrivalAt = now; train.departureAt = 0;
+    for (const [sessionId, seat] of this.trainSeats) {
+      const player = this.state.players.get(sessionId);
+      if (player) { player.trainSeat = -1; player.x = train.x + 2 + (seat % 3); player.z = train.z + 3; player.rotation = 0; player.movementEpoch++; }
+    }
+    this.trainSeats.clear(); train.seats = 0; this.trainCircuitActive = false;
+    const config = await this.readTrainConfiguration().catch(() => this.pendingTrainConfig ?? this.trainConfig);
+    if (config) { config.signature = JSON.stringify(config); this.pendingTrainConfig = null; this.applyTrainConfiguration(config, false); }
+    if (!train.active) return;
+    train.phase = train.mode === "auto" ? "boarding" : "waiting";
+    train.departureAt = nextDepartureAt(train.mode, train.intervalSeconds, this.trainLastDeparture, now);
   }
 
   async cast(client, message) {
@@ -211,6 +371,7 @@ class ClassroomGallery extends Room {
       if (hit) {
         const targetClient=this.clients.find((candidate)=>candidate.sessionId===hit.sessionId);
         if (knockPlayer(hit.player,now)) {
+          if (hit.player.trainSeat >= 0) { this.trainSeats.delete(hit.sessionId); hit.player.trainSeat = -1; this.state.train.seats = this.trainSeats.size; }
           targetClient?.send("knocked",{respawnAt:hit.player.respawnAt});
           this.broadcast("wand-impact",{id,x:hit.x,y:hit.y,z:hit.z});
         }
@@ -246,6 +407,8 @@ class ClassroomGallery extends Room {
   onLeave(client) {
     const auth=this.members.get(client.sessionId), player=this.state.players.get(client.sessionId);
     if (auth && player) this.lifeStates.set(auth.accountId,{x:player.x,z:player.z,rotation:player.rotation,knocked:player.knocked,respawnAt:player.respawnAt,protectedUntil:player.protectedUntil,movementEpoch:player.movementEpoch});
+    if (this.trainSeats.delete(client.sessionId)) this.state.train.seats=this.trainSeats.size;
+    if (auth) for (const action of ["start", "board", "leave"]) this.trainCommandTimes.delete(`${action}:${auth.accountId}`);
     this.state.players.delete(client.sessionId);
     this.members.delete(client.sessionId);
     this.movementTimes.delete(client.sessionId);
@@ -255,7 +418,7 @@ class ClassroomGallery extends Room {
     this.jumpStarts.delete(client.sessionId);
   }
 
-  onDispose() { clearInterval(this.accessTimer); clearInterval(this.galleryTimer); clearInterval(this.worldTimer); clearInterval(this.combatTimer); this.state.bolts.clear(); this.boltDetails.clear(); this.lifeStates.clear(); this.usedShotIds.clear(); }
+  onDispose() { clearInterval(this.accessTimer); clearInterval(this.galleryTimer); clearInterval(this.worldTimer); clearInterval(this.combatTimer); clearInterval(this.trainSettingsTimer); this.state.bolts.clear(); this.boltDetails.clear(); this.lifeStates.clear(); this.usedShotIds.clear(); this.trainSeats.clear(); this.trainCommandTimes.clear(); }
 }
 
 const gameServer = new Server({ express: (app) => app.get("/__healthcheck", (_request, response) => response.status(200).type("text").send("OK")) });

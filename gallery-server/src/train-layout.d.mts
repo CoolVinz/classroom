@@ -1,0 +1,13 @@
+export const GALLERY_COLUMNS: number;
+export const BLOCK_WIDTH: number;
+export const BLOCK_DEPTH: number;
+export const ROW_SPACING: number;
+export const TRAIN_SPEED: number;
+export const TRAIN_DWELL_MS: number;
+export const TRAIN_BOARDING_MS: number;
+export const TRAIN_SEATS: number;
+export function blockPosition(index: number): { x: number; z: number };
+export function exhibitPosition(index: number): { x: number; z: number };
+export function trainTrack(studentCount: number, startStudentIndex?: number | null): { id: string; x: number; z: number }[];
+export function trainStartStation(studentIndex: number | null, studentCount: number): string;
+export function distanceToNextStation(route: { id: string; x: number; z: number }[], legIndex: number, x: number, z: number): number;

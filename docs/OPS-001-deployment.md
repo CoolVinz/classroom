@@ -23,6 +23,7 @@
 - Migration `014_virtual_gallery.sql` adds per-classroom world settings, stable student blocks, teacher-hidden displays, likes, and short-lived room tickets. It preserves existing attendance, assignments, submissions, and files.
 - Migration `015_gallery_avatars.sql` adds default appearance settings to teacher and student accounts. The app API saves them; the Colyseus service includes them in player state and refreshes connected rooms from PostgreSQL.
 - Migration `017_gallery_character_options.sql` adds default accessory selections and widens the validated appearance options. Deploy the Classroom app first so this migration applies before deploying the updated Colyseus schema.
+- Migration `018_gallery_train.sql` adds per-classroom mini-train mode, departure interval, and optional starting-student settings. Deploy the Classroom app first to apply migration 018, then deploy `gallery-server` from the same commit so its schema and train simulator are available. No new environment variable, dependency, or volume is required.
 - Gallery movement/save fixes require redeploying both the main app and `gallery-server`; they need no additional migration or environment variables. Deploy the app first, then Colyseus. The app accepts older position state during rollout; the updated service also accepts older clients. New clients use sequenced movement acknowledgements and server-approved jump events. A gallery restart disconnects visitors, who must re-enter their world.
 
 ## Runtime environment
@@ -67,7 +68,7 @@ Configure the separate Colyseus service with the same `DATABASE_URL` and `DATABA
 
 ## Deploy and initialize
 
-Back up PostgreSQL and the upload volume before release because the app applies migrations on startup. For appearance and combat changes, deploy the app first so migration 017 is applied, then deploy `gallery-server`. Verify `/health/ready`, teacher/student admission, saved appearances across rooms, archived-member revocation, and a synthetic model upload appearing in its student's block. Test movement, teacher-only casting, knockdown/respawn, and classroom isolation with synthetic users. Uploaded file contents need their own off-server backup. See [README deployment instructions](../README.md).
+Back up PostgreSQL and the upload volume before release because the app applies migrations on startup. For gallery train changes, deploy the app first so migration 018 and its settings API are ready, then deploy `gallery-server`. Verify `/health/ready`, teacher/student admission, ordered student spaces, saved train settings, manual and automatic departures, seat limits, disembarking, archived-member revocation, and a synthetic model upload appearing in its student's block. Uploaded file contents need their own off-server backup. See [README deployment instructions](../README.md).
 
 ## Open questions
 
@@ -76,4 +77,4 @@ Back up PostgreSQL and the upload volume before release because the app applies 
 
 ## World controls and glTF release
 
-Deploy Classroom first to apply migration 017, then deploy the separate Colyseus application from the same commit. No new environment variable, dependency, or volume is required. Stopping student access keeps the classroom teacher connected and leaves other classrooms running; the gallery service checks world status every two seconds. Confirm teacher inspection while stopped, rejected student entry, and restart after deployment. GLB/glTF files remain in the existing upload volume and shared quota. Texture-heavy models may remain thumbnail-only under the 128 MiB world texture budget.
+Deploy Classroom first to apply migration 018, then deploy the separate Colyseus application from the same commit. No new environment variable, dependency, or volume is required. Stopping student access keeps the classroom teacher connected and leaves other classrooms running; the gallery service checks world status every two seconds. Confirm teacher inspection while stopped, rejected student entry, and restart after deployment. GLB/glTF files remain in the existing upload volume and shared quota. Texture-heavy models may remain thumbnail-only under the 128 MiB world texture budget.

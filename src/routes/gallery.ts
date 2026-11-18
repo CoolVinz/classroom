@@ -95,14 +95,15 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     await ensureBlocks(params.classroomId);
     const offset = Math.max(0, Math.min(100000, Number(query.offset) || 0));
     const [blocks, models] = await Promise.all([
-      sql`SELECT s.id AS "studentId", s.display_name AS "displayName", s.student_number AS "studentNumber", b.block_index AS "blockIndex", FALSE AS archived FROM classroom.gallery_blocks b JOIN classroom.students s ON s.id=b.student_id WHERE b.classroom_id=${params.classroomId} AND s.archived_at IS NULL ORDER BY b.block_index`,
+      sql`SELECT s.id AS "studentId", s.display_name AS "displayName", s.student_number AS "studentNumber", b.block_index AS "blockIndex", (row_number() OVER (ORDER BY s.student_number NULLS LAST, s.display_name, s.id) - 1)::int AS "layoutIndex", FALSE AS archived FROM classroom.gallery_blocks b JOIN classroom.students s ON s.id=b.student_id WHERE b.classroom_id=${params.classroomId} AND s.archived_at IS NULL ORDER BY s.student_number NULLS LAST, s.display_name, s.id`,
       sql`SELECT f.id, f.student_id AS "studentId", s.display_name AS "displayName", s.student_number AS "studentNumber", a.id AS "assignmentId", a.title AS "assignmentTitle", f.original_name AS "originalName", f.media_type AS "mediaType", f.material_storage_name IS NOT NULL AS "materialAvailable", f.thumbnail_size_bytes IS NOT NULL AS "thumbnailAvailable", f.created_at AS "createdAt", (h.file_id IS NOT NULL) AS hidden, (SELECT COUNT(*)::int FROM classroom.gallery_likes l WHERE l.file_id=f.id) AS likes, ${student?.id ?? null}::uuid IS NOT NULL AND f.student_id <> (SELECT s2.id FROM classroom.students s2 WHERE s2.account_id=${student?.id ?? null} AND s2.classroom_id=${params.classroomId} AND s2.archived_at IS NULL LIMIT 1) AND EXISTS (SELECT 1 FROM classroom.gallery_likes l JOIN classroom.students ls ON ls.id=l.student_id WHERE l.file_id=f.id AND ls.account_id=${student?.id ?? null}) AS "likedByMe"
         FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id LEFT JOIN classroom.gallery_hidden_models h ON h.classroom_id=f.classroom_id AND h.file_id=f.id
         WHERE f.classroom_id=${params.classroomId} AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$' AND s.archived_at IS NULL AND a.archived_at IS NULL AND (${teacher !== null} OR h.file_id IS NULL)
-        ORDER BY btrim(s.display_name), f.created_at DESC LIMIT 40 OFFSET ${offset}`,
+        ORDER BY s.student_number NULLS LAST, s.display_name, s.id, f.created_at DESC, f.id LIMIT 40 OFFSET ${offset}`,
     ]);
     const [count] = await sql<{ count: number }[]>`SELECT COUNT(*)::int AS count FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id LEFT JOIN classroom.gallery_hidden_models h ON h.classroom_id=f.classroom_id AND h.file_id=f.id WHERE f.classroom_id=${params.classroomId} AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$' AND s.archived_at IS NULL AND a.archived_at IS NULL AND (${teacher !== null} OR h.file_id IS NULL)`;
-    return { classroomId: params.classroomId, classroomName: world.classroomName, enabled: world.enabled, blocks, models, nextOffset: offset + models.length < count.count ? offset + models.length : null, teacher: Boolean(teacher), viewerStudentId };
+    const [train] = await sql<{ mode: "auto" | "manual"; intervalSeconds: number; startStudentId: string | null }[]>`SELECT w.train_mode AS mode, w.train_interval_seconds AS "intervalSeconds", CASE WHEN s.id IS NULL THEN NULL ELSE s.id END AS "startStudentId" FROM classroom.gallery_worlds w LEFT JOIN classroom.students s ON s.id=w.train_start_student_id AND s.classroom_id=w.classroom_id AND s.archived_at IS NULL AND s.student_number IS NOT NULL WHERE w.classroom_id=${params.classroomId}`;
+    return { classroomId: params.classroomId, classroomName: world.classroomName, enabled: world.enabled, blocks, models, nextOffset: offset + models.length < count.count ? offset + models.length : null, teacher: Boolean(teacher), viewerStudentId, train: { mode: train?.mode ?? "auto", intervalSeconds: train?.intervalSeconds ?? 120, startStudentId: train?.startStudentId ?? null } };
   })
   .put("/classrooms/:classroomId/gallery", async ({ params, body, request }) => {
     checkRequestOrigin(request);
@@ -111,6 +112,17 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     await sql`INSERT INTO classroom.gallery_worlds(classroom_id,enabled) VALUES(${params.classroomId},${body.enabled}) ON CONFLICT(classroom_id) DO UPDATE SET enabled=EXCLUDED.enabled, updated_at=NOW()`;
     return { ok: true, enabled: body.enabled };
   }, { body: t.Object({ enabled: t.Boolean() }) })
+  .put("/classrooms/:classroomId/gallery/train", async ({ params, body, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireActor(request);
+    await ownedClass(actor, params.classroomId);
+    if (body.startStudentId) {
+      const [student] = await sql<{ id: string }[]>`SELECT id FROM classroom.students WHERE id=${body.startStudentId} AND classroom_id=${params.classroomId} AND archived_at IS NULL AND student_number IS NOT NULL`;
+      if (!student) throw new HttpError(400, "เลือกนักเรียนที่ยังใช้งานและมีเลขที่ในห้องนี้");
+    }
+    await sql`INSERT INTO classroom.gallery_worlds(classroom_id,enabled,train_mode,train_interval_seconds,train_start_student_id) VALUES(${params.classroomId},false,${body.mode},${body.intervalSeconds},${body.startStudentId ?? null}) ON CONFLICT(classroom_id) DO UPDATE SET train_mode=EXCLUDED.train_mode, train_interval_seconds=EXCLUDED.train_interval_seconds, train_start_student_id=EXCLUDED.train_start_student_id, updated_at=NOW()`;
+    return { ok: true, mode: body.mode, intervalSeconds: body.intervalSeconds, startStudentId: body.startStudentId ?? null };
+  }, { body: t.Object({ mode: t.Union([t.Literal("auto"), t.Literal("manual")]), intervalSeconds: t.Union([t.Literal(60), t.Literal(120)]), startStudentId: t.Optional(t.Nullable(t.String({ format: "uuid" }))) }) })
   .post("/classrooms/:classroomId/gallery/ticket", async ({ params, request }) => {
     checkRequestOrigin(request);
     const teacher = await readActor(request);

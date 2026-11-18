@@ -14,6 +14,8 @@
 - The gallery reuses stable model-file UUIDs from MOD-004. It must not require students to upload the same file again.
 - The world loads lightweight display models progressively so one class's full collection does not load at once.
 - The first release uses a third-person walkable gallery with keyboard and touch controls, stable display blocks, teacher hide/restore, and a 50-visitor room cap.
+- Active students' display spaces are positioned by classroom number, with unnumbered students last, while each database block identity stays stable. Spaces measure 12 × 10 units and are separated by walkways and a center aisle.
+- A shared mini train makes automatic one- or two-minute circuits or teacher-started manual trips. It stops at the entrance and every three rows, carries up to 12 visitors, and permits boarding or leaving at open stations.
 
 ## Preparation available in MOD-004
 
