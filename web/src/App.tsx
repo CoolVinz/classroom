@@ -62,6 +62,7 @@ function Login({ onLogin, studentOnly = false }: { onLogin: (user: User) => void
 
 function App() {
   const [user, setUser] = useState<User | null>(null); const [ready, setReady] = useState(false);
+  const [pathname, setPathname] = useState(window.location.pathname);
   const [view, setView] = useState<View>("home"); const [selected, setSelected] = useState<Classroom | null>(null);
   const [lessonDirty, setLessonDirty] = useState(false);
   const [rooms, setRooms] = useState<Classroom[]>([]); const [stats, setStats] = useState<Record<string, number | string> | null>(null);
@@ -72,6 +73,7 @@ function App() {
     catch (reason) { setError(reason instanceof Error ? reason.message : "โหลดข้อมูลไม่สำเร็จ"); }
   }, [user, selected?.id]);
   useEffect(() => { api<{ user: User | null }>("/auth/me").then((result) => setUser(result.user)).catch(() => {}).finally(() => setReady(true)); }, []);
+  useEffect(() => { const update = () => setPathname(window.location.pathname); window.addEventListener("popstate", update); return () => window.removeEventListener("popstate", update); }, []);
   useEffect(() => { if (user && user.role !== "student") void refresh(); }, [user, refresh]);
   async function createRoom(name: string) {
     setBusy(true); setError("");
@@ -84,21 +86,27 @@ function App() {
     setLessonDirty(false);
     return true;
   }
+  function navigate(path: string) { window.history.pushState(null, "", path); setPathname(path); }
+  function requestGalleryFullscreen() { void document.documentElement.requestFullscreen?.({ navigationUI: "hide" }).catch(() => {}); }
+  function openWorld(classroomId: string) {
+    requestGalleryFullscreen();
+    navigate(`/world/${classroomId}`);
+  }
   async function logout() { if (!confirmLessonLeave()) return; try { await api("/auth/logout", { method: "POST" }); } catch { /* Clear the local view even when the network is unavailable. */ } setUser(null); setSelected(null); setView("home"); }
   if (!ready) return <div className="loading"><span className="spinner" />กำลังเปิดห้องเรียนของคุณ…</div>;
-  if (/^\/lessons\/[0-9a-f-]{36}\/?$/i.test(window.location.pathname)) return <PublicLessonPage student={user?.role === "student" ? user : null} />;
-  const worldMatch = window.location.pathname.match(/^\/world\/([0-9a-f-]{36})\/?$/i);
-  if (worldMatch) return user ? <div className="world-page"><Suspense fallback={<div className="loading"><span className="spinner"/>กำลังเปิดโลกเสมือน…</div>}><GalleryWorld classroomId={worldMatch[1]} user={user} close={() => { window.location.href = "/"; }} /></Suspense><button className="world-logout" onClick={() => void logout()}>ออกจากระบบ</button></div> : <Login studentOnly onLogin={setUser} />;
-  const quizMatch = window.location.pathname.match(/^\/quizzes\/([0-9a-f-]{36})\/?$/i);
+  if (/^\/lessons\/[0-9a-f-]{36}\/?$/i.test(pathname)) return <PublicLessonPage student={user?.role === "student" ? user : null} />;
+  const worldMatch = pathname.match(/^\/world\/([0-9a-f-]{36})\/?$/i);
+  if (worldMatch) return user ? <div className="world-page"><Suspense fallback={<div className="loading"><span className="spinner"/>กำลังเปิดโลกเสมือน…</div>}><GalleryWorld classroomId={worldMatch[1]} user={user} close={() => navigate("/")} logout={() => void logout()} /></Suspense></div> : <Login studentOnly onLogin={setUser} />;
+  const quizMatch = pathname.match(/^\/quizzes\/([0-9a-f-]{36})\/?$/i);
   if (quizMatch) return user?.role === "student" ? <StudentQuizPage student={user} /> : user ? <main className="public-lesson-page"><section className="panel"><h1>แบบทดสอบสำหรับนักเรียน</h1><p>กรุณาออกจากบัญชีครูและเข้าสู่ระบบด้วย Google ของนักเรียน</p><Button onClick={() => void logout()}>ออกจากระบบ</Button></section></main> : <Login studentOnly onLogin={setUser} />;
   if (!user) return <Login onLogin={setUser} />;
-  if (user.role === "student") return <StudentPortal user={user} logout={() => void logout()} />;
+  if (user.role === "student") return <StudentPortal user={user} logout={() => void logout()} openWorld={openWorld} />;
   const pageNames: Record<View, string> = { home: "ภาพรวม", classes: "ห้องเรียน", summary: "สรุปการเข้าเรียน", teachers: "จัดการบัญชีครู", lessons: "บทเรียน", quizzes: "แบบทดสอบ" };
   return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark">ค</div><div><strong>ห้องเรียน</strong><span>พื้นที่ของคุณครู</span></div></div><p className="side-caption">เมนู</p>
     <nav className="side-nav" aria-label="เมนูหลัก"><button className={view === "home" && !selected ? "active" : ""} onClick={() => { if (view !== "home" && !confirmLessonLeave()) return; setView("home"); setSelected(null); }}><span>⌂</span>ภาพรวม</button><button className={view === "classes" ? "active" : ""} onClick={() => { if (view !== "classes" && !confirmLessonLeave()) return; setView("classes"); setSelected(null); }}><span>▦</span>ห้องเรียน</button><button className={view === "lessons" ? "active" : ""} onClick={() => { if (view !== "lessons" && !confirmLessonLeave()) return; setView("lessons"); setSelected(null); }}><span>▧</span>บทเรียน</button><button className={view === "quizzes" ? "active" : ""} onClick={() => { if (view !== "quizzes" && !confirmLessonLeave()) return; setView("quizzes"); setSelected(null); }}><span>✓</span>แบบทดสอบ</button><button className={view === "summary" ? "active" : ""} onClick={() => { if (view !== "summary" && !confirmLessonLeave()) return; setView("summary"); setSelected(null); }}><span>▤</span>สรุปการเข้าเรียน</button>{user.role === "owner" && <button className={view === "teachers" ? "active" : ""} onClick={() => { if (view !== "teachers" && !confirmLessonLeave()) return; setView("teachers"); setSelected(null); }}><span>♙</span>จัดการบัญชีครู</button>}</nav>
     <div className="sidebar-bottom"><div className="profile"><div className="avatar">{user.displayName.slice(0, 1)}</div><div className="profile-copy"><strong>{user.displayName}</strong><span>{user.role === "owner" ? "ผู้ดูแล" : "คุณครู"}</span></div><button className="icon-button" onClick={logout} aria-label="ออกจากระบบ" title="ออกจากระบบ">↗</button></div></div>
   </aside><main className="main-area"><header className="topbar"><div className="breadcrumb">ห้องเรียน <span>/</span> {selected?.name ?? pageNames[view]}</div><div className="date-pill"><i />{showDate(today)}</div></header><div className="page-content">{error && <div className="notice" role="alert">{error}<button onClick={() => setError("")} aria-label="ปิด">×</button></div>}
-    {selected ? <ClassDetail room={selected} user={user} refresh={refresh} back={() => setSelected(null)} onError={setError} /> : view === "home" ? <Dashboard user={user} rooms={rooms} stats={stats} create={createRoom} open={setSelected} browse={() => setView("classes")} busy={busy} /> : null}
+    {selected ? <ClassDetail room={selected} user={user} refresh={refresh} back={() => setSelected(null)} onOpenWorld={requestGalleryFullscreen} logout={() => void logout()} onError={setError} /> : view === "home" ? <Dashboard user={user} rooms={rooms} stats={stats} create={createRoom} open={setSelected} browse={() => setView("classes")} busy={busy} /> : null}
     {!selected && view === "classes" && <ClassList rooms={rooms} create={createRoom} open={setSelected} busy={busy} onError={setError} />}{!selected && view === "summary" && <SummaryPage rooms={rooms} />}{!selected && view === "teachers" && user.role === "owner" && <TeacherAdmin onError={setError} />}{!selected && view === "lessons" && <LessonLibrary onError={setError} onDirtyChange={setLessonDirty} />}{!selected && view === "quizzes" && <QuizLibrary classrooms={rooms} onError={setError} onDirtyChange={setLessonDirty} />}
   </div></main></div>;
 }
@@ -134,12 +142,12 @@ function ClassList({ rooms, create, open, busy, onError }: { rooms: Classroom[];
   return <><PageHeading eyebrow="พื้นที่ดูแลของคุณ" title="ห้องเรียน" detail="จัดการรายชื่อและบันทึกการเข้าเรียนในแต่ละห้อง" action={<Button onClick={() => setShowNew(true)}>＋ สร้างห้องเรียน</Button>}/>{rooms.length ? <div className="room-grid room-grid-all">{rooms.map((room, index) => <RoomCard key={room.id} room={room} index={index} open={open}/>)}</div> : <Empty icon="▦" title="ยังไม่มีห้องเรียน" detail="สร้างห้องเรียนแรกของคุณเพื่อเริ่มต้นเพิ่มรายชื่อนักเรียน" action={<Button onClick={() => setShowNew(true)}>＋ สร้างห้องเรียน</Button>}/ >}{showNew && <NewRoomModal close={() => setShowNew(false)} create={create} busy={busy} onError={onError}/>}</>;
 }
 
-function ClassDetail({ room, user, refresh, back, onError }: { room: Classroom; user: User; refresh: () => Promise<void>; back: () => void; onError: (message: string) => void }) {
+function ClassDetail({ room, user, refresh, back, onOpenWorld, logout, onError }: { room: Classroom; user: User; refresh: () => Promise<void>; back: () => void; onOpenWorld: () => void; logout: () => void; onError: (message: string) => void }) {
   const [tab, setTab] = useState<"attendance" | "students" | "assignments" | "summary" | "world">("attendance"); const [name, setName] = useState(room.name); const [editing, setEditing] = useState(false);
   async function archive() { if (!window.confirm("เก็บห้องเรียนนี้เข้าคลังหรือไม่? ประวัติและรายชื่อจะยังอยู่")) return; try { await api("/classrooms/" + room.id, { method: "PATCH", body: JSON.stringify({ archived: true }) }); await refresh(); back(); } catch (reason) { onError(reason instanceof Error ? reason.message : "เก็บห้องเรียนไม่สำเร็จ"); } }
   async function rename(event: FormEvent) { event.preventDefault(); try { await api("/classrooms/" + room.id, { method: "PATCH", body: JSON.stringify({ name }) }); setEditing(false); await refresh(); } catch (reason) { onError(reason instanceof Error ? reason.message : "เปลี่ยนชื่อไม่สำเร็จ"); } }
   return <><button className="back-link" onClick={back}>‹ ห้องเรียนทั้งหมด</button><div className="room-detail-heading"><div className="room-emblem">{room.name.slice(0, 1)}</div><div className="room-detail-copy"><p className="eyebrow">พื้นที่ดูแลของคุณ</p>{editing ? <form className="rename-form" onSubmit={rename}><input value={name} onChange={(e) => setName(e.target.value)} autoFocus/><Button>บันทึก</Button><Button tone="quiet" type="button" onClick={() => setEditing(false)}>ยกเลิก</Button></form> : <><h1>{room.name}</h1><p className="muted">{room.studentCount} นักเรียน</p></>}</div><div className="room-detail-actions"><button className="text-button" onClick={() => setEditing(true)}>เปลี่ยนชื่อ</button><Button tone="quiet" onClick={archive}>เก็บห้องเรียน</Button></div></div>
-    <div className="tabs" role="tablist"><button className={tab === "attendance" ? "selected" : ""} onClick={() => setTab("attendance")}>บันทึกการเข้าเรียน</button><button className={tab === "students" ? "selected" : ""} onClick={() => setTab("students")}>รายชื่อนักเรียน</button><button className={tab === "assignments" ? "selected" : ""} onClick={() => setTab("assignments")}>งานและไฟล์</button><button className={tab === "summary" ? "selected" : ""} onClick={() => setTab("summary")}>สรุปผล</button><button className={tab === "world" ? "selected" : ""} onClick={() => setTab("world")}>โลกเสมือน</button></div>{tab === "attendance" && <Attendance room={room} onError={onError}/ >}{tab === "students" && <Roster room={room} refresh={refresh} onError={onError}/ >}{tab === "assignments" && <ClassroomWork room={room} onError={onError}/ >}{tab === "summary" && <RoomSummary room={room}/ >}{tab === "world" && <Suspense fallback={<p className="inline-loading"><i className="spinner"/>กำลังเปิดโลกเสมือน…</p>}><GalleryWorld classroomId={room.id} user={user}/></Suspense>}</>;
+    <div className="tabs" role="tablist"><button className={tab === "attendance" ? "selected" : ""} onClick={() => setTab("attendance")}>บันทึกการเข้าเรียน</button><button className={tab === "students" ? "selected" : ""} onClick={() => setTab("students")}>รายชื่อนักเรียน</button><button className={tab === "assignments" ? "selected" : ""} onClick={() => setTab("assignments")}>งานและไฟล์</button><button className={tab === "summary" ? "selected" : ""} onClick={() => setTab("summary")}>สรุปผล</button><button className={tab === "world" ? "selected" : ""} onClick={() => { onOpenWorld(); setTab("world"); }}>โลกเสมือน</button></div>{tab === "attendance" && <Attendance room={room} onError={onError}/ >}{tab === "students" && <Roster room={room} refresh={refresh} onError={onError}/ >}{tab === "assignments" && <ClassroomWork room={room} onError={onError}/ >}{tab === "summary" && <RoomSummary room={room}/ >}{tab === "world" && <Suspense fallback={<p className="inline-loading"><i className="spinner"/>กำลังเปิดโลกเสมือน…</p>}><GalleryWorld classroomId={room.id} user={user} close={() => setTab("attendance")} logout={logout}/></Suspense>}</>;
 }
 
 function Attendance({ room, onError }: { room: Classroom; onError: (message: string) => void }) {

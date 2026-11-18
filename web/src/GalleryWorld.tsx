@@ -10,6 +10,7 @@ import { animateAvatarCharacter, createAvatarCharacter, defaultAvatarAppearance,
 import { correctionOffset, facingRotation, jumpHeight, reconcilePosition, walkingStep, type Move } from "./gallery-motion";
 import { canvasAimPoint, wandAim } from "./gallery-aim";
 import { blockPosition, exhibitPosition, trainTrack } from "../../gallery-server/src/train-layout.mjs";
+import { canBoardTrain } from "../../gallery-server/src/train-rules.mjs";
 
 type User = { role: "owner" | "teacher" | "student"; displayName: string };
 type GalleryModel = { id: string; studentId: string; displayName: string; studentNumber: number | null; assignmentId: string; assignmentTitle: string; originalName: string; mediaType: string; materialAvailable: boolean; thumbnailAvailable: boolean; createdAt: string; hidden: boolean; likes: number; likedByMe: boolean };
@@ -24,7 +25,7 @@ function colorFor(value: string) { let hash = 0; for (const ch of value) hash = 
 function stationLabel(id: string, blocks: Manifest["blocks"]) { if (!id || id === "entrance") return "สถานีทางเข้า"; const row = Number(id.slice(4)); const first = blocks.find((block) => Math.ceil((block.layoutIndex + 1) / 4) === row && block.studentNumber !== null); return first ? `สถานีแถวที่ ${row} · เลขที่ ${first.studentNumber}` : `สถานีแถวที่ ${row}`; }
 function countdown(at: number, now: number) { const seconds = Math.max(0, Math.ceil((at - now) / 1000)); return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`; }
 
-export function GalleryWorld({ classroomId, user, close }: { classroomId: string; user: User; close?: () => void }) {
+export function GalleryWorld({ classroomId, user, close, logout }: { classroomId: string; user: User; close?: () => void; logout?: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [manifest, setManifest] = useState<Manifest | null>(null);
   const manifestRef = useRef(manifest);
@@ -42,6 +43,7 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
   const [trainView, setTrainView] = useState<TrainView | null>(null);
   const [trainClock, setTrainClock] = useState(Date.now());
   const [trainSeat, setTrainSeat] = useState(-1);
+  const [trainAction, setTrainAction] = useState<"board" | "leave" | null>(null);
   const [trainForm, setTrainForm] = useState<TrainSettings>({ mode: "auto", intervalSeconds: 120, startStudentId: null });
   const [trainMessage, setTrainMessage] = useState("");
   const trainRef = useRef<TrainView | null>(null);
@@ -65,11 +67,27 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
   const [appearance, setAppearance] = useState<AvatarAppearance>(defaultAvatarAppearance);
   const [draftAppearance, setDraftAppearance] = useState<AvatarAppearance>(defaultAvatarAppearance);
   const [customizerOpen, setCustomizerOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [immersive, setImmersive] = useState(true);
+  const [nativeFullscreen, setNativeFullscreen] = useState(Boolean(document.fullscreenElement));
   const customizerOpenRef = useRef(false);
   const appearanceRef = useRef(appearance);
   const touchRef = useRef({ x: 0, z: 0 });
   const jumpRef = useRef(false);
   const teacher = user.role !== "student";
+  useEffect(() => { document.documentElement.classList.toggle("gallery-immersive", immersive); }, [immersive]);
+  useEffect(() => {
+    const onFullscreenChange = () => { const active = Boolean(document.fullscreenElement); setNativeFullscreen(active); if (!active) setImmersive(false); };
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape" && !document.fullscreenElement) setImmersive(false); };
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    window.addEventListener("keydown", onKeyDown);
+    return () => { document.removeEventListener("fullscreenchange", onFullscreenChange); window.removeEventListener("keydown", onKeyDown); };
+  }, []);
+  useEffect(() => () => { window.setTimeout(() => {
+    if (document.querySelector(".gallery-shell")) return;
+    document.documentElement.classList.remove("gallery-immersive");
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+  }, 0); }, []);
   useEffect(() => {
     aimPoint.current.set(0, 0);
     setAimValid(false);
@@ -378,7 +396,7 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
         .finally(() => { if (activeModelLoad?.controller === controller) activeModelLoad = null; });
     };
     const client = new Client(config);
-    let lastTrainUi = 0;
+    let lastTrainUi = 0, lastTrainActionScan = 0;
     const trainSeatPosition = (seat: number) => {
       const localX = seat % 2 === 0 ? -0.55 : 0.55;
       const localZ = -1.8 - Math.floor(seat / 6) * 4.4 - Math.floor((seat % 6) / 2) * 1.1;
@@ -507,6 +525,13 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
       trainGroup.position.x += (trainTarget.x - trainGroup.position.x) * (1 - Math.exp(-12 * dt));
       trainGroup.position.z += (trainTarget.z - trainGroup.position.z) * (1 - Math.exp(-12 * dt));
       trainGroup.rotation.y += Math.atan2(Math.sin(trainTarget.rotation - trainGroup.rotation.y), Math.cos(trainTarget.rotation - trainGroup.rotation.y)) * (1 - Math.exp(-12 * dt));
+      if (time - lastTrainActionScan > 250) {
+        lastTrainActionScan = time;
+        const train = trainRef.current;
+        const stopped = Boolean(train && ["waiting", "boarding", "dwell"].includes(train.phase));
+        const action = trainSeatRef.current >= 0 && stopped ? "leave" : train && canBoardTrain({ active: train.active, phase: train.phase, seats: train.seats, distance: Math.hypot(local.x - train.x, local.z - train.z) }) ? "board" : null;
+        setTrainAction((current) => current === action ? current : action);
+      }
       for (const [id, avatar] of avatarMeshes) {
         const self = id === room?.sessionId, seat = avatar.userData.trainSeat as number, target = seat >= 0 ? trainSeatPosition(seat) : self ? visual : avatar.userData.target;
         const previousX = avatar.position.x, previousZ = avatar.position.z;
@@ -606,34 +631,46 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
   const selectedStudentWork = selected ? models.filter((item) => item.studentId === selected.studentId && !item.hidden) : [];
   const selectedPage = selected ? displayPages[selected.studentId] ?? 0 : 0;
   const selectedPageCount = Math.ceil(selectedStudentWork.length / 40);
+  function toggleFullscreen() {
+    setImmersive(true);
+    if (!document.fullscreenElement) void document.documentElement.requestFullscreen?.({ navigationUI: "hide" }).catch(() => {});
+  }
+  function exitFullscreenView() {
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => setImmersive(false));
+    else setImmersive(false);
+  }
 
   if (enabled === false && !teacher) return <main className="public-lesson-page"><section className="panel"><h2>โลกเสมือนยังไม่พร้อม</h2><p>{error || "กรุณากลับไปยังห้องเรียนแล้วลองอีกครั้ง."}</p><a href="/">กลับไปห้องเรียน</a></section></main>;
   return <>
-    {user.role === "student" && <div className="gallery-attendance"><StudentAttendance /></div>}
     <section className="gallery-shell">
       <header className="gallery-toolbar">
         <div><strong>{manifest?.classroomName ?? "โลกเสมือน"}</strong><small>{online} คนออนไลน์ · WASD/ลูกศร เดิน · Space กระโดด · ลากเพื่อหมุนมุมมอง</small></div>
         <div className="gallery-toolbar-actions">
-          {teacher && <><span>{enabled ? "เปิดสำหรับนักเรียน" : "หยุดสำหรับนักเรียน · ครูเข้าชมได้"}</span><button className="button button-quiet" disabled={loading} onClick={() => void setWorld(!enabled)}>{enabled ? "หยุดโลกสำหรับนักเรียน" : "เปิดโลกสำหรับนักเรียน"}</button><button className="button button-quiet" aria-pressed={wandMode} onClick={() => { setWandMode((value) => !value); setSelected(null); }}>{wandMode ? "เก็บไม้กายสิทธิ์" : "ถือไม้กายสิทธิ์"}</button></>}
-          <button className="button button-quiet" onClick={() => { setDraftAppearance({ ...appearance }); setCustomizerOpen(true); }}>ปรับแต่งตัวละคร</button>{close && <button className="button button-quiet" onClick={close}>กลับ</button>}
+          <button className="button button-quiet" aria-expanded={menuOpen} aria-controls="gallery-menu" onClick={() => setMenuOpen((open) => !open)}>{menuOpen ? "ปิดเมนู" : "เมนู"}</button>
+          <button className="button button-quiet" onClick={nativeFullscreen ? exitFullscreenView : toggleFullscreen}>{nativeFullscreen ? "ออกจากเต็มจอ" : "เต็มจอ"}</button>{immersive && !nativeFullscreen && <button className="button button-quiet" onClick={exitFullscreenView}>ออกจากเต็มจอ</button>}{close && <button className="button button-quiet" onClick={close}>กลับห้องเรียน</button>}
         </div>
       </header>
-      <aside className="gallery-train-panel" aria-label="รถไฟเที่ยวชมโลกเสมือน">
-        <div className="gallery-train-status"><strong>🚂 รถไฟเที่ยวชม</strong><span>{trainStatus}</span><small>{trainView?.active ? `${trainView.seats}/12 ที่นั่ง · ${trainView.mode === "auto" ? "อัตโนมัติ" : "เริ่มโดยครู"}` : ""}</small></div>
-        <div className="gallery-train-actions">
-          {trainView?.active && trainSeat >= 0 ? <button className="button button-quiet" disabled={!trainOpen} onClick={() => trainCommand("train-leave")}>ลงจากรถไฟ</button> : trainOpen && <button className="button button-primary" onClick={() => trainCommand("train-board")}>ขึ้นรถไฟ · ใกล้สถานีไม่เกิน 5 ม.</button>}
-          {teacher && trainView?.active && trainView.mode === "manual" && trainView.phase === "waiting" && <button className="button button-quiet" onClick={() => trainCommand("train-start")}>เริ่มเที่ยวรถ · นับถอยหลัง 10 วินาที</button>}
-        </div>
-        {teacher && <div className="gallery-train-settings">
-          <label>ตารางรถ<select value={trainForm.mode} onChange={(event) => setTrainForm({ ...trainForm, mode: event.target.value as TrainSettings["mode"] })}><option value="auto">อัตโนมัติ</option><option value="manual">ครูเริ่มเอง</option></select></label>
-          {trainForm.mode === "auto" && <label>ช่วงเวลา<select value={trainForm.intervalSeconds} onChange={(event) => setTrainForm({ ...trainForm, intervalSeconds: Number(event.target.value) as 60 | 120 })}><option value={60}>ทุก 1 นาที</option><option value={120}>ทุก 2 นาที</option></select></label>}
-          <label>เริ่มจาก<select value={trainForm.startStudentId ?? ""} onChange={(event) => setTrainForm({ ...trainForm, startStudentId: event.target.value || null })}><option value="">สถานีทางเข้า</option>{manifest?.blocks.filter((block) => block.studentNumber !== null).map((block) => <option key={block.studentId} value={block.studentId}>เลขที่ {block.studentNumber} · {block.displayName}</option>)}</select></label>
-          <button className="button button-quiet" disabled={loading} onClick={() => void saveTrainSettings()}>บันทึกตาราง</button>
-          <small>ใช้การตั้งค่าเมื่อรถว่างก่อนออกเที่ยวถัดไป · เลขที่ที่เลือกเริ่มที่สถานีประจำกลุ่มแถว</small>
-          {trainMessage && <small role="status">{trainMessage}</small>}
-        </div>}
-      </aside>
-      {error && <div className="notice" role="alert">{error}</div>}{!config && <p className="gallery-service-note">ยังไม่ได้ตั้งค่า Colyseus ใน Coolify</p>}
+      <div id="gallery-menu" className="gallery-menu" hidden={!menuOpen}>
+        {user.role === "student" && <div className="gallery-attendance"><StudentAttendance /></div>}
+        <aside className="gallery-train-panel" aria-label="รถไฟเที่ยวชมโลกเสมือน">
+          <div className="gallery-train-status"><strong>🚂 รถไฟเที่ยวชม</strong><span>{trainStatus}</span><small>{trainView?.active ? `${trainView.seats}/12 ที่นั่ง · ${trainView.mode === "auto" ? "อัตโนมัติ" : "เริ่มโดยครู"}` : ""}</small></div>
+          <div className="gallery-train-actions">{teacher && trainView?.active && trainView.mode === "manual" && trainView.phase === "waiting" && <button className="button button-quiet" onClick={() => trainCommand("train-start")}>เริ่มเที่ยวรถ · นับถอยหลัง 10 วินาที</button>}</div>
+          {teacher && <div className="gallery-train-settings">
+            <label>ตารางรถ<select value={trainForm.mode} onChange={(event) => setTrainForm({ ...trainForm, mode: event.target.value as TrainSettings["mode"] })}><option value="auto">อัตโนมัติ</option><option value="manual">ครูเริ่มเอง</option></select></label>
+            {trainForm.mode === "auto" && <label>ช่วงเวลา<select value={trainForm.intervalSeconds} onChange={(event) => setTrainForm({ ...trainForm, intervalSeconds: Number(event.target.value) as 60 | 120 })}><option value={60}>ทุก 1 นาที</option><option value={120}>ทุก 2 นาที</option></select></label>}
+            <label>เริ่มจาก<select value={trainForm.startStudentId ?? ""} onChange={(event) => setTrainForm({ ...trainForm, startStudentId: event.target.value || null })}><option value="">สถานีทางเข้า</option>{manifest?.blocks.filter((block) => block.studentNumber !== null).map((block) => <option key={block.studentId} value={block.studentId}>เลขที่ {block.studentNumber} · {block.displayName}</option>)}</select></label>
+            <button className="button button-quiet" disabled={loading} onClick={() => void saveTrainSettings()}>บันทึกตาราง</button>
+            <small>ใช้การตั้งค่าเมื่อรถว่างก่อนออกเที่ยวถัดไป · เลขที่ที่เลือกเริ่มที่สถานีประจำกลุ่มแถว</small>
+            {trainMessage && <small role="status">{trainMessage}</small>}
+          </div>}
+        </aside>
+        {teacher && <div className="gallery-management"><strong>จัดการโลกเสมือน</strong><p>{enabled ? "เปิดสำหรับนักเรียน" : "หยุดสำหรับนักเรียน · ครูเข้าชมได้"}</p><div className="gallery-management-actions"><button className="button button-quiet" disabled={loading} onClick={() => void setWorld(!enabled)}>{enabled ? "หยุดโลกสำหรับนักเรียน" : "เปิดโลกสำหรับนักเรียน"}</button><button className="button button-quiet" aria-pressed={wandMode} onClick={() => { setWandMode((value) => !value); setSelected(null); setMenuOpen(false); }}>{wandMode ? "เก็บไม้กายสิทธิ์" : "ถือไม้กายสิทธิ์"}</button><button className="button button-quiet" onClick={() => { setDraftAppearance({ ...appearance }); setCustomizerOpen(true); setMenuOpen(false); }}>ปรับแต่งตัวละคร</button></div></div>}
+        {manifest?.nextOffset !== null && <button className="button button-quiet" onClick={() => void load(manifest?.nextOffset ?? 0)}>โหลดผลงานเพิ่ม</button>}
+        {teacher && models.some((item) => item.hidden) && <aside className="gallery-hidden-tray"><strong>ผลงานที่ซ่อน</strong>{models.filter((item) => item.hidden).map((item) => <div key={item.id}><span>{item.displayName} · {item.originalName}</span><button className="text-button" onClick={() => void setHidden(item)}>แสดง</button></div>)}</aside>}
+        {logout && <button className="button button-quiet" onClick={logout}>ออกจากระบบ</button>}
+        {error && <div className="notice" role="alert">{error}</div>}{!config && <p className="gallery-service-note">ยังไม่ได้ตั้งค่า Colyseus ใน Coolify</p>}
+      </div>
+      {error && !menuOpen && <div className="notice" role="alert">{error}</div>}
       <canvas ref={canvasRef} className="gallery-canvas" aria-label="โลกเสมือนห้องเรียน กด WASD เพื่อเดิน Space เพื่อกระโดด และลากเพื่อหมุนมุมมอง" />
       {wandMode && !customizerOpen && <>
         <div ref={crosshairRef} className={`gallery-crosshair${aimValid ? "" : " unavailable"}`} style={{ left: `${(aimPoint.current.x + 1) * 50}%`, top: `${(1 - aimPoint.current.y) * 50}%` }} aria-hidden="true">{aimValid ? "＋" : "×"}</div>
@@ -641,10 +678,9 @@ export function GalleryWorld({ classroomId, user, close }: { classroomId: string
         <button className="gallery-fire button button-primary" disabled={!castReady || !aimValid || knockSeconds > 0} onClick={() => fireWandRef.current()}>{castReady ? "ยิงเวทมนตร์ · F" : "กำลังชาร์จ…"}</button>
       </>}
       {knockSeconds > 0 && <div className="gallery-knockdown" role="status">ถูกเวทมนตร์! จะกลับเข้าโลกใน {knockSeconds} วินาที</div>}
+      {trainAction && <button className="gallery-train-quick-action button button-primary" onClick={() => trainCommand(trainAction === "board" ? "train-board" : "train-leave")}>{trainAction === "board" ? "ขึ้นรถไฟ" : "ลงจากรถไฟ"}</button>}
       <div className="gallery-touch" onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); const rect = event.currentTarget.getBoundingClientRect(); touchRef.current = { x: (event.clientX - rect.left) / rect.width * 2 - 1, z: (event.clientY - rect.top) / rect.height * 2 - 1 }; }} onPointerMove={(event) => { if (!event.currentTarget.hasPointerCapture(event.pointerId)) return; const rect = event.currentTarget.getBoundingClientRect(); touchRef.current = { x: (event.clientX - rect.left) / rect.width * 2 - 1, z: (event.clientY - rect.top) / rect.height * 2 - 1 }; }} onPointerUp={() => { touchRef.current = { x: 0, z: 0 }; }} onPointerCancel={() => { touchRef.current = { x: 0, z: 0 }; }} onLostPointerCapture={() => { touchRef.current = { x: 0, z: 0 }; }} aria-label="ควบคุมการเดินด้วยสัมผัส">◉</div>
       <button className="gallery-jump button button-quiet" disabled={customizerOpen || knockSeconds > 0} onClick={() => { jumpRef.current = true; }}>กระโดด ↑</button>
-      {manifest?.nextOffset !== null && <button className="gallery-more button button-quiet" onClick={() => void load(manifest?.nextOffset ?? 0)}>โหลดผลงานเพิ่ม</button>}
-      {teacher && models.some((item) => item.hidden) && <aside className="gallery-hidden-tray"><strong>ผลงานที่ซ่อน</strong>{models.filter((item) => item.hidden).map((item) => <div key={item.id}><span>{item.displayName} · {item.originalName}</span><button className="text-button" onClick={() => void setHidden(item)}>แสดง</button></div>)}</aside>}
       {selected && <aside className="gallery-inspect"><button className="icon-button" onClick={() => setSelected(null)} aria-label="ปิด">×</button><p className="eyebrow">{selected.displayName} · เลขที่ {selected.studentNumber ?? "—"}</p><h3>{selected.originalName}</h3><p className="muted">{selected.assignmentTitle}</p><p>{selected.likes} ถูกใจ</p>{selectedPageCount > 1 && <div className="gallery-display-pages"><span>ผลงานในพื้นที่ {selectedPage * 40 + 1}–{Math.min(selectedPage * 40 + 40, selectedStudentWork.length)} จาก {selectedStudentWork.length}</span><button className="text-button" disabled={selectedPage === 0} onClick={() => { const next = selectedStudentWork[(selectedPage - 1) * 40]; setDisplayPages((pages) => ({ ...pages, [selected.studentId]: selectedPage - 1 })); if (next) setSelected(next); }}>ก่อนหน้า</button><button className="text-button" disabled={selectedPage + 1 >= selectedPageCount} onClick={() => { const next = selectedStudentWork[(selectedPage + 1) * 40]; setDisplayPages((pages) => ({ ...pages, [selected.studentId]: selectedPage + 1 })); if (next) setSelected(next); }}>ถัดไป</button></div>}{user.role === "student" && selected.studentId !== manifest?.viewerStudentId && <button className="button button-quiet" onClick={() => void like(selected)}>{selected.likedByMe ? "ยกเลิกถูกใจ" : "ถูกใจ"}</button>}{teacher && <button className="button button-quiet" onClick={() => void setHidden(selected)}>{selected.hidden ? "แสดงผลงาน" : "ซ่อนผลงาน"}</button>}<button className="button button-primary" onClick={() => setPreview(selected)}>เปิดดูโมเดล</button></aside>}
       {customizerOpen && <CharacterCustomizer appearance={draftAppearance} onChange={setDraftAppearance} onCancel={() => setCustomizerOpen(false)} onSave={() => void saveAppearance()} saving={loading} error={error} />}
     </section>
