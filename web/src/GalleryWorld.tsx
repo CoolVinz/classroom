@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import * as THREE from "three";
 import { Client } from "@colyseus/sdk";
 import { api } from "./api";
@@ -7,8 +7,9 @@ import ModelPreview from "./ModelPreview";
 import { loadModel, createModelObject, disposeModelObject } from "./model-view";
 import { galleryFileUrl, galleryTicketRequest } from "./gallery-api";
 import { animateAvatarCharacter, createAvatarCharacter, defaultAvatarAppearance, disposeAvatarCharacter, type AvatarAppearance } from "./gallery-avatar";
-import { correctionOffset, facingRotation, jumpHeight, reconcilePosition, walkingStep, type Move } from "./gallery-motion";
+import { correctionOffset, facingRotation, interpolateTrain, jumpHeight, reconcilePosition, touchDirection, walkingStep, type Move, type TrainSample } from "./gallery-motion";
 import { canvasAimPoint, wandAim } from "./gallery-aim";
+import { enterGalleryFullscreen, unlockGalleryOrientation } from "./gallery-fullscreen";
 import { blockPosition, exhibitPosition, trainTrack } from "../../gallery-server/src/train-layout.mjs";
 import { canBoardTrain } from "../../gallery-server/src/train-rules.mjs";
 
@@ -24,6 +25,16 @@ function apiPath(classroomId: string, suffix = "") { return `/classrooms/${class
 function colorFor(value: string) { let hash = 0; for (const ch of value) hash = (hash * 31 + ch.charCodeAt(0)) | 0; return new THREE.Color().setHSL((Math.abs(hash) % 360) / 360, 0.48, 0.56); }
 function stationLabel(id: string, blocks: Manifest["blocks"]) { if (!id || id === "entrance") return "สถานีทางเข้า"; const row = Number(id.slice(4)); const first = blocks.find((block) => Math.ceil((block.layoutIndex + 1) / 4) === row && block.studentNumber !== null); return first ? `สถานีแถวที่ ${row} · เลขที่ ${first.studentNumber}` : `สถานีแถวที่ ${row}`; }
 function countdown(at: number, now: number) { const seconds = Math.max(0, Math.ceil((at - now) / 1000)); return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`; }
+function moveTouchJoystick(event: ReactPointerEvent<HTMLDivElement>, knob: HTMLSpanElement | null, value: { x: number; z: number }) {
+  const rect = event.currentTarget.getBoundingClientRect(), radius = rect.width * 0.29;
+  const direction = touchDirection(event.clientX - rect.left - rect.width / 2, event.clientY - rect.top - rect.height / 2, radius);
+  value.x = direction.x; value.z = direction.z;
+  if (knob) knob.style.transform = `translate(${direction.x * radius}px, ${direction.z * radius}px)`;
+}
+function resetTouchJoystick(knob: HTMLSpanElement | null, value: { x: number; z: number }) {
+  value.x = 0; value.z = 0;
+  if (knob) knob.style.transform = "translate(0, 0)";
+}
 
 export function GalleryWorld({ classroomId, user, close, logout }: { classroomId: string; user: User; close?: () => void; logout?: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -69,15 +80,18 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   const [customizerOpen, setCustomizerOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [immersive, setImmersive] = useState(true);
+  const [landscapeRequired, setLandscapeRequired] = useState(false);
   const [nativeFullscreen, setNativeFullscreen] = useState(Boolean(document.fullscreenElement));
   const customizerOpenRef = useRef(false);
   const appearanceRef = useRef(appearance);
   const touchRef = useRef({ x: 0, z: 0 });
+  const touchKnobRef = useRef<HTMLSpanElement>(null);
+  const landscapeRequiredRef = useRef(false);
   const jumpRef = useRef(false);
   const teacher = user.role !== "student";
   useEffect(() => { document.documentElement.classList.toggle("gallery-immersive", immersive); }, [immersive]);
   useEffect(() => {
-    const onFullscreenChange = () => { const active = Boolean(document.fullscreenElement); setNativeFullscreen(active); if (!active) setImmersive(false); };
+    const onFullscreenChange = () => { const active = Boolean(document.fullscreenElement); setNativeFullscreen(active); if (!active) { setImmersive(false); unlockGalleryOrientation(); } };
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape" && !document.fullscreenElement) setImmersive(false); };
     document.addEventListener("fullscreenchange", onFullscreenChange);
     window.addEventListener("keydown", onKeyDown);
@@ -86,6 +100,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   useEffect(() => () => { window.setTimeout(() => {
     if (document.querySelector(".gallery-shell")) return;
     document.documentElement.classList.remove("gallery-immersive");
+    unlockGalleryOrientation();
     if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
   }, 0); }, []);
   useEffect(() => {
@@ -137,6 +152,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !manifest || !config) return;
+    const touchDevice = window.matchMedia("(pointer: coarse)").matches;
     let renderer: THREE.WebGLRenderer;
     try { renderer = new THREE.WebGLRenderer({ canvas, antialias: false }); }
     catch { setError("อุปกรณ์นี้ไม่รองรับการแสดงโลกสามมิติ"); return; }
@@ -191,6 +207,8 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       for (let row = 0; row < 3; row++) for (const x of [-0.55, 0.55]) addTrainPart(trainGroup, [0.72, 0.13, 0.72], [x, 1.18, z + 1.1 - row * 1.1], 0xf4d987);
     }
     const trainTarget = { x: 0, z: 2, rotation: 0 };
+    const trainSamples: TrainSample[] = [];
+    let trainSampleRevision = -1;
     const rebuildTrack = (studentCount: number) => {
       for (const child of [...trainTrackGroup.children]) {
         child.traverse((object) => { const mesh = object as THREE.Mesh; mesh.geometry?.dispose?.(); const materials = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : []; materials.forEach((material) => material.dispose()); });
@@ -301,7 +319,13 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       }
     };
     const keyUp = (event: KeyboardEvent) => keys.delete(event.key.toLowerCase());
-    const onBlur = () => { keys.clear(); touchRef.current = { x: 0, z: 0 }; jumpRef.current = false; cancelPointer(); };
+    const onBlur = () => { keys.clear(); resetTouchJoystick(touchKnobRef.current, touchRef.current); jumpRef.current = false; cancelPointer(); };
+    const updateOrientation = () => {
+      const required = touchDevice && window.innerHeight > window.innerWidth;
+      landscapeRequiredRef.current = required;
+      setLandscapeRequired((current) => current === required ? current : required);
+      if (required) onBlur();
+    };
     const onPointerDown = (event: PointerEvent) => {
       if (customizerOpenRef.current || document.hidden || activePointer !== null) return;
       activePointer = event.pointerId; dragged = false; lastX = startX = event.clientX; lastY = startY = event.clientY;
@@ -403,7 +427,14 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       const cosine = Math.cos(trainTarget.rotation), sine = Math.sin(trainTarget.rotation);
       return { x: trainTarget.x + cosine * localX + sine * localZ, z: trainTarget.z - sine * localX + cosine * localZ, rotation: trainTarget.rotation };
     };
-    const cleanup = () => { for (const id of loadedModels.keys()) evictModel(id); alive = false; cancelAnimationFrame(frame); window.clearTimeout(cooldownTimer); castReadyAt.current = 0; setCastReady(true); setAimValid(false); fireWandRef.current = () => {}; modelAbort.abort(); activeModelLoad?.controller.abort(); room?.leave(); roomRef.current = null; onBlur(); observer.disconnect(); scene.traverse((object) => { const mesh = object as THREE.Mesh; mesh.geometry?.dispose?.(); const materials = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : []; materials.forEach((material) => material.dispose()); }); renderer.dispose(); renderer.forceContextLoss(); textures.forEach((texture) => texture.dispose()); avatarMeshes.clear(); boltMeshes.current.clear(); effectMeshes.current=[]; window.removeEventListener("keydown", keyDown); window.removeEventListener("keyup", keyUp); window.removeEventListener("blur", onBlur); document.removeEventListener("visibilitychange", onVisibilityChange); canvas.removeEventListener("pointerdown", onPointerDown); canvas.removeEventListener("pointermove", onPointerMove); canvas.removeEventListener("pointerup", onPointerUp); canvas.removeEventListener("pointercancel", onPointerCancel); canvas.removeEventListener("lostpointercapture", onPointerCancel); };
+    const cleanup = () => {
+      for (const id of loadedModels.keys()) evictModel(id);
+      alive = false; cancelAnimationFrame(frame); window.clearTimeout(cooldownTimer); castReadyAt.current = 0; setCastReady(true); setAimValid(false); fireWandRef.current = () => {}; modelAbort.abort(); activeModelLoad?.controller.abort(); room?.leave(); roomRef.current = null; onBlur(); observer.disconnect();
+      scene.traverse((object) => { const mesh = object as THREE.Mesh; mesh.geometry?.dispose?.(); const materials = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : []; materials.forEach((material) => material.dispose()); });
+      renderer.dispose(); renderer.forceContextLoss(); textures.forEach((texture) => texture.dispose()); avatarMeshes.clear(); boltMeshes.current.clear(); effectMeshes.current = [];
+      window.removeEventListener("keydown", keyDown); window.removeEventListener("keyup", keyUp); window.removeEventListener("blur", onBlur); window.removeEventListener("resize", updateOrientation); window.removeEventListener("orientationchange", updateOrientation); screen.orientation?.removeEventListener("change", updateOrientation); document.removeEventListener("visibilitychange", onVisibilityChange); unlockGalleryOrientation();
+      canvas.removeEventListener("pointerdown", onPointerDown); canvas.removeEventListener("pointermove", onPointerMove); canvas.removeEventListener("pointerup", onPointerUp); canvas.removeEventListener("pointercancel", onPointerCancel); canvas.removeEventListener("lostpointercapture", onPointerCancel);
+    };
     const ticketRequest = galleryTicketRequest(classroomId);
     void api<{ ticket: string; url: string }>(ticketRequest.path, ticketRequest.options).then(async ({ ticket }) => {
       if (!alive) return;
@@ -426,9 +457,12 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         if (!alive) return;
         if (state.train) {
           const wire = state.train as TrainView;
-          const priorLayout = trainRef.current?.layoutRoster;
+          const priorTrain = trainRef.current;
+          const priorLayout = priorTrain?.layoutRoster;
+          if (wire.revision !== trainSampleRevision || wire.layoutRoster !== priorLayout) { trainSamples.length = 0; trainSampleRevision = wire.revision; }
           trainRef.current = { ...wire };
-          trainTarget.x = wire.x; trainTarget.z = wire.z; trainTarget.rotation = wire.rotation;
+          trainSamples.push({ at: performance.now(), x: wire.x, z: wire.z, rotation: wire.rotation });
+          if (trainSamples.length > 4) trainSamples.shift();
           trainGroup.visible = wire.active;
           if (wire.layoutRoster && wire.layoutRoster !== priorLayout) { syncBlocks(); syncExhibits(); }
           if (Date.now() - lastTrainUi > 500) {
@@ -510,7 +544,9 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       if (syncedModels !== modelsRef.current || syncedPages !== displayPagesRef.current) { syncedModels = modelsRef.current; syncedPages = displayPagesRef.current; groupStudentModels(); syncExhibits(); }
       const forward = Number(keys.has("w") || keys.has("arrowup") || touchRef.current.z < -0.15) - Number(keys.has("s") || keys.has("arrowdown") || touchRef.current.z > 0.15);
       const side = Number(keys.has("d") || keys.has("arrowright") || touchRef.current.x > 0.15) - Number(keys.has("a") || keys.has("arrowleft") || touchRef.current.x < -0.15);
-      const active = initialized && room?.connection?.isOpen && !customizerOpenRef.current && !document.hidden && document.hasFocus() && !knockedRef.current && trainSeatRef.current < 0;
+      const bufferedTrain = interpolateTrain(trainSamples, time);
+      if (bufferedTrain) { trainTarget.x = bufferedTrain.x; trainTarget.z = bufferedTrain.z; trainTarget.rotation = bufferedTrain.rotation; }
+      const active = initialized && room?.connection?.isOpen && !customizerOpenRef.current && !document.hidden && !landscapeRequiredRef.current && (touchDevice || document.hasFocus()) && !knockedRef.current && trainSeatRef.current < 0;
       if (!active) onBlur();
       const step = active ? walkingStep(forward, side, yaw, dt) : { dx: 0, dz: 0 };
       local.x += step.dx; local.z += step.dz; unsent.dx += step.dx; unsent.dz += step.dz;
@@ -522,9 +558,8 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       const decay = Math.exp(-12 * dt);
       visualOffset.x *= decay; visualOffset.z *= decay;
       const visual = trainSeatRef.current >= 0 ? trainSeatPosition(trainSeatRef.current) : { x: local.x + visualOffset.x, z: local.z + visualOffset.z, rotation: local.rotation };
-      trainGroup.position.x += (trainTarget.x - trainGroup.position.x) * (1 - Math.exp(-12 * dt));
-      trainGroup.position.z += (trainTarget.z - trainGroup.position.z) * (1 - Math.exp(-12 * dt));
-      trainGroup.rotation.y += Math.atan2(Math.sin(trainTarget.rotation - trainGroup.rotation.y), Math.cos(trainTarget.rotation - trainGroup.rotation.y)) * (1 - Math.exp(-12 * dt));
+      trainGroup.position.set(trainTarget.x, 0, trainTarget.z);
+      trainGroup.rotation.y = trainTarget.rotation;
       if (time - lastTrainActionScan > 250) {
         lastTrainActionScan = time;
         const train = trainRef.current;
@@ -535,7 +570,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       for (const [id, avatar] of avatarMeshes) {
         const self = id === room?.sessionId, seat = avatar.userData.trainSeat as number, target = seat >= 0 ? trainSeatPosition(seat) : self ? visual : avatar.userData.target;
         const previousX = avatar.position.x, previousZ = avatar.position.z;
-        const blend = self ? 1 : 1 - Math.exp(-16 * dt);
+        const blend = seat >= 0 || self ? 1 : 1 - Math.exp(-16 * dt);
         avatar.position.x += (target.x - avatar.position.x) * blend; avatar.position.z += (target.z - avatar.position.z) * blend;
         avatar.rotation.y += Math.atan2(Math.sin(target.rotation - avatar.rotation.y), Math.cos(target.rotation - avatar.rotation.y)) * blend;
         const height = jumpHeight((time - (self ? jumpTime : avatar.userData.jumpTime)) / 1000); avatar.position.y = avatar.userData.knocked ? 0 : height;
@@ -568,13 +603,17 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         const now = performance.now(), paused = hiddenAt ? now - hiddenAt : 0;
         if (Number.isFinite(jumpTime)) jumpTime += paused;
         for (const avatar of avatarMeshes.values()) if (Number.isFinite(avatar.userData.jumpTime)) avatar.userData.jumpTime += paused;
+        trainSamples.length = 0;
+        const latestTrain = trainRef.current;
+        if (latestTrain) trainSamples.push({ at: now, x: latestTrain.x, z: latestTrain.z, rotation: latestTrain.rotation });
         hiddenAt = 0;
         if (alive && !frame) { lastFrame = now; frame = requestAnimationFrame(render); }
       }
     };
     canvas.addEventListener("pointerdown", onPointerDown); canvas.addEventListener("pointermove", onPointerMove); canvas.addEventListener("pointerup", onPointerUp);
     canvas.addEventListener("pointercancel", onPointerCancel); canvas.addEventListener("lostpointercapture", onPointerCancel);
-    window.addEventListener("keydown", keyDown); window.addEventListener("keyup", keyUp); window.addEventListener("blur", onBlur); document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("keydown", keyDown); window.addEventListener("keyup", keyUp); window.addEventListener("blur", onBlur); window.addEventListener("resize", updateOrientation); window.addEventListener("orientationchange", updateOrientation); screen.orientation?.addEventListener("change", updateOrientation); document.addEventListener("visibilitychange", onVisibilityChange);
+    updateOrientation();
     frame = requestAnimationFrame(render);
     return () => { modelAbort.abort(); cleanup(); };
   }, [classroomId, config, Boolean(manifest), load, teacher]);
@@ -633,11 +672,11 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   const selectedPageCount = Math.ceil(selectedStudentWork.length / 40);
   function toggleFullscreen() {
     setImmersive(true);
-    if (!document.fullscreenElement) void document.documentElement.requestFullscreen?.({ navigationUI: "hide" }).catch(() => {});
+    if (!document.fullscreenElement) void enterGalleryFullscreen();
   }
   function exitFullscreenView() {
     if (document.fullscreenElement) void document.exitFullscreen().catch(() => setImmersive(false));
-    else setImmersive(false);
+    else { unlockGalleryOrientation(); setImmersive(false); }
   }
 
   if (enabled === false && !teacher) return <main className="public-lesson-page"><section className="panel"><h2>โลกเสมือนยังไม่พร้อม</h2><p>{error || "กรุณากลับไปยังห้องเรียนแล้วลองอีกครั้ง."}</p><a href="/">กลับไปห้องเรียน</a></section></main>;
@@ -672,6 +711,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       </div>
       {error && !menuOpen && <div className="notice" role="alert">{error}</div>}
       <canvas ref={canvasRef} className="gallery-canvas" aria-label="โลกเสมือนห้องเรียน กด WASD เพื่อเดิน Space เพื่อกระโดด และลากเพื่อหมุนมุมมอง" />
+      {landscapeRequired && <div className="gallery-rotate-prompt" role="alert"><strong>หมุนโทรศัพท์เป็นแนวนอนเพื่อเล่น</strong><span>หมุนอุปกรณ์เพื่อให้ปุ่มควบคุมแสดงครบ</span>{close && <button className="button button-quiet" onClick={close}>กลับห้องเรียน</button>}</div>}
       {wandMode && !customizerOpen && <>
         <div ref={crosshairRef} className={`gallery-crosshair${aimValid ? "" : " unavailable"}`} style={{ left: `${(aimPoint.current.x + 1) * 50}%`, top: `${(1 - aimPoint.current.y) * 50}%` }} aria-hidden="true">{aimValid ? "＋" : "×"}</div>
         <p className="gallery-aim-hint">เลื่อนเมาส์หรือแตะเพื่อเล็ง · ลากเพื่อหมุนกล้อง · กด F หรือปุ่มยิง{!aimValid && <span>จุดนี้ยิงไม่ได้ — เลือกจุดเล็งใหม่</span>}</p>
@@ -679,8 +719,8 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       </>}
       {knockSeconds > 0 && <div className="gallery-knockdown" role="status">ถูกเวทมนตร์! จะกลับเข้าโลกใน {knockSeconds} วินาที</div>}
       {trainAction && <button className="gallery-train-quick-action button button-primary" onClick={() => trainCommand(trainAction === "board" ? "train-board" : "train-leave")}>{trainAction === "board" ? "ขึ้นรถไฟ" : "ลงจากรถไฟ"}</button>}
-      <div className="gallery-touch" onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); const rect = event.currentTarget.getBoundingClientRect(); touchRef.current = { x: (event.clientX - rect.left) / rect.width * 2 - 1, z: (event.clientY - rect.top) / rect.height * 2 - 1 }; }} onPointerMove={(event) => { if (!event.currentTarget.hasPointerCapture(event.pointerId)) return; const rect = event.currentTarget.getBoundingClientRect(); touchRef.current = { x: (event.clientX - rect.left) / rect.width * 2 - 1, z: (event.clientY - rect.top) / rect.height * 2 - 1 }; }} onPointerUp={() => { touchRef.current = { x: 0, z: 0 }; }} onPointerCancel={() => { touchRef.current = { x: 0, z: 0 }; }} onLostPointerCapture={() => { touchRef.current = { x: 0, z: 0 }; }} aria-label="ควบคุมการเดินด้วยสัมผัส">◉</div>
-      <button className="gallery-jump button button-quiet" disabled={customizerOpen || knockSeconds > 0} onClick={() => { jumpRef.current = true; }}>กระโดด ↑</button>
+      <div className="gallery-touch" role="group" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); moveTouchJoystick(event, touchKnobRef.current, touchRef.current); }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) moveTouchJoystick(event, touchKnobRef.current, touchRef.current); }} onPointerUp={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} onPointerCancel={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} onLostPointerCapture={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} aria-label="ลากจอยสติ๊กเพื่อเดิน"><span ref={touchKnobRef} className="gallery-touch-knob" aria-hidden="true" /></div>
+      <button className="gallery-jump button button-quiet" disabled={customizerOpen || knockSeconds > 0} onPointerDown={(event) => { event.preventDefault(); jumpRef.current = true; }} onClick={(event) => { if (event.detail === 0) jumpRef.current = true; }}>กระโดด ↑</button>
       {selected && <aside className="gallery-inspect"><button className="icon-button" onClick={() => setSelected(null)} aria-label="ปิด">×</button><p className="eyebrow">{selected.displayName} · เลขที่ {selected.studentNumber ?? "—"}</p><h3>{selected.originalName}</h3><p className="muted">{selected.assignmentTitle}</p><p>{selected.likes} ถูกใจ</p>{selectedPageCount > 1 && <div className="gallery-display-pages"><span>ผลงานในพื้นที่ {selectedPage * 40 + 1}–{Math.min(selectedPage * 40 + 40, selectedStudentWork.length)} จาก {selectedStudentWork.length}</span><button className="text-button" disabled={selectedPage === 0} onClick={() => { const next = selectedStudentWork[(selectedPage - 1) * 40]; setDisplayPages((pages) => ({ ...pages, [selected.studentId]: selectedPage - 1 })); if (next) setSelected(next); }}>ก่อนหน้า</button><button className="text-button" disabled={selectedPage + 1 >= selectedPageCount} onClick={() => { const next = selectedStudentWork[(selectedPage + 1) * 40]; setDisplayPages((pages) => ({ ...pages, [selected.studentId]: selectedPage + 1 })); if (next) setSelected(next); }}>ถัดไป</button></div>}{user.role === "student" && selected.studentId !== manifest?.viewerStudentId && <button className="button button-quiet" onClick={() => void like(selected)}>{selected.likedByMe ? "ยกเลิกถูกใจ" : "ถูกใจ"}</button>}{teacher && <button className="button button-quiet" onClick={() => void setHidden(selected)}>{selected.hidden ? "แสดงผลงาน" : "ซ่อนผลงาน"}</button>}<button className="button button-primary" onClick={() => setPreview(selected)}>เปิดดูโมเดล</button></aside>}
       {customizerOpen && <CharacterCustomizer appearance={draftAppearance} onChange={setDraftAppearance} onCancel={() => setCustomizerOpen(false)} onSave={() => void saveAppearance()} saving={loading} error={error} />}
     </section>

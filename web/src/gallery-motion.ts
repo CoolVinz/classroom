@@ -1,5 +1,29 @@
 export type Position = { x: number; z: number; rotation: number };
 export type Move = { sequence: number; dx: number; dz: number };
+export type TrainSample = { at: number; x: number; z: number; rotation: number };
+
+export function touchDirection(dx: number, dz: number, radius: number) {
+  let x = dx / radius, z = dz / radius;
+  const length = Math.hypot(x, z);
+  if (length > 1) { x /= length; z /= length; }
+  return { x, z };
+}
+
+export function interpolateTrain(samples: readonly TrainSample[], now: number, delay = 100) {
+  if (!samples.length) return null;
+  const target = now - delay;
+  if (target <= samples[0]!.at) return samples[0]!;
+  for (let index = 1; index < samples.length; index++) {
+    const next = samples[index]!;
+    if (target <= next.at) {
+      const previous = samples[index - 1]!;
+      const fraction = (target - previous.at) / Math.max(1, next.at - previous.at);
+      const rotationDelta = Math.atan2(Math.sin(next.rotation - previous.rotation), Math.cos(next.rotation - previous.rotation));
+      return { at: target, x: previous.x + (next.x - previous.x) * fraction, z: previous.z + (next.z - previous.z) * fraction, rotation: previous.rotation + rotationDelta * fraction };
+    }
+  }
+  return samples[samples.length - 1]!;
+}
 
 export function walkingStep(forward: number, side: number, yaw: number, seconds: number) {
   const length = Math.max(1, Math.hypot(forward, side));

@@ -9,6 +9,7 @@ import { LessonLibrary } from "./LessonLibrary";
 import { PublicLessonPage } from "./PublicLessonPage";
 import { QuizLibrary } from "./QuizLibrary";
 import { StudentQuizPage } from "./StudentQuizPage";
+import { enterGalleryFullscreen } from "./gallery-fullscreen";
 
 const GalleryWorld = lazy(() => import("./GalleryWorld").then((module) => ({ default: module.GalleryWorld })));
 
@@ -87,7 +88,7 @@ function App() {
     return true;
   }
   function navigate(path: string) { window.history.pushState(null, "", path); setPathname(path); }
-  function requestGalleryFullscreen() { void document.documentElement.requestFullscreen?.({ navigationUI: "hide" }).catch(() => {}); }
+  function requestGalleryFullscreen() { void enterGalleryFullscreen(); }
   function openWorld(classroomId: string) {
     requestGalleryFullscreen();
     navigate(`/world/${classroomId}`);
