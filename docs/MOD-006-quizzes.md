@@ -6,7 +6,7 @@
 
 ## Purpose and behavior
 
-Teachers maintain a reusable quiz library and assign immutable copies to classrooms. Students sign in with their existing school Google account, take one resumable attempt per round, and receive an automatically calculated total score. Quiz scores are independent of assignment marks and attendance.
+Teachers maintain a reusable quiz library and assign immutable copies to classrooms. Students sign in with their existing school Google account, take one resumable attempt per round, and receive an automatically calculated total score. Completed quiz scores also appear in the teacher-only class gradebook (MOD-008), separate from assignment marks and attendance.
 
 ## Workflows and rules
 
@@ -26,12 +26,13 @@ Teachers maintain a reusable quiz library and assign immutable copies to classro
 ## Dependencies and consumers
 
 **dependencies:** MOD-001, MOD-002, MOD-005, DAT-001, TEC-001, OPS-001
-**used_by:** MOD-005 lesson quiz buttons
+**used_by:** MOD-005 lesson quiz buttons, MOD-008 class gradebook
 
 **Code Map:**
 
 ```text
 Teacher quiz library/editor and round results: web/src/QuizLibrary.tsx
+Teacher class score grid: web/src/ClassGradebook.tsx
 Student round selector, attempts, timer, autosave, and lesson entry: web/src/StudentQuizPage.tsx, web/src/StudentPortal.tsx
 Teacher/student APIs, snapshots, locking, deadlines, scoring, and image access: src/routes/quizzes.ts
 Content validation, scoring, privacy projection: src/quiz-core.ts, src/quiz-core.test.ts

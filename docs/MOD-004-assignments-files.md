@@ -12,6 +12,8 @@ Students see active assignments and attached worksheets for their classrooms, pl
 
 Each assignment has an editable maximum score (default 100). Scores allow zero and two decimal places; the maximum cannot be lowered below any saved score. Editing a draft does not change the previously published result. Saving records the file UUIDs reviewed; later uploads remain unreviewed until the teacher saves again.
 
+Only the published score and its published maximum snapshot are included in the class gradebook (MOD-008); private drafts stay in the assignment review screen.
+
 ## Workflows and rules
 
 - Teachers create or edit an assignment and attach one or more worksheet files.
@@ -36,7 +38,7 @@ Each assignment has an editable maximum score (default 100). Scores allow zero a
 
 **dependencies:** MOD-001, MOD-002, DAT-001, TEC-001
 
-**used_by:** MOD-007
+**used_by:** MOD-007, MOD-008
 
 **Code Map:**
 

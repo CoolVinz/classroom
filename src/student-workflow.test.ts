@@ -50,15 +50,16 @@ describe("student submission API", () => {
     const { sql } = await import("./db/client");
     const { createSession, createStudentSession } = await import("./auth/session");
     const { galleryRoutes } = await import("./routes/gallery");
-    const [{ authRoutes }, { studentAuthRoutes }, { classroomRoutes }, { courseworkRoutes }, { studentCourseworkRoutes }, { attendanceScheduleRoutes }, { studentAttendanceRoutes }, { lessonPageApiRoutes }, { quizRoutes, studentQuizRoutes }, { handleAppError }] = await Promise.all([
+    const [{ authRoutes }, { studentAuthRoutes }, { classroomRoutes }, { courseworkRoutes }, { studentCourseworkRoutes }, { attendanceScheduleRoutes }, { studentAttendanceRoutes }, { lessonPageApiRoutes }, { quizRoutes, studentQuizRoutes }, { gradebookRoutes }, { handleAppError }] = await Promise.all([
       import("./routes/auth"), import("./routes/student-auth"), import("./routes/classrooms"),
       import("./routes/coursework"), import("./routes/student-coursework"), import("./routes/attendance-schedule"), import("./routes/student-attendance"),
       import("./routes/lesson-pages"),
       import("./routes/quizzes"),
+      import("./routes/gradebook"),
       import("./error-handler"),
     ]);
     const { ensureUploadRoot, cleanupUnusedLessonImages } = await import("./file-storage");
-    const app = new Elysia().onError(handleAppError).use(authRoutes).use(studentAuthRoutes).use(classroomRoutes).use(attendanceScheduleRoutes).use(courseworkRoutes).use(studentCourseworkRoutes).use(studentAttendanceRoutes).use(quizRoutes).use(studentQuizRoutes).use(lessonPageApiRoutes).use(galleryRoutes);
+    const app = new Elysia().onError(handleAppError).use(authRoutes).use(studentAuthRoutes).use(classroomRoutes).use(attendanceScheduleRoutes).use(courseworkRoutes).use(studentCourseworkRoutes).use(studentAttendanceRoutes).use(quizRoutes).use(studentQuizRoutes).use(gradebookRoutes).use(lessonPageApiRoutes).use(galleryRoutes);
     const teacherId = randomUUID(); const accountId = randomUUID();
     const roomA = randomUUID(); const roomB = randomUUID(); const emptyRoom = randomUUID();
     const studentA = randomUUID(); const studentB = randomUUID(); const studentC = randomUUID(); const studentD = randomUUID();
@@ -110,6 +111,10 @@ describe("student submission API", () => {
             (${studentB}, ${roomA}, '002', 'Student Two', ${peerEmail}, NULL),
             (${studentC}, ${roomB}, '001', 'Student One', ${accountEmail}, NULL)`;
         await tx`INSERT INTO classroom.assignments (id, classroom_id, title) VALUES (${assignmentA}, ${roomA}, 'Build'), (${assignmentB}, ${roomB}, 'Draw')`;
+        await tx`INSERT INTO classroom.assignment_assessments
+          (assignment_id, classroom_id, student_id, published_score, published_max_score, published_feedback,
+            published_reviewed_file_ids, published_revision, published_at)
+          VALUES (${assignmentB}, ${roomB}, ${studentC}, 7.5, 10, '', '{}', 1, NOW())`;
         await tx`INSERT INTO classroom.files (id, classroom_id, assignment_id, uploaded_by, kind, original_name, storage_name, media_type, size_bytes)
           VALUES (${teacherFile}, ${roomA}, ${assignmentA}, ${teacherId}, 'worksheet', 'task.pdf', ${randomUUID()}, 'application/pdf', 8)`;
         await tx`INSERT INTO classroom.files (id, classroom_id, assignment_id, student_id, uploaded_by, kind, original_name, storage_name, media_type, size_bytes)
@@ -161,6 +166,33 @@ describe("student submission API", () => {
       studentToken = signedIn.headers.get("set-cookie")!.split(";")[0].split("=")[1];
       let studentHeaders = { cookie: signedIn.headers.get("set-cookie")!.split(";")[0], origin: "http://localhost:3000" };
       const teacherHeaders = { cookie: `classroom_session=${teacherToken}`, origin: "http://localhost:3000" };
+
+      const initialGradebook = await app.handle(new Request(`http://localhost/api/classrooms/${roomB}/gradebook`, { headers: teacherHeaders }));
+      expect(initialGradebook.status).toBe(200);
+      expect(await initialGradebook.json()).toMatchObject({ scores: [{ studentId: studentC, itemId: assignmentB, score: 7.5, maxScore: 10 }] });
+      await sql`DELETE FROM classroom.assignment_assessments WHERE assignment_id = ${assignmentB} AND student_id = ${studentC}`;
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomB}/gradebook`, { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).status).toBe(404);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomB}/gradebook`, { headers: studentHeaders }))).status).toBe(401);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gradebook/columns`, { method: "POST", headers: { ...teacherHeaders, origin: "https://attacker.invalid", "content-type": "application/json" }, body: JSON.stringify({ name: "Manual", maxScore: 10 }) }))).status).toBe(403);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gradebook/columns`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ name: "   ", maxScore: 10 }) }))).status).toBe(422);
+      const manualColumnResponse = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gradebook/columns`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ name: "Manual quiz", maxScore: 10 }) }));
+      expect(manualColumnResponse.status).toBe(200);
+      const manualColumn = await manualColumnResponse.json() as { id: string; revision: number };
+      const saveManual = (revision: number, marks: { studentId: string; score: number | null }[]) => app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gradebook/columns/${manualColumn.id}`, {
+        method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ revision, marks }),
+      }));
+      expect((await saveManual(0, [{ studentId: studentA, score: 0 }, { studentId: studentB, score: 4 }])).status).toBe(200);
+      expect((await saveManual(0, [{ studentId: studentA, score: 9 }, { studentId: studentB, score: 4 }])).status).toBe(409);
+      expect((await saveManual(1, [{ studentId: studentA, score: 11 }, { studentId: studentB, score: 4 }])).status).toBe(422);
+      expect((await saveManual(1, [{ studentId: studentA, score: 0 }, { studentId: studentC, score: 4 }])).status).toBe(422);
+      expect((await saveManual(1, [{ studentId: studentA, score: null }, { studentId: studentB, score: 4 }])).status).toBe(200);
+      expect(await sql`SELECT student_id FROM classroom.gradebook_marks WHERE column_id = ${manualColumn.id} AND student_id = ${studentA}`).toHaveLength(0);
+      const savedManualScore = await sql<{ score: string | number }[]>`SELECT score FROM classroom.gradebook_marks WHERE column_id = ${manualColumn.id} AND student_id = ${studentB}`;
+      expect(Number(savedManualScore[0]?.score)).toBe(4);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gradebook/columns/${manualColumn.id}/archive`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ revision: 2 }) }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gradebook`, { headers: teacherHeaders })).then((response) => response.json()) as { items: { id: string; archived: boolean }[] }).items.find((item) => item.id === manualColumn.id)).toMatchObject({ archived: true });
+      expect(await sql`SELECT student_id FROM classroom.gradebook_marks WHERE column_id = ${manualColumn.id} AND student_id = ${studentB}`).toHaveLength(1);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gradebook/columns/${manualColumn.id}/restore`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ revision: 3 }) }))).status).toBe(200);
 
       const aiImport = await app.handle(new Request("http://localhost/api/quizzes/import", { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" },
         body: JSON.stringify({ json: JSON.stringify({ format: "classroom-quiz", version: 1, title: "AI draft", description: "คำชี้แจง", questions: [
@@ -257,6 +289,8 @@ describe("student submission API", () => {
       const submitted = await submittedResponse.json() as { score: string; questions: unknown[]; solutionsReleased: boolean };
       expect(Number(submitted.score)).toBe(1); expect(submitted.solutionsReleased).toBe(false);
       expect(JSON.stringify(submitted)).not.toContain("correctChoiceId");
+      const quizGradebook = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gradebook`, { headers: teacherHeaders }));
+      expect(await quizGradebook.json()).toMatchObject({ scores: expect.arrayContaining([{ studentId: studentA, itemId: firstRound.id, score: 1, maxScore: 1 }]) });
       expect((await app.handle(new Request(`http://localhost/api/student/quiz-attempts/${started.id}/submit`, {
         method: "POST", headers: { ...studentHeaders, "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: 1, answers: { [questionId]: wrongChoiceId } }),
       })).then((response) => response.json()) as { score: string }).score).toBe(submitted.score);

@@ -1,15 +1,15 @@
 # Project Documentation Index
 
-AI entry point. Read `AI_CONTEXT.md`, then open only the documents relevant to the task. The implemented app has seven functional modules.
+AI entry point. Read `AI_CONTEXT.md`, then open only the documents relevant to the task. The implemented app has eight functional modules.
 
 ## Project documents
 
 | ID | Name | File | Purpose | Tags | Coupling | Risk | Related |
 |---|---|---|---|---|---|---|---|
-| PROJ-001 | Overview | [docs/PROJ-001-overview.md](docs/PROJ-001-overview.md) | Users, capabilities, and main workflows | `project, workflows` | LOW | LOW | MOD-001, MOD-002, MOD-003, MOD-004, MOD-005, MOD-006, MOD-007 |
+| PROJ-001 | Overview | [docs/PROJ-001-overview.md](docs/PROJ-001-overview.md) | Users, capabilities, and main workflows | `project, workflows` | LOW | LOW | MOD-001, MOD-002, MOD-003, MOD-004, MOD-005, MOD-006, MOD-007, MOD-008 |
 | PROJ-002 | AI context rules | [AI_CONTEXT.md](AI_CONTEXT.md) | Selective retrieval and documentation rules | `AI, retrieval` | LOW | LOW | TEC-003 |
-| DAT-001 | Data model | [docs/DAT-001-data-model.md](docs/DAT-001-data-model.md) | Entities, relationships, and ownership | `PostgreSQL, data, ownership, quiz-attempts, gallery` | LOW | LOW | MOD-002, MOD-003, MOD-004, MOD-005, MOD-006, MOD-007 |
-| TEC-001 | Architecture | [docs/TEC-001-architecture.md](docs/TEC-001-architecture.md) | Current React, Elysia, Colyseus, and database architecture | `React, Elysia, Colyseus, uploads, workers, lessons, quizzes` | LOW | LOW | MOD-001, MOD-002, MOD-003, MOD-004, MOD-005, MOD-006, MOD-007 |
+| DAT-001 | Data model | [docs/DAT-001-data-model.md](docs/DAT-001-data-model.md) | Entities, relationships, and ownership | `PostgreSQL, data, ownership, quiz-attempts, gallery, gradebook` | LOW | LOW | MOD-002, MOD-003, MOD-004, MOD-005, MOD-006, MOD-007, MOD-008 |
+| TEC-001 | Architecture | [docs/TEC-001-architecture.md](docs/TEC-001-architecture.md) | Current React, Elysia, Colyseus, and database architecture | `React, Elysia, Colyseus, uploads, workers, lessons, quizzes, gradebook` | LOW | LOW | MOD-001, MOD-002, MOD-003, MOD-004, MOD-005, MOD-006, MOD-007, MOD-008 |
 | TEC-002 | Project profile | [PROJECT_PROFILE.md](PROJECT_PROFILE.md) | Stack, commands, constraints, and debt | `stack, tooling, constraints` | LOW | LOW | TEC-001, OPS-001, MOD-004, MOD-005, MOD-006, MOD-007 |
 | TEC-003 | Module template | [docs/MODULE_TEMPLATE.md](docs/MODULE_TEMPLATE.md) | Format for future module documentation | `template, Code Map` | LOW | LOW | PROJ-002 |
 | OPS-001 | Deployment | [docs/OPS-001-deployment.md](docs/OPS-001-deployment.md) | App and separate Colyseus Coolify deployment requirements | `Docker, Coolify, Colyseus, operations` | LOW | LOW | TEC-001, DAT-001, MOD-005, MOD-006, MOD-007 |
@@ -25,10 +25,11 @@ Project-document rows are rated LOW/LOW; module rows below describe implementati
 | MOD-001 | Authentication and accounts | [docs/MOD-001-authentication.md](docs/MOD-001-authentication.md) | Teacher passwords, Google student identity, sessions, and access checks | `auth, Google, Workspace, sessions` | HIGH | HIGH | MOD-002, MOD-003, MOD-004, MOD-006, DAT-001 |
 | MOD-002 | Classrooms and student rosters | [docs/MOD-002-classrooms-rosters.md](docs/MOD-002-classrooms-rosters.md) | Classroom numbers, headered/headerless roster import, archive, and scoped permanent removal | `classrooms, students, Google, CSV, XLSX, removal` | MEDIUM | HIGH | MOD-001, MOD-003, MOD-004, MOD-006, DAT-001 |
 | MOD-003 | Scheduled daily attendance and summaries | [docs/MOD-003-attendance.md](docs/MOD-003-attendance.md) | Weekly timetable, student arrival/visible-time tracking, teacher review/finalization, and daily summaries | `attendance, timetable, arrival, visible-time, reports` | HIGH | HIGH | MOD-001, MOD-002, DAT-001 |
-| MOD-004 | Assignments, files, and marking | [docs/MOD-004-assignments-files.md](docs/MOD-004-assignments-files.md) | Private submissions, Blender working files, colored OBJ/MTL previews, marking, and shared storage cleanup | `assignments, submissions, OBJ, MTL, assessments, thumbnails, storage` | HIGH | HIGH | MOD-001, MOD-002, MOD-006, DAT-001, TEC-001, REQ-001 |
+| MOD-004 | Assignments, files, and marking | [docs/MOD-004-assignments-files.md](docs/MOD-004-assignments-files.md) | Private submissions, Blender working files, colored OBJ/MTL previews, marking, and shared storage cleanup | `assignments, submissions, OBJ, MTL, assessments, thumbnails, storage` | HIGH | HIGH | MOD-001, MOD-002, MOD-006, MOD-008, DAT-001, TEC-001, REQ-001 |
 | MOD-005 | Shareable lesson library | [docs/MOD-005-lessons.md](docs/MOD-005-lessons.md) | Teacher-owned block or HTML/CSS/JavaScript lessons published by public link | `lessons, public-links, code, sandbox, images, YouTube` | HIGH | HIGH | MOD-001, MOD-003, MOD-006, DAT-001, TEC-001, OPS-001 |
-| MOD-006 | Quiz builder | [docs/MOD-006-quizzes.md](docs/MOD-006-quizzes.md) | Reusable quizzes, immutable classroom rounds, private attempts, automatic scoring, and released solutions | `quizzes, attempts, scoring, timers, images, privacy` | HIGH | HIGH | MOD-001, MOD-002, MOD-005, DAT-001, OPS-001 |
+| MOD-006 | Quiz builder | [docs/MOD-006-quizzes.md](docs/MOD-006-quizzes.md) | Reusable quizzes, immutable classroom rounds, private attempts, automatic scoring, and released solutions | `quizzes, attempts, scoring, timers, images, privacy` | HIGH | HIGH | MOD-001, MOD-002, MOD-005, MOD-008, DAT-001, OPS-001 |
 | MOD-007 | Virtual classroom gallery | [docs/MOD-007-virtual-gallery.md](docs/MOD-007-virtual-gallery.md) | Colyseus world, numbered student spaces, scheduled train, movement, character builder, and student work displays | `gallery, Colyseus, Three.js, numbered-roster, train, schedule, movement, avatars, OBJ, glTF` | HIGH | HIGH | MOD-001, MOD-002, MOD-003, MOD-004, DAT-001, OPS-001 |
+| MOD-008 | Class gradebook | [docs/MOD-008-gradebook.md](docs/MOD-008-gradebook.md) | Class roster grade grid for published assignment marks, completed quizzes, and manual score columns | `gradebook, class-scores, manual-marks, totals, Excel` | HIGH | HIGH | MOD-002, MOD-004, MOD-006, DAT-001 |
 
 ## Retrieval
 
