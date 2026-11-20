@@ -31,8 +31,13 @@ async function ownedClass(actor: Actor, classroomId: string) {
   if (!room) throw new HttpError(404, "ไม่พบห้องเรียนนี้");
 }
 async function studentClass(accountId: string, classroomId: string) {
-  const [member] = await sql<{ studentId: string }[]>`SELECT s.id AS "studentId" FROM classroom.students s JOIN classroom.classrooms c ON c.id=s.classroom_id JOIN classroom.gallery_worlds w ON w.classroom_id=c.id WHERE s.account_id=${accountId} AND s.classroom_id=${classroomId} AND s.archived_at IS NULL AND c.archived_at IS NULL AND w.enabled`;
-  if (!member) throw new HttpError(404, "ไม่พบโลกเสมือนนี้");
+  const [member] = await sql<{ studentId: string; enabled: boolean; mode: string; assignmentTitle: string | null; hasSubmission: boolean; approved: boolean; entryAllowed: boolean }[]>`SELECT e.student_id AS "studentId", w.enabled, e.student_entry_mode AS mode, e.required_assignment_title AS "assignmentTitle", e.has_submission AS "hasSubmission", e.approved, e.entry_allowed AS "entryAllowed" FROM classroom.gallery_student_entry e JOIN classroom.gallery_worlds w ON w.classroom_id=e.classroom_id WHERE e.account_id=${accountId} AND e.classroom_id=${classroomId}`;
+  if (!member || !member.enabled) throw new HttpError(404, "ไม่พบโลกเสมือนนี้");
+  if (!member.entryAllowed) {
+    if (!member.assignmentTitle) throw new HttpError(403, "ห้องเรียนนี้ยังไม่มีงานที่เปิดอยู่ จึงยังเข้าโลกเสมือนไม่ได้");
+    const requirement = member.mode === "approval" ? "ส่งงานล่าสุดและรอครูอนุมัติก่อนเข้าโลก" : "ส่งงานล่าสุดก่อนเข้าโลก";
+    throw new HttpError(403, `กรุณา${requirement}: ${member.assignmentTitle}`);
+  }
   return member.studentId;
 }
 async function ensureBlocks(classroomId: string) {
@@ -81,8 +86,43 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
   .get("/student/worlds", async ({ request }) => {
     const actor = await readStudentActor(request);
     if (!actor) throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
-    return sql`SELECT c.id AS "classroomId", c.name AS "classroomName" FROM classroom.students s JOIN classroom.classrooms c ON c.id=s.classroom_id JOIN classroom.gallery_worlds w ON w.classroom_id=c.id WHERE s.account_id=${actor.id} AND s.archived_at IS NULL AND c.archived_at IS NULL AND w.enabled ORDER BY c.name`;
+    return sql`SELECT e.classroom_id AS "classroomId", c.name AS "classroomName", e.student_entry_mode AS "entryMode", e.required_assignment_id AS "requiredAssignmentId", e.required_assignment_title AS "requiredAssignmentTitle", e.has_submission AS "hasSubmission", e.approved, e.entry_allowed AS "entryAllowed" FROM classroom.gallery_student_entry e JOIN classroom.classrooms c ON c.id=e.classroom_id JOIN classroom.gallery_worlds w ON w.classroom_id=e.classroom_id WHERE e.account_id=${actor.id} AND w.enabled ORDER BY c.name`;
   })
+  .get("/classrooms/:classroomId/gallery/access", async ({ params, request }) => {
+    const actor = await requireActor(request);
+    await ownedClass(actor, params.classroomId);
+    await sql`INSERT INTO classroom.gallery_worlds(classroom_id,enabled) VALUES(${params.classroomId},false) ON CONFLICT DO NOTHING`;
+    const students = await sql`SELECT student_id AS "studentId", account_id IS NOT NULL AS "accountLinked", display_name AS "displayName", student_number AS "studentNumber", student_entry_mode AS "entryMode", required_assignment_id AS "requiredAssignmentId", required_assignment_title AS "requiredAssignmentTitle", has_submission AS "hasSubmission", approved, entry_allowed AS "entryAllowed" FROM classroom.gallery_student_entry WHERE classroom_id=${params.classroomId} ORDER BY student_number NULLS LAST, display_name, student_id`;
+    const [world] = await sql<{ mode: "submission" | "approval" }[]>`SELECT student_entry_mode AS mode FROM classroom.gallery_worlds WHERE classroom_id=${params.classroomId}`;
+    const [assignment] = await sql<{ id: string; title: string }[]>`SELECT id, title FROM classroom.assignments WHERE classroom_id=${params.classroomId} AND archived_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1`;
+    return { mode: world.mode, requiredAssignmentId: assignment?.id ?? null, requiredAssignmentTitle: assignment?.title ?? null, students };
+  })
+  .put("/classrooms/:classroomId/gallery/access", async ({ params, body, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireActor(request);
+    await ownedClass(actor, params.classroomId);
+    await sql`INSERT INTO classroom.gallery_worlds(classroom_id,enabled,student_entry_mode) VALUES(${params.classroomId},false,${body.mode}) ON CONFLICT(classroom_id) DO UPDATE SET student_entry_mode=EXCLUDED.student_entry_mode, updated_at=NOW()`;
+    return { ok: true, mode: body.mode };
+  }, { body: t.Object({ mode: t.Union([t.Literal("submission"), t.Literal("approval")]) }) })
+  .put("/classrooms/:classroomId/gallery/access/:studentId", async ({ params, body, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireActor(request);
+    await ownedClass(actor, params.classroomId);
+    await sql.begin(async (tx) => {
+      const [member] = await tx<{ accountId: string | null }[]>`SELECT account_id AS "accountId" FROM classroom.students WHERE id=${params.studentId} AND classroom_id=${params.classroomId} AND archived_at IS NULL FOR UPDATE`;
+      if (!member?.accountId) throw new HttpError(400, "นักเรียนต้องเชื่อมบัญชีโรงเรียนก่อนจึงจัดการสิทธิ์เข้าโลกได้");
+      const [assignment] = await tx<{ id: string }[]>`SELECT id FROM classroom.assignments WHERE classroom_id=${params.classroomId} AND archived_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1`;
+      if (!assignment || assignment.id !== body.assignmentId) throw new HttpError(409, "งานล่าสุดเปลี่ยนแล้ว กรุณาโหลดรายการใหม่");
+      if (body.approved) {
+        const [work] = await tx<{ submitted: boolean }[]>`SELECT EXISTS(SELECT 1 FROM classroom.files WHERE classroom_id=${params.classroomId} AND assignment_id=${assignment.id} AND student_id=${params.studentId} AND submitted_by_account_id=${member.accountId} AND kind='submission') AS submitted`;
+        if (!work.submitted) throw new HttpError(400, "อนุมัติได้หลังจากนักเรียนส่งงานล่าสุดแล้วเท่านั้น");
+        await tx`INSERT INTO classroom.gallery_entry_approvals(classroom_id,assignment_id,student_id,account_id,approved_by) VALUES(${params.classroomId},${assignment.id},${params.studentId},${member.accountId},${actor.id}) ON CONFLICT(classroom_id,assignment_id,student_id,account_id) DO UPDATE SET approved_by=EXCLUDED.approved_by, approved_at=NOW()`;
+      } else {
+        await tx`DELETE FROM classroom.gallery_entry_approvals WHERE classroom_id=${params.classroomId} AND assignment_id=${assignment.id} AND student_id=${params.studentId} AND account_id=${member.accountId}`;
+      }
+    });
+    return { ok: true, approved: body.approved };
+  }, { body: t.Object({ assignmentId: t.String({ format: "uuid" }), approved: t.Boolean() }) })
   .get("/classrooms/:classroomId/gallery", async ({ params, request, query }) => {
     const teacher = await readActor(request);
     const student = teacher ? null : await readStudentActor(request);
@@ -127,13 +167,13 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     checkRequestOrigin(request);
     const teacher = await readActor(request);
     const student = teacher ? null : await readStudentActor(request);
+    let studentId: string | null = null;
     if (teacher) await ownedClass(teacher, params.classroomId);
-    else if (student) await studentClass(student.id, params.classroomId);
+    else if (student) studentId = await studentClass(student.id, params.classroomId);
     else throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
     const token = randomBytes(32).toString("base64url");
     const sessionHash = hash(cookieToken(request));
     const actorId = teacher?.id ?? student!.id;
-    const studentId = student ? await studentClass(student.id, params.classroomId) : null;
     const [enabled] = await sql<{ enabled: boolean }[]>`SELECT enabled FROM classroom.gallery_worlds WHERE classroom_id=${params.classroomId}`;
     if (!enabled || (!teacher && !enabled.enabled)) throw new HttpError(404, "ยังไม่ได้เปิดโลกเสมือน");
     await sql`DELETE FROM classroom.gallery_tickets WHERE expires_at < NOW()`;

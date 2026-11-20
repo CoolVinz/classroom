@@ -17,6 +17,8 @@ Give each classroom a shared third-person world where teachers and active studen
 - Teachers choose automatic departures every one or two minutes, or start each circuit manually. Automatic service begins with a ten-second boarding countdown; after a circuit it waits until both the configured interval and the ten-second post-return minimum are met. Teachers can start at the entrance or choose a numbered student; that student's three-row group station becomes the start. A stale/archived/unnumbered choice falls back to the entrance.
 - Colyseus owns train timing, the ordered roster snapshot for each circuit, seat allocation, and rider positions. Schedule changes and roster reordering take effect when the train is empty before its next departure. Seats are released on disconnect. Riding, movement, and train timing do not change attendance or student work.
 - Only STL/OBJ/GLB/glTF model and submission files for active students and active assignments appear. Working files, worksheets, assessment data, and other uploads remain private.
+- Student entry requires eligible work on the newest active classroom assignment, ordered by creation time and ID. The default `submission` mode admits the linked student after their own final upload (student-attributed `submission` file); teacher uploads and `.blend` working files do not count. In `approval` mode, teachers can approve each linked student only after that student submits; approval is bound to the current assignment and student account. Archiving the newest assignment falls back to the next newest active assignment, and deleting the student's qualifying upload revokes entry until another eligible upload exists. With no active assignment, students remain locked. Teachers can enter regardless of student eligibility; the world's existing enabled switch still controls student access.
+- The student portal lists enabled worlds with each student's current eligibility and assignment requirement, refreshes status when it regains focus, and links locked students directly to the required assignment. The GalleryWorld access panel lets the owning teacher choose automatic submission access or approval mode and approve/revoke students. App API requests and Colyseus tickets, admission, and periodic session checks all enforce the same database eligibility view.
 - Student models hidden by a teacher are omitted from student manifests and content routes. Teachers can restore them from the hidden-work tray.
 - Student likes are unique per model/student; self-likes are rejected. Likes do not affect assessment.
 - Each classroom has one Colyseus room capped at 50 connections and one connection per account. Room positions are temporary; PostgreSQL retains settings, blocks, hidden displays, and likes.
@@ -42,13 +44,14 @@ Give each classroom a shared third-person world where teachers and active studen
 
 ```text
 Teacher UI and Three.js world: web/src/App.tsx, web/src/GalleryWorld.tsx, web/src/gallery-avatar.ts, web/src/gallery-motion.ts, web/src/gallery-aim.ts; shared block/route geometry and schedule rules: gallery-server/src/train-layout.mjs, gallery-server/src/train-rules.mjs
-Student entry: web/src/StudentPortal.tsx
-Authenticated world APIs and model/material reads: src/routes/gallery.ts
-Migrations: src/db/migrations/014_virtual_gallery.sql, src/db/migrations/015_gallery_avatars.sql, src/db/migrations/016_obj_material_files.sql, src/db/migrations/017_gallery_character_options.sql, src/db/migrations/018_gallery_train.sql
-Colyseus service, bounded movement, temporary combat, and train simulation: gallery-server/src/server.mjs, gallery-server/src/movement.mjs, gallery-server/src/combat.mjs
+Student entry and assignment-gate status: web/src/StudentPortal.tsx
+Teacher access mode and per-student approvals: web/src/GalleryWorld.tsx
+Authenticated world APIs, eligibility, and model/material reads: src/routes/gallery.ts
+Migrations: src/db/migrations/014_virtual_gallery.sql, src/db/migrations/015_gallery_avatars.sql, src/db/migrations/016_obj_material_files.sql, src/db/migrations/017_gallery_character_options.sql, src/db/migrations/018_gallery_train.sql, src/db/migrations/020_gallery_submission_access.sql
+Colyseus service, admission/access rechecks, bounded movement, temporary combat, and train simulation: gallery-server/src/server.mjs, gallery-server/src/movement.mjs, gallery-server/src/combat.mjs
 Service deployment: gallery-server/Dockerfile; `/__healthcheck` route: gallery-server/src/server.mjs
 Existing model parser and preview: web/src/model-view.ts, web/src/model-preview.worker.ts, web/src/parse-obj-model.ts, web/src/obj-materials.ts, web/src/ModelPreview.tsx
-Tests: web/src/gallery-api.test.ts, web/src/gallery-motion.test.ts, web/src/gallery-aim.test.ts, web/src/gallery-avatar.test.ts, web/src/parse-obj-model.test.ts, src/student-workflow.test.ts, src/gallery-world.integration.ts, gallery-server/src/train-layout-check.mjs, gallery-server/src/train-rules-check.mjs, gallery-server/src/movement-check.mjs, gallery-server/src/combat-check.mjs, gallery-server/src/health-check.mjs; live-room integration needs an isolated database migrated through 018
+Tests: web/src/gallery-api.test.ts, web/src/gallery-motion.test.ts, web/src/gallery-aim.test.ts, web/src/gallery-avatar.test.ts, web/src/parse-obj-model.test.ts, src/student-workflow.test.ts, src/gallery-world.integration.ts, gallery-server/src/train-layout-check.mjs, gallery-server/src/train-rules-check.mjs, gallery-server/src/movement-check.mjs, gallery-server/src/combat-check.mjs, gallery-server/src/health-check.mjs; live-room and submission-gate integration needs an isolated database migrated through 020
 ```
 
 ## Warnings and open questions

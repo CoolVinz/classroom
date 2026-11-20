@@ -33,6 +33,7 @@ Only the published score and its published maximum snapshot are included in the 
 - Assignment archival hides work from students while preserving associated files. Earlier models and submissions are never replaced by later uploads.
 - Removing a student from one classroom removes their files only in that classroom; shared Google accounts and records in other classes remain. Individual-file removal and student removal coordinate with uploads, move stored content to `.deleting` before database commit, restore staged content on rollback, and unlink after commit. Missing physical files do not block record deletion.
 - Student uploads use the same private storage and UUIDs as teacher files. MOD-007 reuses eligible STL/OBJ model/submission records and saved thumbnails for the classroom gallery through its own membership-checked endpoints.
+- For gallery entry, only the linked student's `submission` file on the newest active assignment counts; teacher-uploaded `model` files and `.blend` `working` files do not. The entry gate reevaluates when a submission is removed or assignment activity changes.
 
 ## Dependencies and consumers
 

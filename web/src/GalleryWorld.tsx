@@ -18,6 +18,8 @@ type GalleryModel = { id: string; studentId: string; displayName: string; studen
 type TrainSettings = { mode: "auto" | "manual"; intervalSeconds: 60 | 120; startStudentId: string | null };
 type TrainView = TrainSettings & { active: boolean; x: number; z: number; rotation: number; phase: "waiting" | "boarding" | "moving" | "dwell"; stopId: string; nextStopId: string; departureAt: number; arrivalAt: number; seats: number; revision: number; layoutRoster: string };
 type Manifest = { enabled: boolean; classroomId: string; classroomName: string; blocks: { studentId: string; displayName: string; studentNumber: number | null; blockIndex: number; layoutIndex: number; archived: boolean }[]; models: GalleryModel[]; nextOffset: number | null; teacher: boolean; viewerStudentId: string | null; train: TrainSettings };
+type GalleryAccessStudent = { studentId: string; accountLinked: boolean; displayName: string; studentNumber: number | null; requiredAssignmentId: string | null; requiredAssignmentTitle: string | null; hasSubmission: boolean; approved: boolean; entryAllowed: boolean };
+type GalleryAccess = { mode: "submission" | "approval"; requiredAssignmentId: string | null; requiredAssignmentTitle: string | null; students: GalleryAccessStudent[] };
 type Avatar = AvatarAppearance & { displayName: string; role: string; x: number; z: number; rotation: number; sequence?: number; jump?: number; movementEpoch?: number; knocked?: boolean; respawnAt?: number; protectedUntil?: number; trainSeat?: number };
 type BoltVisual = { group: THREE.Group; trail: THREE.Line; target: THREE.Vector3 };
 
@@ -57,6 +59,9 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   const [trainAction, setTrainAction] = useState<"board" | "leave" | null>(null);
   const [trainForm, setTrainForm] = useState<TrainSettings>({ mode: "auto", intervalSeconds: 120, startStudentId: null });
   const [trainMessage, setTrainMessage] = useState("");
+  const [galleryAccess, setGalleryAccess] = useState<GalleryAccess | null>(null);
+  const [entryModeDraft, setEntryModeDraft] = useState<"submission" | "approval">("submission");
+  const [accessMessage, setAccessMessage] = useState("");
   const trainRef = useRef<TrainView | null>(null);
   const trainSeatRef = useRef(-1);
   const lastSavedTrainSettings = useRef<TrainSettings | null>(null);
@@ -134,6 +139,11 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     setManifest(value); setEnabled(value.enabled);
     setModels((current) => offset ? [...current, ...value.models] : value.models);
   }, [classroomId]);
+  const loadGalleryAccess = useCallback(async () => {
+    const value = await api<GalleryAccess>(apiPath(classroomId, "/access"));
+    setGalleryAccess(value); setEntryModeDraft(value.mode);
+  }, [classroomId]);
+  useEffect(() => { if (teacher) void loadGalleryAccess().catch((reason) => setError(reason instanceof Error ? reason.message : "โหลดสิทธิ์เข้าโลกไม่สำเร็จ")); }, [loadGalleryAccess, teacher]);
 
   useEffect(() => {
     let alive = true;
@@ -442,7 +452,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       if (!alive) { void room.leave(); return; }
       roomRef.current = room;
       setError("");
-      room.onLeave((code: number) => { if (alive) { if (code === 4403) { setEnabled(false); setManifest(null); setError("ครูหยุดโลกเสมือนสำหรับนักเรียนแล้ว"); return; } initialized = false; setOnline(0); setError("การเชื่อมต่อโลกเสมือนสิ้นสุด กรุณาออกแล้วเข้าใหม่"); } });
+      room.onLeave((code: number) => { if (alive) { if (code === 4403) { setEnabled(false); setManifest(null); setError("ครูหยุดโลกเสมือนสำหรับนักเรียนแล้ว"); return; } if (code === 4003 && !teacher) { initialized = false; setOnline(0); setError("สิทธิ์เข้าโลกเปลี่ยนแล้ว กรุณาตรวจสอบงานล่าสุดหรือรอครูอนุมัติในหน้าห้องเรียน"); return; } initialized = false; setOnline(0); setError("การเชื่อมต่อโลกเสมือนสิ้นสุด กรุณาออกแล้วเข้าใหม่"); } });
       room.onMessage("gallery-refresh", () => { void load().catch((reason) => setError(reason instanceof Error ? reason.message : "โหลดผลงานใหม่ไม่สำเร็จ")); });
       room.onMessage("cast-result", ({ ok }: { ok: boolean }) => { if (!ok) setError("ยิงไม่ได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง"); });
       room.onMessage("train-result", ({ ok, message }: { ok: boolean; message: string }) => { setTrainMessage(message); if (!ok) setError(message); });
@@ -625,6 +635,21 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     catch (reason) { setError(reason instanceof Error ? reason.message : "บันทึกการตั้งค่าไม่สำเร็จ"); }
     finally { setLoading(false); }
   }
+  async function saveEntryMode() {
+    setLoading(true); setError(""); setAccessMessage("");
+    try { await api(apiPath(classroomId, "/access"), { method: "PUT", body: JSON.stringify({ mode: entryModeDraft }) }); await loadGalleryAccess(); setAccessMessage("บันทึกเงื่อนไขเข้าโลกแล้ว"); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "บันทึกเงื่อนไขเข้าโลกไม่สำเร็จ"); }
+    finally { setLoading(false); }
+  }
+  async function setStudentApproval(student: GalleryAccessStudent, approved: boolean) {
+    if (!galleryAccess?.requiredAssignmentId) return;
+    setLoading(true); setError(""); setAccessMessage("");
+    try {
+      await api(apiPath(classroomId, `/access/${student.studentId}`), { method: "PUT", body: JSON.stringify({ assignmentId: galleryAccess.requiredAssignmentId, approved }) });
+      await loadGalleryAccess(); setAccessMessage(`${student.displayName}: ${approved ? "อนุมัติแล้ว" : "ถอนการอนุมัติแล้ว"}`);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "บันทึกสิทธิ์นักเรียนไม่สำเร็จ"); await loadGalleryAccess().catch(() => {}); }
+    finally { setLoading(false); }
+  }
   async function saveTrainSettings() {
     setLoading(true); setError("");
     try {
@@ -707,6 +732,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         </aside>
         <div className="gallery-management"><strong>ตัวละคร</strong><div className="gallery-management-actions"><button className="button button-quiet" onClick={() => { setError(""); setDraftAppearance({ ...appearance }); setCustomizerOpen(true); setMenuOpen(false); }}>ปรับแต่งตัวละคร</button></div></div>
         {teacher && <div className="gallery-management"><strong>จัดการโลกเสมือน</strong><p>{enabled ? "เปิดสำหรับนักเรียน" : "หยุดสำหรับนักเรียน · ครูเข้าชมได้"}</p><div className="gallery-management-actions"><button className="button button-quiet" disabled={loading} onClick={() => void setWorld(!enabled)}>{enabled ? "หยุดโลกสำหรับนักเรียน" : "เปิดโลกสำหรับนักเรียน"}</button><button className="button button-quiet" aria-pressed={wandMode} onClick={() => { setWandMode((value) => !value); setSelected(null); setMenuOpen(false); }}>{wandMode ? "เก็บไม้กายสิทธิ์" : "ถือไม้กายสิทธิ์"}</button></div></div>}
+        {teacher && <section className="gallery-management gallery-access"><strong>สิทธิ์เข้าโลกของนักเรียน</strong><p>งานล่าสุด: {galleryAccess?.requiredAssignmentTitle ?? "ยังไม่มีงานที่เปิดอยู่"}</p><div className="gallery-access-mode"><label>เงื่อนไข<select value={entryModeDraft} onChange={(event) => setEntryModeDraft(event.target.value as GalleryAccess["mode"])}><option value="submission">ส่งงานล่าสุดแล้วเข้าได้</option><option value="approval">ครูอนุมัติรายคนหลังส่งงาน</option></select></label><button className="button button-quiet" disabled={loading || !galleryAccess} onClick={() => void saveEntryMode()}>บันทึก</button></div>{galleryAccess?.mode === "approval" && <div className="gallery-access-roster">{galleryAccess.students.map((student) => <div className="gallery-access-student" key={student.studentId}><span><strong>{student.studentNumber ?? "—"}. {student.displayName}</strong><small>{!student.accountLinked ? "ยังไม่เชื่อมบัญชี Google" : !student.hasSubmission ? "ยังไม่ส่งงานล่าสุด" : student.approved ? "อนุมัติแล้ว" : "ส่งแล้ว · ยังไม่ได้อนุมัติ"}</small></span><button className="text-button" disabled={loading || !galleryAccess.requiredAssignmentId || !student.accountLinked || (!student.hasSubmission && !student.approved)} onClick={() => void setStudentApproval(student, !student.approved)}>{student.approved ? "ถอนอนุมัติ" : "อนุมัติ"}</button></div>)}{!galleryAccess.students.length && <small>ยังไม่มีนักเรียนในห้องนี้</small>}</div>}{accessMessage && <small role="status">{accessMessage}</small>}</section>}
         {manifest?.nextOffset !== null && <button className="button button-quiet" onClick={() => void load(manifest?.nextOffset ?? 0)}>โหลดผลงานเพิ่ม</button>}
         {teacher && models.some((item) => item.hidden) && <aside className="gallery-hidden-tray"><strong>ผลงานที่ซ่อน</strong>{models.filter((item) => item.hidden).map((item) => <div key={item.id}><span>{item.displayName} · {item.originalName}</span><button className="text-button" onClick={() => void setHidden(item)}>แสดง</button></div>)}</aside>}
         {logout && <button className="button button-quiet" onClick={logout}>ออกจากระบบ</button>}

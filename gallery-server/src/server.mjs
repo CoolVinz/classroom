@@ -26,6 +26,7 @@ async function consumeTicket(token, classroomId) {
       FROM classroom.gallery_tickets gt JOIN classroom.classrooms c ON c.id=gt.classroom_id
       JOIN classroom.gallery_worlds w ON w.classroom_id=c.id
       WHERE gt.token_hash=$1 AND gt.classroom_id=$2 AND gt.expires_at>NOW() AND gt.consumed_at IS NULL AND (w.enabled OR (gt.actor_kind='teacher' AND c.owner_id=gt.account_id)) AND c.archived_at IS NULL
+        AND (gt.actor_kind='teacher' OR EXISTS (SELECT 1 FROM classroom.gallery_student_entry e WHERE e.classroom_id=gt.classroom_id AND e.student_id=gt.student_id AND e.account_id=gt.account_id AND e.entry_allowed))
       FOR UPDATE OF gt`, [sha256(token), classroomId]);
     const ticket = rows[0];
     if (!ticket) throw new ServerError(4001, "Room ticket expired or already used");
@@ -48,7 +49,7 @@ async function consumeTicket(token, classroomId) {
 async function stillAllowed(auth) {
   const query = auth.role === "teacher"
     ? `SELECT EXISTS(SELECT 1 FROM classroom.sessions s JOIN classroom.teachers t ON t.id=s.teacher_id JOIN classroom.classrooms c ON c.id=$3 JOIN classroom.gallery_worlds w ON w.classroom_id=c.id WHERE s.token_hash=$1 AND s.teacher_id=$2 AND s.expires_at>NOW() AND t.active AND c.owner_id=t.id AND c.archived_at IS NULL) AS allowed`
-    : `SELECT EXISTS(SELECT 1 FROM classroom.student_sessions ss JOIN classroom.students s ON s.id=$4 JOIN classroom.classrooms c ON c.id=s.classroom_id JOIN classroom.gallery_worlds w ON w.classroom_id=c.id WHERE ss.token_hash=$1 AND ss.account_id=$2 AND ss.expires_at>NOW() AND s.classroom_id=$3 AND s.account_id=ss.account_id AND s.archived_at IS NULL AND c.archived_at IS NULL AND w.enabled) AS allowed`;
+    : `SELECT EXISTS(SELECT 1 FROM classroom.student_sessions ss JOIN classroom.students s ON s.id=$4 JOIN classroom.classrooms c ON c.id=s.classroom_id JOIN classroom.gallery_worlds w ON w.classroom_id=c.id JOIN classroom.gallery_student_entry e ON e.classroom_id=c.id AND e.student_id=s.id AND e.account_id=ss.account_id WHERE ss.token_hash=$1 AND ss.account_id=$2 AND ss.expires_at>NOW() AND s.classroom_id=$3 AND s.account_id=ss.account_id AND s.archived_at IS NULL AND c.archived_at IS NULL AND w.enabled AND e.entry_allowed) AS allowed`;
   const values = auth.role === "teacher" ? [auth.sessionHash, auth.accountId, auth.classroomId] : [auth.sessionHash, auth.accountId, auth.classroomId, auth.studentId];
   const { rows } = await pool.query(query, values);
   return rows[0]?.allowed === true;
