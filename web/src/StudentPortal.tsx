@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useState, type FormEvent } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { api } from "./api";
 import { StudentAttendance } from "./StudentAttendance";
 import { FileThumbnail } from "./FileThumbnail";
@@ -16,6 +16,8 @@ export function StudentPortal({ user, logout, openWorld }: { user: StudentUser; 
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [quizzes, setQuizzes] = useState<StudentQuiz[]>([]);
   const [worlds, setWorlds] = useState<GalleryClass[]>([]);
+  const [worldsError, setWorldsError] = useState(false);
+  const worldsRequest = useRef(0);
   const [selectedId, setSelectedId] = useState("");
   const [files, setFiles] = useState<StudentFile[]>([]);
   const [busy, setBusy] = useState(false);
@@ -37,12 +39,22 @@ export function StudentPortal({ user, logout, openWorld }: { user: StudentUser; 
   }, [selectedId]);
   useEffect(() => { void loadAssignments(); }, [loadAssignments]);
   useEffect(() => { void api<StudentQuiz[]>("/student/quizzes").then(setQuizzes).catch((reason) => setError(reason instanceof Error ? reason.message : "โหลดแบบทดสอบไม่สำเร็จ")); }, []);
-  const loadWorlds = useCallback(() => api<GalleryClass[]>("/student/worlds").then(setWorlds).catch(() => setWorlds([])), []);
+  const loadWorlds = useCallback(async () => {
+    const request = ++worldsRequest.current;
+    try {
+      const next = await api<GalleryClass[]>("/student/worlds");
+      if (request !== worldsRequest.current) return;
+      setWorlds(next);
+      setWorldsError(false);
+    } catch {
+      if (request === worldsRequest.current) setWorldsError(true);
+    }
+  }, []);
   useEffect(() => {
     void loadWorlds();
     const refresh = () => { if (document.visibilityState === "visible") void loadWorlds(); };
     window.addEventListener("focus", refresh); document.addEventListener("visibilitychange", refresh);
-    return () => { window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", refresh); };
+    return () => { worldsRequest.current++; window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", refresh); };
   }, [loadWorlds]);
 
   const loadFiles = useCallback(async () => {
@@ -119,7 +131,13 @@ export function StudentPortal({ user, logout, openWorld }: { user: StudentUser; 
       {error && <div className="notice" role="alert">{error}<button onClick={() => setError("")} aria-label="ปิด">×</button></div>}
       <div className="page-heading"><div><p className="eyebrow">พื้นที่นักเรียน</p><h1>งานของฉัน</h1><p className="muted page-description">ดูคำชี้แจงและไฟล์ใบงาน แล้วส่งงานของคุณ</p></div></div>
       <StudentAttendance />
-      {worlds.length > 0 && <section className="panel"><header className="panel-heading compact"><div><h2>โลกเสมือน</h2><p className="muted">เดินชมผลงาน 3 มิติในห้องเรียนของคุณ</p></div><button className="text-button" onClick={() => void loadWorlds()}>ตรวจสอบสิทธิ์</button></header><div className="gallery-world-links">{worlds.map((world) => <article className="gallery-entry-card" key={world.classroomId}><div><strong>{world.classroomName}</strong>{world.entryAllowed ? <p className="muted">คุณมีสิทธิ์เข้าโลกเสมือน</p> : <p className="muted">{!world.requiredAssignmentTitle ? "ยังไม่มีงานที่เปิดอยู่ จึงยังเข้าโลกไม่ได้" : !world.hasSubmission ? `ส่งงานล่าสุดก่อนเข้าโลก: ${world.requiredAssignmentTitle}` : world.entryMode === "approval" && !world.approved ? `ส่งแล้ว · รอครูอนุมัติสำหรับงาน ${world.requiredAssignmentTitle}` : "สถานะสิทธิ์เข้าโลกกำลังปรับปรุง"}</p>}</div><div className="gallery-world-links">{world.entryAllowed ? <button className="button button-primary" onClick={() => openWorld(world.classroomId)}>เข้าโลก ↗</button> : world.requiredAssignmentId && <button className="button button-quiet" onClick={() => { setSelectedId(world.requiredAssignmentId!); document.getElementById("student-assignments")?.scrollIntoView({ behavior: "smooth" }); }}>ไปยังงานล่าสุด</button>}</div></article>)}</div></section>}
+      {(worlds.length > 0 || worldsError) && <section className="panel">
+        <header className="panel-heading compact">
+          <h2>โลกเสมือน</h2>
+          <button className="text-button" onClick={() => void loadWorlds()}>{worldsError ? "ลองใหม่" : "ตรวจสอบสิทธิ์"}</button>
+        </header>
+        {worldsError ? <p className="assignment-empty muted" role="alert">ตรวจสอบสิทธิ์เข้าโลกเสมือนไม่สำเร็จ</p> : <div className="gallery-world-links">{worlds.map((world) => <article className="gallery-entry-card" key={world.classroomId}><div><strong>{world.classroomName}</strong>{world.entryAllowed ? <p className="muted">คุณมีสิทธิ์เข้าโลกเสมือน</p> : <p className="muted">{!world.requiredAssignmentTitle ? "ยังไม่มีงานที่เปิดอยู่ จึงยังเข้าโลกไม่ได้" : !world.hasSubmission ? `ส่งงานล่าสุดก่อนเข้าโลก: ${world.requiredAssignmentTitle}` : world.entryMode === "approval" && !world.approved ? `ส่งแล้ว · รอครูอนุมัติสำหรับงาน ${world.requiredAssignmentTitle}` : "สถานะสิทธิ์เข้าโลกกำลังปรับปรุง"}</p>}</div><div className="gallery-world-links">{world.entryAllowed ? <button className="button button-primary" onClick={() => openWorld(world.classroomId)}>เข้าโลก ↗</button> : world.requiredAssignmentId && <button className="button button-quiet" onClick={() => { setSelectedId(world.requiredAssignmentId!); document.getElementById("student-assignments")?.scrollIntoView({ behavior: "smooth" }); }}>ไปยังงานล่าสุด</button>}</div></article>)}</div>}
+      </section>}
       {quizzes.length > 0 && <section className="panel student-quiz-list"><header className="panel-heading compact"><div><h2>แบบทดสอบ</h2><p className="muted">แบบทดสอบที่ครูเปิดหรือรอบที่คุณเริ่มแล้ว</p></div></header><div className="assignment-list">{[...new Map(quizzes.map((item) => [item.quizId, item])).values()].map((quiz) => { const related = quizzes.filter((item) => item.quizId === quiz.quizId); return <a className="assignment-select student-quiz-link" href={`/quizzes/${quiz.quizId}?role=student`} key={quiz.quizId}><strong>{quiz.title}</strong><small>{related.map((item) => item.classroomName).join(" · ")} · {related.some((item) => item.finishedAt) ? "มีผลคะแนน" : "มีรอบแบบทดสอบ"}</small></a>; })}</div></section>}
       <section id="student-assignments" className="panel"><header className="panel-heading compact"><div><h2>งานที่ได้รับ <small>{assignments.length} งาน</small></h2></div><button className="text-button" onClick={() => void loadAssignments()}>โหลดใหม่</button></header>
         {loading ? <p className="inline-loading"><i className="spinner"/>กำลังโหลดงาน…</p> : assignments.length ? <div className="assignment-list">{assignments.map((assignment) => <div className="assignment-row" key={assignment.assignmentId}><button className={"assignment-select " + (assignment.assignmentId === selectedId ? "selected" : "")} onClick={() => setSelectedId(assignment.assignmentId)}><strong>{assignment.title}</strong><small>{assignment.classroomName} · ส่งแล้ว {assignment.submissionCount} ไฟล์</small></button>{assignment.assignmentId === selectedId && <span className="assignment-marker">●</span>}</div>)}</div> : <p className="assignment-empty muted">ยังไม่มีงานที่เปิดอยู่</p>}

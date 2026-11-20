@@ -60,7 +60,8 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   const [trainForm, setTrainForm] = useState<TrainSettings>({ mode: "auto", intervalSeconds: 120, startStudentId: null });
   const [trainMessage, setTrainMessage] = useState("");
   const [galleryAccess, setGalleryAccess] = useState<GalleryAccess | null>(null);
-  const [entryModeDraft, setEntryModeDraft] = useState<"submission" | "approval">("submission");
+  const [entryModeDraft, setEntryModeDraft] = useState<GalleryAccess["mode"] | null>(null);
+  const entryMode = entryModeDraft ?? galleryAccess?.mode ?? "submission";
   const [accessMessage, setAccessMessage] = useState("");
   const trainRef = useRef<TrainView | null>(null);
   const trainSeatRef = useRef(-1);
@@ -140,8 +141,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     setModels((current) => offset ? [...current, ...value.models] : value.models);
   }, [classroomId]);
   const loadGalleryAccess = useCallback(async () => {
-    const value = await api<GalleryAccess>(apiPath(classroomId, "/access"));
-    setGalleryAccess(value); setEntryModeDraft(value.mode);
+    setGalleryAccess(await api<GalleryAccess>(apiPath(classroomId, "/access")));
   }, [classroomId]);
   useEffect(() => { if (teacher) void loadGalleryAccess().catch((reason) => setError(reason instanceof Error ? reason.message : "โหลดสิทธิ์เข้าโลกไม่สำเร็จ")); }, [loadGalleryAccess, teacher]);
 
@@ -635,9 +635,20 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     catch (reason) { setError(reason instanceof Error ? reason.message : "บันทึกการตั้งค่าไม่สำเร็จ"); }
     finally { setLoading(false); }
   }
+  async function refreshGalleryAccess() {
+    setLoading(true); setError(""); setAccessMessage("");
+    try { await loadGalleryAccess(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "โหลดสิทธิ์เข้าโลกไม่สำเร็จ"); }
+    finally { setLoading(false); }
+  }
   async function saveEntryMode() {
     setLoading(true); setError(""); setAccessMessage("");
-    try { await api(apiPath(classroomId, "/access"), { method: "PUT", body: JSON.stringify({ mode: entryModeDraft }) }); await loadGalleryAccess(); setAccessMessage("บันทึกเงื่อนไขเข้าโลกแล้ว"); }
+    try {
+      await api(apiPath(classroomId, "/access"), { method: "PUT", body: JSON.stringify({ mode: entryMode }) });
+      await loadGalleryAccess();
+      setEntryModeDraft(null);
+      setAccessMessage("บันทึกเงื่อนไขเข้าโลกแล้ว");
+    }
     catch (reason) { setError(reason instanceof Error ? reason.message : "บันทึกเงื่อนไขเข้าโลกไม่สำเร็จ"); }
     finally { setLoading(false); }
   }
@@ -732,7 +743,33 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         </aside>
         <div className="gallery-management"><strong>ตัวละคร</strong><div className="gallery-management-actions"><button className="button button-quiet" onClick={() => { setError(""); setDraftAppearance({ ...appearance }); setCustomizerOpen(true); setMenuOpen(false); }}>ปรับแต่งตัวละคร</button></div></div>
         {teacher && <div className="gallery-management"><strong>จัดการโลกเสมือน</strong><p>{enabled ? "เปิดสำหรับนักเรียน" : "หยุดสำหรับนักเรียน · ครูเข้าชมได้"}</p><div className="gallery-management-actions"><button className="button button-quiet" disabled={loading} onClick={() => void setWorld(!enabled)}>{enabled ? "หยุดโลกสำหรับนักเรียน" : "เปิดโลกสำหรับนักเรียน"}</button><button className="button button-quiet" aria-pressed={wandMode} onClick={() => { setWandMode((value) => !value); setSelected(null); setMenuOpen(false); }}>{wandMode ? "เก็บไม้กายสิทธิ์" : "ถือไม้กายสิทธิ์"}</button></div></div>}
-        {teacher && <section className="gallery-management gallery-access"><strong>สิทธิ์เข้าโลกของนักเรียน</strong><p>งานล่าสุด: {galleryAccess?.requiredAssignmentTitle ?? "ยังไม่มีงานที่เปิดอยู่"}</p><div className="gallery-access-mode"><label>เงื่อนไข<select value={entryModeDraft} onChange={(event) => setEntryModeDraft(event.target.value as GalleryAccess["mode"])}><option value="submission">ส่งงานล่าสุดแล้วเข้าได้</option><option value="approval">ครูอนุมัติรายคนหลังส่งงาน</option></select></label><button className="button button-quiet" disabled={loading || !galleryAccess} onClick={() => void saveEntryMode()}>บันทึก</button></div>{galleryAccess?.mode === "approval" && <div className="gallery-access-roster">{galleryAccess.students.map((student) => <div className="gallery-access-student" key={student.studentId}><span><strong>{student.studentNumber ?? "—"}. {student.displayName}</strong><small>{!student.accountLinked ? "ยังไม่เชื่อมบัญชี Google" : !student.hasSubmission ? "ยังไม่ส่งงานล่าสุด" : student.approved ? "อนุมัติแล้ว" : "ส่งแล้ว · ยังไม่ได้อนุมัติ"}</small></span><button className="text-button" disabled={loading || !galleryAccess.requiredAssignmentId || !student.accountLinked || (!student.hasSubmission && !student.approved)} onClick={() => void setStudentApproval(student, !student.approved)}>{student.approved ? "ถอนอนุมัติ" : "อนุมัติ"}</button></div>)}{!galleryAccess.students.length && <small>ยังไม่มีนักเรียนในห้องนี้</small>}</div>}{accessMessage && <small role="status">{accessMessage}</small>}</section>}
+        {teacher && <section className="gallery-management gallery-access">
+          <strong>สิทธิ์เข้าโลกของนักเรียน</strong>
+          <p>งานล่าสุด: {galleryAccess?.requiredAssignmentTitle ?? "ยังไม่มีงานที่เปิดอยู่"}</p>
+          <div className="gallery-access-mode">
+            <label>เงื่อนไข
+              <select disabled={loading || !galleryAccess} value={entryMode} onChange={(event) => setEntryModeDraft(event.target.value as GalleryAccess["mode"])}>
+                <option value="submission">ส่งงานล่าสุดแล้วเข้าได้</option>
+                <option value="approval">ครูอนุมัติรายคนหลังส่งงาน</option>
+              </select>
+            </label>
+            <button className="button button-quiet" disabled={loading || !galleryAccess} onClick={() => void saveEntryMode()}>บันทึก</button>
+            <button className="button button-quiet" disabled={loading} onClick={() => void refreshGalleryAccess()}>โหลดสถานะใหม่</button>
+          </div>
+          {galleryAccess?.mode === "approval" && <div className="gallery-access-roster">
+            {galleryAccess.students.map((student) => <div className="gallery-access-student" key={student.studentId}>
+              <span>
+                <strong>{student.studentNumber ?? "—"}. {student.displayName}</strong>
+                <small>{!student.accountLinked ? "ยังไม่เชื่อมบัญชี Google" : !student.hasSubmission ? "ยังไม่ส่งงานล่าสุด" : student.approved ? "อนุมัติแล้ว" : "ส่งแล้ว · ยังไม่ได้อนุมัติ"}</small>
+              </span>
+              <button className="text-button" disabled={loading || !galleryAccess.requiredAssignmentId || !student.accountLinked || (!student.hasSubmission && !student.approved)} onClick={() => void setStudentApproval(student, !student.approved)}>
+                {student.approved ? "ถอนอนุมัติ" : "อนุมัติ"}
+              </button>
+            </div>)}
+            {!galleryAccess.students.length && <small>ยังไม่มีนักเรียนในห้องนี้</small>}
+          </div>}
+          {accessMessage && <small role="status">{accessMessage}</small>}
+        </section>}
         {manifest?.nextOffset !== null && <button className="button button-quiet" onClick={() => void load(manifest?.nextOffset ?? 0)}>โหลดผลงานเพิ่ม</button>}
         {teacher && models.some((item) => item.hidden) && <aside className="gallery-hidden-tray"><strong>ผลงานที่ซ่อน</strong>{models.filter((item) => item.hidden).map((item) => <div key={item.id}><span>{item.displayName} · {item.originalName}</span><button className="text-button" onClick={() => void setHidden(item)}>แสดง</button></div>)}</aside>}
         {logout && <button className="button button-quiet" onClick={logout}>ออกจากระบบ</button>}

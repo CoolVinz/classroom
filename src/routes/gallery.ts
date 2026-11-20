@@ -111,14 +111,16 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     await sql.begin(async (tx) => {
       const [member] = await tx<{ accountId: string | null }[]>`SELECT account_id AS "accountId" FROM classroom.students WHERE id=${params.studentId} AND classroom_id=${params.classroomId} AND archived_at IS NULL FOR UPDATE`;
       if (!member?.accountId) throw new HttpError(400, "นักเรียนต้องเชื่อมบัญชีโรงเรียนก่อนจึงจัดการสิทธิ์เข้าโลกได้");
-      const [assignment] = await tx<{ id: string }[]>`SELECT id FROM classroom.assignments WHERE classroom_id=${params.classroomId} AND archived_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 1`;
-      if (!assignment || assignment.id !== body.assignmentId) throw new HttpError(409, "งานล่าสุดเปลี่ยนแล้ว กรุณาโหลดรายการใหม่");
+      const [entry] = await tx<{ assignmentId: string | null; hasSubmission: boolean }[]>`
+        SELECT required_assignment_id AS "assignmentId", has_submission AS "hasSubmission"
+        FROM classroom.gallery_student_entry
+        WHERE classroom_id=${params.classroomId} AND student_id=${params.studentId} AND account_id=${member.accountId}`;
+      if (entry?.assignmentId !== body.assignmentId) throw new HttpError(409, "งานล่าสุดเปลี่ยนแล้ว กรุณาโหลดรายการใหม่");
       if (body.approved) {
-        const [work] = await tx<{ submitted: boolean }[]>`SELECT EXISTS(SELECT 1 FROM classroom.files WHERE classroom_id=${params.classroomId} AND assignment_id=${assignment.id} AND student_id=${params.studentId} AND submitted_by_account_id=${member.accountId} AND kind='submission') AS submitted`;
-        if (!work.submitted) throw new HttpError(400, "อนุมัติได้หลังจากนักเรียนส่งงานล่าสุดแล้วเท่านั้น");
-        await tx`INSERT INTO classroom.gallery_entry_approvals(classroom_id,assignment_id,student_id,account_id,approved_by) VALUES(${params.classroomId},${assignment.id},${params.studentId},${member.accountId},${actor.id}) ON CONFLICT(classroom_id,assignment_id,student_id,account_id) DO UPDATE SET approved_by=EXCLUDED.approved_by, approved_at=NOW()`;
+        if (!entry.hasSubmission) throw new HttpError(400, "อนุมัติได้หลังจากนักเรียนส่งงานล่าสุดแล้วเท่านั้น");
+        await tx`INSERT INTO classroom.gallery_entry_approvals(classroom_id,assignment_id,student_id,account_id,approved_by) VALUES(${params.classroomId},${body.assignmentId},${params.studentId},${member.accountId},${actor.id}) ON CONFLICT(classroom_id,assignment_id,student_id,account_id) DO UPDATE SET approved_by=EXCLUDED.approved_by, approved_at=NOW()`;
       } else {
-        await tx`DELETE FROM classroom.gallery_entry_approvals WHERE classroom_id=${params.classroomId} AND assignment_id=${assignment.id} AND student_id=${params.studentId} AND account_id=${member.accountId}`;
+        await tx`DELETE FROM classroom.gallery_entry_approvals WHERE classroom_id=${params.classroomId} AND assignment_id=${body.assignmentId} AND student_id=${params.studentId} AND account_id=${member.accountId}`;
       }
     });
     return { ok: true, approved: body.approved };

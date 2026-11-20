@@ -123,7 +123,10 @@ describe("student submission API", () => {
       teacherToken = await createSession(teacherId);
       otherTeacherToken = await createSession(otherTeacherId);
       studentToken = await createStudentSession(accountId);
-      const defaultAppearance = { skinColor: "#f3c8a6", hairColor: "#3e2d27", shirtColor: "#4f9b86", trousersColor: "#435875", hairStyle: "short" };
+      const defaultAppearance = {
+        skinColor: "#f3c8a6", hairColor: "#3e2d27", shirtColor: "#4f9b86", trousersColor: "#435875", hairStyle: "short",
+        hatStyle: "none", glassesStyle: "none", shoeStyle: "sneakers", hatColor: "#b84d4d", glassesColor: "#302721", shoeColor: "#303a4a",
+      };
       const teacherAppearance = { ...defaultAppearance, shirtColor: "#123456", hairStyle: "long" };
       const studentAppearance = { ...defaultAppearance, skinColor: "#abcdef", hairStyle: "none" };
       const avatarRequest = (session: string, method = "GET", body?: unknown, origin = "http://localhost:3000") => app.handle(new Request("http://localhost/api/gallery/avatar", {

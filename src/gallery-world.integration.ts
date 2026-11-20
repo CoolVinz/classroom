@@ -2,20 +2,26 @@ import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join as joinPath } from "node:path";
 import { Client, type Room } from "@colyseus/sdk";
 import { Elysia } from "elysia";
 
 const database = process.env.CLASSROOM_TEST_DATABASE_URL;
-test.skipIf(!database)("stopping a world revokes students and old tickets while retaining its teacher", async () => {
+test.skipIf(!database)("a student's own 3D upload unlocks gallery access in both entry modes", async () => {
   process.env.DATABASE_URL = database!;
   process.env.DATABASE_SSL = process.env.CLASSROOM_TEST_DATABASE_SSL ?? "disable";
   process.env.APP_URL = "http://localhost:3000";
+  const uploadDir = await mkdtemp(joinPath(tmpdir(), "classroom-gallery-test-"));
+  process.env.UPLOAD_DIR = uploadDir;
   const { sql } = await import("./db/client");
   const { galleryRoutes } = await import("./routes/gallery");
+  const { studentCourseworkRoutes } = await import("./routes/student-coursework");
   const { handleAppError } = await import("./error-handler");
   const { createSession, createStudentSession } = await import("./auth/session");
-  const app = new Elysia().onError(handleAppError).use(galleryRoutes);
+  const app = new Elysia().onError(handleAppError).use(galleryRoutes).use(studentCourseworkRoutes);
   const teacher = randomUUID(), student = randomUUID(), classroom = randomUUID(), other = randomUUID(), member = randomUUID(), assignment = randomUUID(), nextAssignment = randomUUID();
   const probe = createServer(); probe.listen(0, "127.0.0.1"); await once(probe, "listening");
   const port = (probe.address() as { port: number }).port;
@@ -33,7 +39,20 @@ test.skipIf(!database)("stopping a world revokes students and old tickets while 
     await sql`INSERT INTO classroom.students(id,classroom_id,student_code,student_number,display_name,account_id) VALUES(${member},${classroom},'0001',1,'Synthetic Student',${student})`;
     await sql`INSERT INTO classroom.assignments(id,classroom_id,title) VALUES(${assignment},${classroom},'Synthetic current assignment')`;
     const teacherToken = await createSession(teacher), studentToken = await createStudentSession(student);
+    const studentHeaders = { cookie: "classroom_session=" + studentToken, origin: "http://localhost:3000" };
+    const worldStatus = async () => (await app.handle(new Request("http://localhost/api/student/worlds", { headers: studentHeaders }))).json();
     const request = (token: string, suffix = "", method = "GET", body?: unknown, id = classroom) => app.handle(new Request("http://localhost/api/classrooms/" + id + "/gallery" + suffix, { method, headers: { cookie: "classroom_session=" + token, origin: "http://localhost:3000", "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined }));
+    const client = new Client("http://127.0.0.1:" + port);
+    const join = async (token: string) => {
+      const response = await request(token, "/ticket", "POST");
+      expect(response.status).toBe(200);
+      const { ticket } = await response.json();
+      const room = await client.joinOrCreate("classroom", { classroomId: classroom, ticket });
+      rooms.push(room);
+      for (let attempt = 0; attempt < 80 && !(room.state as any)?.players?.has(room.sessionId); attempt++) await Bun.sleep(25);
+      expect((room.state as any)?.players?.has(room.sessionId)).toBe(true);
+      return room;
+    };
     const initialManifest = await (await request(teacherToken)).json();
     expect(initialManifest.enabled).toBe(false);
     expect(initialManifest.train).toEqual({ mode: "auto", intervalSeconds: 120, startStudentId: null });
@@ -48,12 +67,22 @@ test.skipIf(!database)("stopping a world revokes students and old tickets while 
     await sql`INSERT INTO classroom.files(classroom_id,assignment_id,student_id,uploaded_by,kind,original_name,storage_name,media_type,size_bytes) VALUES(${classroom},${assignment},${member},${teacher},'model','teacher.obj',${randomUUID()},'model/obj',12)`;
     await sql`INSERT INTO classroom.files(classroom_id,assignment_id,student_id,uploaded_by,kind,original_name,storage_name,media_type,size_bytes) VALUES(${classroom},${assignment},${member},NULL,'working','student.blend',${randomUUID()},'application/octet-stream',12)`;
     expect((await request(studentToken)).status).toBe(403);
+    expect((await request(teacherToken, `/access/${member}`, "PUT", { assignmentId: assignment, approved: true })).status).toBe(400);
+    expect(await worldStatus()).toMatchObject([{ classroomId: classroom, requiredAssignmentId: assignment, hasSubmission: false, entryAllowed: false }]);
+    const form = new FormData();
+    form.set("file", new File(["v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"], "student.obj"));
+    const upload = await app.handle(new Request(`http://localhost/api/student/classrooms/${classroom}/assignments/${assignment}/files`, { method: "POST", headers: studentHeaders, body: form }));
+    expect(upload.status).toBe(200);
+    const { id: uploadedModel } = await upload.json();
+    expect(await sql`SELECT kind FROM classroom.files WHERE id=${uploadedModel}`).toMatchObject([{ kind: "model" }]);
+    expect(await worldStatus()).toMatchObject([{ classroomId: classroom, hasSubmission: true, entryAllowed: true }]);
+    await (await join(studentToken)).leave();
     expect((await request(teacherToken, "/access", "PUT", { mode: "approval" })).status).toBe(200);
-    await sql`INSERT INTO classroom.files(classroom_id,assignment_id,student_id,uploaded_by,kind,original_name,storage_name,media_type,size_bytes,submitted_by_account_id) VALUES(${classroom},${assignment},${member},NULL,'submission','synthetic.png',${randomUUID()},'image/png',12,${student})`;
-    expect((await request(studentToken)).status).toBe(403);
+    expect(await worldStatus()).toMatchObject([{ classroomId: classroom, entryMode: "approval", hasSubmission: true, approved: false, entryAllowed: false }]);
+    expect((await request(studentToken, "/ticket", "POST")).status).toBe(403);
     expect((await request(teacherToken, `/access/${member}`, "PUT", { assignmentId: assignment, approved: true })).status).toBe(200);
     expect((await request(studentToken)).status).toBe(200);
-    await sql`INSERT INTO classroom.assignments(id,classroom_id,title) VALUES(${nextAssignment},${classroom},'New current assignment')`;
+    await sql`INSERT INTO classroom.assignments(id,classroom_id,title,created_at) VALUES(${nextAssignment},${classroom},'New current assignment',NOW() + INTERVAL '1 second')`;
     expect((await request(studentToken)).status).toBe(403);
     expect((await request(teacherToken, `/access/${member}`, "PUT", { assignmentId: assignment, approved: true })).status).toBe(409);
     await sql`INSERT INTO classroom.files(classroom_id,assignment_id,student_id,uploaded_by,kind,original_name,storage_name,media_type,size_bytes,submitted_by_account_id) VALUES(${classroom},${nextAssignment},${member},NULL,'submission','synthetic-final.pdf',${randomUUID()},'application/pdf',12,${student})`;
@@ -72,11 +101,6 @@ test.skipIf(!database)("stopping a world revokes students and old tickets while 
     expect((await request(teacherToken, "/train", "PUT", { mode: "auto", intervalSeconds: 30, startStudentId: member })).status).toBe(422);
     await request(teacherToken, "/train", "PUT", { mode: "manual", intervalSeconds: 60, startStudentId: null });
     expect((await request(studentToken, "/ticket", "POST", undefined, other)).status).toBe(404);
-    const client = new Client("http://127.0.0.1:" + port);
-    const join = async (token: string) => {
-      const ticket = await (await request(token, "/ticket", "POST")).json();
-      const room = await client.joinOrCreate("classroom", { classroomId: classroom, ticket: ticket.ticket }); rooms.push(room); return room;
-    };
     const teacherRoom = await join(teacherToken), studentRoom = await join(studentToken);
     const train = (teacherRoom.state as any).train;
     expect(train?.active).toBe(true);
@@ -98,11 +122,13 @@ test.skipIf(!database)("stopping a world revokes students and old tickets while 
     const studentCast = new Promise<{ ok: boolean }>((resolve) => studentRoom.onMessage("cast-result", resolve));
     studentRoom.send("cast", { shotId: randomUUID(), dx: 0, dy: 0, dz: 1 });
     expect((await Promise.race([studentCast, Bun.sleep(2000).then(() => ({ ok: true }))])).ok).toBe(false);
+    const { ticket: preRevocationTicket } = await (await request(studentToken, "/ticket", "POST")).json();
     const revoked = new Promise<number>((resolve) => studentRoom.onLeave(resolve));
     expect((await request(teacherToken, `/access/${member}`, "PUT", { assignmentId: currentAssignment, approved: false })).status).toBe(200);
-    studentRoom.send("cast", { shotId: randomUUID(), dx: 0, dy: 0, dz: 1 });
+    studentRoom.send("refresh-avatar");
     expect(await Promise.race([revoked, Bun.sleep(3000).then(() => -1)])).toBe(4003);
     expect((await request(studentToken, "/ticket", "POST")).status).toBe(403);
+    await expect(client.joinOrCreate("classroom", { classroomId: classroom, ticket: preRevocationTicket })).rejects.toThrow();
     expect((await request(teacherToken, `/access/${member}`, "PUT", { assignmentId: currentAssignment, approved: true })).status).toBe(200);
     const studentRoomAgain = await join(studentToken);
     expect(studentRoomAgain.connection.isOpen).toBe(true);
@@ -128,12 +154,20 @@ test.skipIf(!database)("stopping a world revokes students and old tickets while 
     expect((await request(teacherToken, "", "PUT", { enabled: true })).status).toBe(200);
     const rejoined = await join(studentToken);
     expect(rejoined.connection.isOpen).toBe(true);
+    const removed = new Promise<number>((resolve) => rejoined.onLeave(resolve));
+    await sql`DELETE FROM classroom.files WHERE id=${uploadedModel}`;
+    rejoined.send("refresh-avatar");
+    expect(await Promise.race([removed, Bun.sleep(3000).then(() => -1)])).toBe(4003);
+    expect(await worldStatus()).toMatchObject([{ classroomId: classroom, hasSubmission: false, approved: true, entryAllowed: false }]);
+    expect((await request(studentToken, "/ticket", "POST")).status).toBe(403);
   } finally {
     await Promise.all(rooms.filter((room) => room.connection.isOpen).map((room) => room.leave()));
     server.kill("SIGTERM"); if (server.exitCode === null) await once(server, "exit");
+    await sql`DELETE FROM classroom.assignments WHERE classroom_id IN (${classroom},${other})`;
     await sql`DELETE FROM classroom.students WHERE classroom_id IN (${classroom},${other})`;
     await sql`DELETE FROM classroom.classrooms WHERE id IN (${classroom},${other})`;
     await sql`DELETE FROM classroom.student_accounts WHERE id=${student}`;
     await sql`DELETE FROM classroom.teachers WHERE id=${teacher}`;
+    await rm(uploadDir, { recursive: true, force: true });
   }
 }, 20000);
