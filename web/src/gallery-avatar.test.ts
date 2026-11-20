@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import * as THREE from "three";
-import { animateAvatarCharacter, createAvatarCharacter, defaultAvatarAppearance, disposeAvatarCharacter } from "./gallery-avatar";
+import { animateAvatarCharacter, avatarNameLabelY, createAvatarCharacter, defaultAvatarAppearance, disposeAvatarCharacter } from "./gallery-avatar";
 
 describe("gallery avatar characters", () => {
   test("shoes share their leg mesh, color, and animated transform without extra draw calls", () => {
@@ -26,25 +26,53 @@ describe("gallery avatar characters", () => {
           if (shoeStyle === "none") { expect(count).toBe(0); continue; }
           expect(count).toBe(24);
           center.divideScalar(count);
-          const expected = new THREE.Vector3(0, (shoeStyle === "boots" ? 0.04 : 0.08) - 0.7, 0.055).applyMatrix4(leg.matrixWorld);
+          const ankleY = shoeStyle === "boots" ? -0.435 : -0.552;
+          const expected = new THREE.Vector3(0, (-0.67 - 0.622 + ankleY) / 3, (0.052 + 0.05 - 0.009) / 3).applyMatrix4(leg.matrixWorld);
           expect(center.distanceTo(expected)).toBeLessThan(1e-6);
         }
       }
       disposeAvatarCharacter(character);
     }
   });
-  test("renders each supported hair style and releases its geometry", () => {
+  test("every supported appearance fits five draw calls and the existing triangle budget", () => {
     const hairstyles = ["none", "short", "long", "ponytail", "bun", "spiky", "bob"] as const;
     const hats = ["none", "cap", "beanie", "wizard"] as const;
     const glasses = ["none", "round", "square"] as const;
     const shoes = ["none", "sneakers", "boots"] as const;
-    for (const [index, hairStyle] of hairstyles.entries()) {
-      for (const hatStyle of hats) {
-        const character = createAvatarCharacter({ ...defaultAvatarAppearance, hairStyle, hatStyle, glassesStyle: glasses[index % glasses.length], shoeStyle: shoes[index % shoes.length] });
-        expect(character.children.length).toBe(5);
-        disposeAvatarCharacter(character);
-      }
+    for (const hairStyle of hairstyles) for (const hatStyle of hats) for (const glassesStyle of glasses) for (const shoeStyle of shoes) {
+      const character = createAvatarCharacter({ ...defaultAvatarAppearance, hairStyle, hatStyle, glassesStyle, shoeStyle });
+      let meshes = 0, triangles = 0;
+      character.traverse((object) => {
+        if (!(object instanceof THREE.Mesh)) return;
+        meshes++;
+        triangles += object.geometry.index!.count / 3;
+        expect(object.material.flatShading).toBe(true);
+      });
+      expect(meshes).toBe(5);
+      const isDefault = hairStyle === "short" && hatStyle === "none" && glassesStyle === "none" && shoeStyle === "sneakers";
+      expect(triangles).toBeLessThanOrEqual(isDefault ? 1044 : 1522);
+      const bounds = new THREE.Box3().setFromObject(character);
+      expect(Math.abs(bounds.min.y)).toBeLessThan(0.01);
+      expect(bounds.max.y).toBeLessThan(avatarNameLabelY - 0.25);
+      disposeAvatarCharacter(character);
     }
+  });
+  test("keeps the selected colors on the faceted model", () => {
+    const appearance = {
+      skinColor: "#e8b37c", hairColor: "#1c3549", shirtColor: "#647853", trousersColor: "#573d55",
+      hatColor: "#a25936", glassesColor: "#ad8d5d", shoeColor: "#3f4367",
+      hairStyle: "ponytail", hatStyle: "wizard", glassesStyle: "square", shoeStyle: "boots",
+    } as const;
+    const character = createAvatarCharacter(appearance);
+    const colors = new Set<string>();
+    character.traverse((object) => {
+      if (!(object instanceof THREE.Mesh)) return;
+      const vertices = object.geometry.getAttribute("color");
+      const color = new THREE.Color();
+      for (let i = 0; i < vertices.count; i++) colors.add("#" + color.fromBufferAttribute(vertices, i).getHexString());
+    });
+    for (const [key, value] of Object.entries(appearance)) if (key.endsWith("Color")) expect(colors.has(value)).toBe(true);
+    disposeAvatarCharacter(character);
   });
   test("walking swings opposite limbs, jumping poses them, and cleanup releases resources", () => {
     const character = createAvatarCharacter(defaultAvatarAppearance, true);

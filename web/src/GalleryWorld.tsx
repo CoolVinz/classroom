@@ -6,7 +6,7 @@ import { StudentAttendance } from "./StudentAttendance";
 import ModelPreview from "./ModelPreview";
 import { loadModel, createModelObject, disposeModelObject } from "./model-view";
 import { galleryFileUrl, galleryTicketRequest } from "./gallery-api";
-import { animateAvatarCharacter, createAvatarCharacter, defaultAvatarAppearance, disposeAvatarCharacter, type AvatarAppearance } from "./gallery-avatar";
+import { animateAvatarCharacter, avatarNameLabelY, createAvatarCharacter, defaultAvatarAppearance, disposeAvatarCharacter, type AvatarAppearance } from "./gallery-avatar";
 import { correctionOffset, facingRotation, interpolateTrain, jumpHeight, reconcilePosition, touchDirection, walkingStep, type Move, type TrainSample } from "./gallery-motion";
 import { canvasAimPoint, wandAim } from "./gallery-aim";
 import { enterGalleryFullscreen, unlockGalleryOrientation } from "./gallery-fullscreen";
@@ -504,7 +504,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
           if (!avatar) {
             avatar = new THREE.Group(); avatar.position.set(player.x, 0, player.z); avatar.rotation.y = player.rotation;
             avatar.userData.walkPhase = 0; avatar.userData.walking = 0; avatar.userData.jumpTime = -Infinity;
-            const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: labelTexture(player.role === "teacher" || player.role === "owner" ? `ครู ${player.displayName}` : player.displayName), transparent: true })); label.scale.set(2.6, 0.5, 1); label.position.y = 2.25; avatar.add(label); scene.add(avatar); avatarMeshes.set(id, avatar);
+            const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: labelTexture(player.role === "teacher" || player.role === "owner" ? `ครู ${player.displayName}` : player.displayName), transparent: true })); label.scale.set(2.6, 0.5, 1); label.position.y = avatarNameLabelY; avatar.add(label); scene.add(avatar); avatarMeshes.set(id, avatar);
           }
           syncAppearance(avatar, id === room.sessionId ? appearanceRef.current : player, id === room.sessionId && teacher);
           avatar.userData.target = { x: player.x, z: player.z, rotation: player.rotation };
@@ -821,19 +821,51 @@ function CharacterPreview({ appearance }: { appearance: AvatarAppearance }) {
     if (!canvas) return;
     let renderer: THREE.WebGLRenderer;
     try { renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true }); } catch { return; }
-    const scene = new THREE.Scene(); sceneRef.current = scene; scene.add(new THREE.HemisphereLight(0xffffff, 0x65736f, 2));
-    const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 20); camera.position.set(0, 1.35, 5.6); camera.lookAt(0, 1, 0);
-    const resize = () => { renderer.setSize(Math.max(1, canvas.clientWidth), Math.max(1, canvas.clientHeight), false); camera.aspect = canvas.clientWidth / Math.max(canvas.clientHeight, 1); camera.updateProjectionMatrix(); };
+    const scene = new THREE.Scene();
+    sceneRef.current = scene;
+    scene.add(new THREE.HemisphereLight(0xfff7ea, 0x788b92, 1.65));
+    const key = new THREE.DirectionalLight(0xffecce, 2.05);
+    key.position.set(-3, 5, 4);
+    const rim = new THREE.DirectionalLight(0xc9e8ff, 1.7);
+    rim.position.set(2, 3, -4);
+    scene.add(key, rim);
+    const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 50);
+    const resize = () => {
+      const width = Math.max(1, canvas.clientWidth), height = Math.max(1, canvas.clientHeight);
+      renderer.setSize(width, height, false);
+      camera.aspect = width / height;
+      const distance = Math.max(2.6, 1.3 / camera.aspect) / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
+      camera.position.set(0, 1.32, distance);
+      camera.lookAt(0, 1.065, 0);
+      camera.updateProjectionMatrix();
+    };
     const observer = new ResizeObserver(resize); observer.observe(canvas); resize();
-    let frame = 0, alive = true;
-    const render = () => { if (!alive) return; frame = requestAnimationFrame(render); if (characterRef.current) characterRef.current.rotation.y += 0.006; renderer.render(scene, camera); };
-    render();
-    return () => { alive = false; cancelAnimationFrame(frame); observer.disconnect(); scene.traverse((object) => { const mesh = object as THREE.Mesh; mesh.geometry?.dispose?.(); const materials = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : []; materials.forEach((material) => material.dispose()); }); renderer.dispose(); renderer.forceContextLoss(); sceneRef.current = null; characterRef.current = null; };
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    let frame = 0, lastFrame = 0;
+    const render = (time: number) => {
+      frame = requestAnimationFrame(render);
+      if (characterRef.current && lastFrame && !reducedMotion.matches) {
+        characterRef.current.rotation.y += Math.min(time - lastFrame, 40) * 0.00052;
+      }
+      lastFrame = time;
+      renderer.render(scene, camera);
+    };
+    frame = requestAnimationFrame(render);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      disposeAvatarCharacter(scene);
+      renderer.dispose(); renderer.forceContextLoss();
+      sceneRef.current = null; characterRef.current = null;
+    };
   }, []);
   useEffect(() => {
     const scene = sceneRef.current; if (!scene) return;
-    if (characterRef.current) { scene.remove(characterRef.current); disposeAvatarCharacter(characterRef.current); }
-    const character = createAvatarCharacter(appearance); character.position.y = -0.02; scene.add(character); characterRef.current = character;
+    const previous = characterRef.current;
+    const character = createAvatarCharacter(appearance);
+    character.rotation.y = previous?.rotation.y ?? -0.36;
+    if (previous) { scene.remove(previous); disposeAvatarCharacter(previous); }
+    scene.add(character); characterRef.current = character;
   }, [appearance]);
   return <canvas ref={canvasRef} className="character-preview" aria-label="ตัวอย่างตัวละครที่กำลังหมุน" />;
 }
