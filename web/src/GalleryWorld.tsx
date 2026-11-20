@@ -6,6 +6,7 @@ import { StudentAttendance } from "./StudentAttendance";
 import ModelPreview from "./ModelPreview";
 import { loadModel, createModelObject, disposeModelObject } from "./model-view";
 import { galleryFileUrl, galleryTicketRequest } from "./gallery-api";
+import { galleryModelIdForHit } from "./gallery-picking";
 import { animateAvatarCharacter, avatarNameLabelY, createAvatarCharacter, defaultAvatarAppearance, disposeAvatarCharacter, type AvatarAppearance } from "./gallery-avatar";
 import { correctionOffset, facingRotation, interpolateTrain, jumpHeight, reconcilePosition, touchDirection, walkingStep, type Move, type TrainSample } from "./gallery-motion";
 import { canvasAimPoint, wandAim } from "./gallery-aim";
@@ -14,7 +15,7 @@ import { blockPosition, exhibitPosition, trainTrack } from "../../gallery-server
 import { canBoardTrain } from "../../gallery-server/src/train-rules.mjs";
 
 type User = { role: "owner" | "teacher" | "student"; displayName: string };
-type GalleryModel = { id: string; studentId: string; displayName: string; studentNumber: number | null; assignmentId: string; assignmentTitle: string; originalName: string; mediaType: string; materialAvailable: boolean; thumbnailAvailable: boolean; createdAt: string; hidden: boolean; likes: number; likedByMe: boolean };
+type GalleryModel = { id: string; studentId: string; displayName: string; studentNumber: number | null; assignmentId: string; assignmentTitle: string; originalName: string; mediaType: string; materialAvailable: boolean; createdAt: string; hidden: boolean; likes: number; likedByMe: boolean };
 type TrainSettings = { mode: "auto" | "manual"; intervalSeconds: 60 | 120; startStudentId: string | null };
 type TrainView = TrainSettings & { active: boolean; x: number; z: number; rotation: number; phase: "waiting" | "boarding" | "moving" | "dwell"; stopId: string; nextStopId: string; departureAt: number; arrivalAt: number; seats: number; revision: number; layoutRoster: string };
 type Manifest = { enabled: boolean; classroomId: string; classroomName: string; blocks: { studentId: string; displayName: string; studentNumber: number | null; blockIndex: number; layoutIndex: number; archived: boolean }[]; models: GalleryModel[]; nextOffset: number | null; teacher: boolean; viewerStudentId: string | null; train: TrainSettings };
@@ -187,9 +188,8 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     };
     const modelMeshes = new Map<string, THREE.Object3D>();
     const renderedModels = new Set<string>();
-    const raycastables: THREE.Object3D[] = [];
+    const modelRoots = new WeakMap<THREE.Object3D, string>();
     const textures: THREE.Texture[] = [];
-    const loader = new THREE.TextureLoader();
     const labelTexture = (text: string) => {
       const canvas = document.createElement("canvas"); canvas.width = 512; canvas.height = 96;
       const context = canvas.getContext("2d")!; context.fillStyle = "#ffffff"; context.fillRect(0, 0, 512, 96); context.fillStyle = "#17454b"; context.font = "bold 35px sans-serif"; context.textAlign = "center"; context.textBaseline = "middle"; context.fillText(text.slice(0, 30), 256, 48);
@@ -272,11 +272,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       if (slot < 0) return;
       const base = blockPosition(block.layoutIndex), offset = exhibitPosition(slot);
       const exhibit = new THREE.Group(); exhibit.position.set(base.x + offset.x, 1.3 + (slot % 2) * 0.3, base.z + offset.z); scene.add(exhibit);
-      const panel = new THREE.Mesh(new THREE.BoxGeometry(1.25, 1.25, 0.12), new THREE.MeshStandardMaterial({ color: 0xf4f6f2 })); panel.position.z = -0.08; exhibit.add(panel);
-      const screen = new THREE.Mesh(new THREE.PlaneGeometry(1.08, 0.82), new THREE.MeshBasicMaterial({ color: 0xb8d1d1 })); screen.position.set(0, 0.12, 0.0); exhibit.add(screen);
-      if (item.thumbnailAvailable) loader.load(galleryFileUrl(classroomId, item.id, "thumbnail"), (texture) => { textures.push(texture); (screen.material as THREE.MeshBasicMaterial).map = texture; screen.material.needsUpdate = true; }, undefined, () => {});
-      const plaque = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 0.28), new THREE.MeshBasicMaterial({ map: labelTexture(item.originalName.slice(0, 22)) })); plaque.position.set(0, -0.54, 0.07); exhibit.add(plaque);
-      (panel as THREE.Mesh).userData.model = item; raycastables.push(panel); modelMeshes.set(item.id, exhibit);
+      modelMeshes.set(item.id, exhibit);
       renderedModels.add(item.id);
     };
     const syncExhibits = () => {
@@ -284,7 +280,6 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         for (const modelId of [...renderedModels]) {
           evictModel(modelId);
           const exhibit = modelMeshes.get(modelId); if (exhibit) { scene.remove(exhibit); disposeAvatarCharacter(exhibit); modelMeshes.delete(modelId); }
-          for (let i = raycastables.length - 1; i >= 0; i--) if (raycastables[i].userData.model?.id === modelId) raycastables.splice(i, 1);
           renderedModels.delete(modelId);
         }
         layoutChanged = false;
@@ -303,7 +298,6 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       for (const modelId of renderedModels) if (!visible.has(modelId)) {
         evictModel(modelId);
         const exhibit = modelMeshes.get(modelId); if (exhibit) { scene.remove(exhibit); disposeAvatarCharacter(exhibit); modelMeshes.delete(modelId); }
-        for (let i = raycastables.length - 1; i >= 0; i--) if (raycastables[i].userData.model?.id === modelId) raycastables.splice(i, 1);
         renderedModels.delete(modelId);
       }
     };
@@ -361,8 +355,10 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       if (wandRef.current) { moveCrosshair(event); return; }
       const point = canvasAimPoint(event.clientX, event.clientY, canvas.getBoundingClientRect()); pointer.set(point.x, point.y);
       camera.updateMatrixWorld(); raycaster.setFromCamera(pointer, camera);
-      const hit = raycaster.intersectObjects(raycastables, false)[0];
-      if (hit?.object.userData.model) setSelected(hit.object.userData.model as GalleryModel);
+      const hit = raycaster.intersectObjects([...loadedModels.values()].map((model) => model.object), true)[0];
+      const modelId = hit && galleryModelIdForHit(hit.object, modelRoots);
+      const model = modelId && modelsRef.current.find((item) => item.id === modelId && !item.hidden);
+      if (model) setSelected(model);
     };
     const onPointerCancel = (event: PointerEvent) => { if (activePointer === event.pointerId) cancelPointer(); };
     const resize = () => { const width = Math.max(1, canvas.clientWidth), height = Math.max(1, canvas.clientHeight); renderer.setSize(width, height, false); camera.aspect = width / height; camera.updateProjectionMatrix(); };
@@ -425,7 +421,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         const object = createModelObject(parsed);
         const bounds = new THREE.Box3().setFromObject(object), center = bounds.getCenter(new THREE.Vector3()), radius = Math.max(bounds.getBoundingSphere(new THREE.Sphere()).radius, 0.1);
         object.scale.setScalar(1.2 / radius); object.position.copy(center).multiplyScalar(-1.2 / radius); object.position.y += 0.25;
-        exhibit.add(object); loadedModels.set(next.item.id, { object, triangles: parsed.triangles, textureBytes: parsed.textureBytes ?? 0 }); residentTriangles += parsed.triangles; residentTextureBytes += parsed.textureBytes ?? 0; deferredModels.delete(next.item.id);
+        exhibit.add(object); modelRoots.set(object, next.item.id); loadedModels.set(next.item.id, { object, triangles: parsed.triangles, textureBytes: parsed.textureBytes ?? 0 }); residentTriangles += parsed.triangles; residentTextureBytes += parsed.textureBytes ?? 0; deferredModels.delete(next.item.id);
       }).catch(() => { if (!controller.signal.aborted) deferredModels.set(next.item.id, residentTriangles); })
         .finally(() => { if (activeModelLoad?.controller === controller) activeModelLoad = null; });
     };
