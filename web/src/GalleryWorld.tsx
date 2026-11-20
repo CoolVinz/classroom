@@ -682,14 +682,16 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   if (enabled === false && !teacher) return <main className="public-lesson-page"><section className="panel"><h2>โลกเสมือนยังไม่พร้อม</h2><p>{error || "กรุณากลับไปยังห้องเรียนแล้วลองอีกครั้ง."}</p><a href="/">กลับไปห้องเรียน</a></section></main>;
   return <>
     <section className="gallery-shell">
-      <header className="gallery-toolbar">
-        <div><strong>{manifest?.classroomName ?? "โลกเสมือน"}</strong><small>{online} คนออนไลน์ · WASD/ลูกศร เดิน · Space กระโดด · ลากเพื่อหมุนมุมมอง</small></div>
+      <header className={`gallery-toolbar${menuOpen ? " menu-open" : ""}`}>
+        <div className="gallery-toolbar-room"><strong>{manifest?.classroomName ?? "โลกเสมือน"}</strong><small>{online} คนออนไลน์ · WASD/ลูกศร เดิน · Space กระโดด · ลากเพื่อหมุนมุมมอง</small></div>
         <div className="gallery-toolbar-actions">
           <button className="button button-quiet" aria-expanded={menuOpen} aria-controls="gallery-menu" onClick={() => setMenuOpen((open) => !open)}>{menuOpen ? "ปิดเมนู" : "เมนู"}</button>
-          <button className="button button-quiet" onClick={nativeFullscreen ? exitFullscreenView : toggleFullscreen}>{nativeFullscreen ? "ออกจากเต็มจอ" : "เต็มจอ"}</button>{immersive && !nativeFullscreen && <button className="button button-quiet" onClick={exitFullscreenView}>ออกจากเต็มจอ</button>}{close && <button className="button button-quiet" onClick={close}>กลับห้องเรียน</button>}
+          <button className="button button-quiet" onClick={nativeFullscreen ? exitFullscreenView : toggleFullscreen}>{nativeFullscreen ? "ออกจากเต็มจอ" : "เต็มจอ"}</button>{immersive && !nativeFullscreen && <button className="button button-quiet" onClick={exitFullscreenView}>ออกจากเต็มจอ</button>}
         </div>
       </header>
       <div id="gallery-menu" className="gallery-menu" hidden={!menuOpen}>
+        <div className="gallery-menu-header"><strong>เมนูโลกเสมือน</strong><div><button className="button button-quiet" onClick={() => setMenuOpen(false)}>ปิดเมนู</button>{close && <button className="button button-quiet" onClick={close}>กลับห้องเรียน</button>}</div></div>
+        <div className="gallery-menu-room"><strong>{manifest?.classroomName ?? "โลกเสมือน"}</strong><small>{online} คนออนไลน์ · WASD/ลูกศร เดิน · Space กระโดด · ลากเพื่อหมุนมุมมอง</small></div>
         {user.role === "student" && <div className="gallery-attendance"><StudentAttendance /></div>}
         <aside className="gallery-train-panel" aria-label="รถไฟเที่ยวชมโลกเสมือน">
           <div className="gallery-train-status"><strong>🚂 รถไฟเที่ยวชม</strong><span>{trainStatus}</span><small>{trainView?.active ? `${trainView.seats}/12 ที่นั่ง · ${trainView.mode === "auto" ? "อัตโนมัติ" : "เริ่มโดยครู"}` : ""}</small></div>
@@ -703,7 +705,8 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
             {trainMessage && <small role="status">{trainMessage}</small>}
           </div>}
         </aside>
-        {teacher && <div className="gallery-management"><strong>จัดการโลกเสมือน</strong><p>{enabled ? "เปิดสำหรับนักเรียน" : "หยุดสำหรับนักเรียน · ครูเข้าชมได้"}</p><div className="gallery-management-actions"><button className="button button-quiet" disabled={loading} onClick={() => void setWorld(!enabled)}>{enabled ? "หยุดโลกสำหรับนักเรียน" : "เปิดโลกสำหรับนักเรียน"}</button><button className="button button-quiet" aria-pressed={wandMode} onClick={() => { setWandMode((value) => !value); setSelected(null); setMenuOpen(false); }}>{wandMode ? "เก็บไม้กายสิทธิ์" : "ถือไม้กายสิทธิ์"}</button><button className="button button-quiet" onClick={() => { setDraftAppearance({ ...appearance }); setCustomizerOpen(true); setMenuOpen(false); }}>ปรับแต่งตัวละคร</button></div></div>}
+        <div className="gallery-management"><strong>ตัวละคร</strong><div className="gallery-management-actions"><button className="button button-quiet" onClick={() => { setError(""); setDraftAppearance({ ...appearance }); setCustomizerOpen(true); setMenuOpen(false); }}>ปรับแต่งตัวละคร</button></div></div>
+        {teacher && <div className="gallery-management"><strong>จัดการโลกเสมือน</strong><p>{enabled ? "เปิดสำหรับนักเรียน" : "หยุดสำหรับนักเรียน · ครูเข้าชมได้"}</p><div className="gallery-management-actions"><button className="button button-quiet" disabled={loading} onClick={() => void setWorld(!enabled)}>{enabled ? "หยุดโลกสำหรับนักเรียน" : "เปิดโลกสำหรับนักเรียน"}</button><button className="button button-quiet" aria-pressed={wandMode} onClick={() => { setWandMode((value) => !value); setSelected(null); setMenuOpen(false); }}>{wandMode ? "เก็บไม้กายสิทธิ์" : "ถือไม้กายสิทธิ์"}</button></div></div>}
         {manifest?.nextOffset !== null && <button className="button button-quiet" onClick={() => void load(manifest?.nextOffset ?? 0)}>โหลดผลงานเพิ่ม</button>}
         {teacher && models.some((item) => item.hidden) && <aside className="gallery-hidden-tray"><strong>ผลงานที่ซ่อน</strong>{models.filter((item) => item.hidden).map((item) => <div key={item.id}><span>{item.displayName} · {item.originalName}</span><button className="text-button" onClick={() => void setHidden(item)}>แสดง</button></div>)}</aside>}
         {logout && <button className="button button-quiet" onClick={logout}>ออกจากระบบ</button>}
