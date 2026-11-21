@@ -8,6 +8,8 @@
 
 Give each classroom a shared third-person world where teachers and active students can walk among stable student display blocks. Eligible STL/OBJ/GLB/glTF work from active students and assignments appears automatically as 3D geometry only; geometry loads near the visitor and is released when it is far away. Visitors can inspect a model and its student/assignment attribution. Students can like classmates' models once and undo their like. Teachers can hide or restore a display without changing the submission or assessment.
 
+The environment uses a garden-campus palette, low-poly greenery, student terraces, station details, and a Thai entrance sign. The responsive toolbar and grouped character controls use the same compact visual system across desktop and touch layouts.
+
 ## Rules and access
 
 - A teacher controls student access for a classroom they own; that teacher can also enter while stopped. Only active linked students can enter an enabled world; anonymous users cannot.

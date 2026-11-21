@@ -88,7 +88,6 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   const [menuOpen, setMenuOpen] = useState(false);
   const [immersive, setImmersive] = useState(true);
   const [landscapeRequired, setLandscapeRequired] = useState(false);
-  const [nativeFullscreen, setNativeFullscreen] = useState(Boolean(document.fullscreenElement));
   const customizerOpenRef = useRef(false);
   const appearanceRef = useRef(appearance);
   const touchRef = useRef({ x: 0, z: 0 });
@@ -98,7 +97,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   const teacher = user.role !== "student";
   useEffect(() => { document.documentElement.classList.toggle("gallery-immersive", immersive); }, [immersive]);
   useEffect(() => {
-    const onFullscreenChange = () => { const active = Boolean(document.fullscreenElement); setNativeFullscreen(active); if (!active) { setImmersive(false); unlockGalleryOrientation(); } };
+    const onFullscreenChange = () => { if (!document.fullscreenElement) { setImmersive(false); unlockGalleryOrientation(); } };
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape" && !document.fullscreenElement) setImmersive(false); };
     document.addEventListener("fullscreenchange", onFullscreenChange);
     window.addEventListener("keydown", onKeyDown);
@@ -168,14 +167,22 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     try { renderer = new THREE.WebGLRenderer({ canvas, antialias: false }); }
     catch { setError("อุปกรณ์นี้ไม่รองรับการแสดงโลกสามมิติ"); return; }
     renderer.setPixelRatio(1);
-    const scene = new THREE.Scene(); scene.background = new THREE.Color("#cce7ed");
-    scene.fog = new THREE.Fog("#cce7ed", 45, 150);
-    scene.add(new THREE.HemisphereLight(0xeafaff, 0x667263, 2.2));
-    const sun = new THREE.DirectionalLight(0xfff5da, 2.5); sun.position.set(10, 25, 12); scene.add(sun);
-    const groundDepth = Math.max(2120, Math.ceil(manifest.blocks.length / 4) * 17 + 220);
-    const groundZ = -groundDepth / 2 + 30;
-    const floor = new THREE.Mesh(new THREE.PlaneGeometry(120, groundDepth), new THREE.MeshStandardMaterial({ color: 0xd9e5d4 })); floor.rotation.x = -Math.PI / 2; floor.position.set(0, -0.04, groundZ); scene.add(floor);
-    const gridSize = Math.max(200, groundDepth); let grid = new THREE.GridHelper(gridSize, Math.round(gridSize / 10), 0x9eaf9b, 0xb7c6b5); grid.position.set(0, 0, groundZ); scene.add(grid);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.12;
+    const scene = new THREE.Scene(); scene.background = new THREE.Color("#d9eee5");
+    scene.fog = new THREE.Fog("#d9eee5", 65, 190);
+    scene.add(new THREE.HemisphereLight(0xf1fff2, 0x58735f, 2.1));
+    const sun = new THREE.DirectionalLight(0xffefd1, 2.3); sun.position.set(-16, 32, 20); scene.add(sun);
+    const fill = new THREE.DirectionalLight(0xc4e8df, 0.85); fill.position.set(18, 12, -24); scene.add(fill);
+    let groundDepth = Math.max(2120, Math.ceil(manifest.blocks.length / 4) * 17 + 220);
+    let groundZ = -groundDepth / 2 + 30;
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(120, groundDepth), new THREE.MeshStandardMaterial({ color: 0xaac39e, roughness: 1 })); floor.rotation.x = -Math.PI / 2; floor.position.set(0, -0.04, groundZ); scene.add(floor);
+    const centerWalk = new THREE.Mesh(new THREE.PlaneGeometry(8, groundDepth), new THREE.MeshStandardMaterial({ color: 0xd7c9a7, roughness: 0.94 })); centerWalk.rotation.x = -Math.PI / 2; centerWalk.position.set(0, 0.005, groundZ); scene.add(centerWalk);
+    const groundEdges: THREE.Mesh[] = [];
+    for (const x of [-4.3, 4.3]) {
+      const pathEdge = new THREE.Mesh(new THREE.PlaneGeometry(0.16, groundDepth), new THREE.MeshStandardMaterial({ color: 0xf0dfb8, roughness: 0.9 }));
+      pathEdge.rotation.x = -Math.PI / 2; pathEdge.position.set(x, 0.015, groundZ); scene.add(pathEdge); groundEdges.push(pathEdge);
+    }
     const camera = new THREE.PerspectiveCamera(58, 1, 0.1, 800);
     const avatarMeshes = new Map<string, THREE.Group>();
     const syncAppearance = (avatar: THREE.Group, value: AvatarAppearance, withWand: boolean) => {
@@ -191,10 +198,30 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     const modelRoots = new WeakMap<THREE.Object3D, string>();
     const textures: THREE.Texture[] = [];
     const labelTexture = (text: string) => {
-      const canvas = document.createElement("canvas"); canvas.width = 512; canvas.height = 96;
-      const context = canvas.getContext("2d")!; context.fillStyle = "#ffffff"; context.fillRect(0, 0, 512, 96); context.fillStyle = "#17454b"; context.font = "bold 35px sans-serif"; context.textAlign = "center"; context.textBaseline = "middle"; context.fillText(text.slice(0, 30), 256, 48);
-      const texture = new THREE.CanvasTexture(canvas); textures.push(texture); return texture;
+      const canvas = document.createElement("canvas"); canvas.width = 1024; canvas.height = 160;
+      const context = canvas.getContext("2d")!;
+      context.fillStyle = "#173f37"; context.fillRect(0, 0, canvas.width, canvas.height);
+      context.fillStyle = "#f4e8c9"; context.fillRect(12, 12, canvas.width - 24, canvas.height - 24);
+      const split = text.indexOf(" · ");
+      context.textBaseline = "middle"; context.textAlign = "center"; context.fillStyle = "#b77f37";
+      context.font = "bold 78px system-ui, sans-serif"; context.fillText(split < 0 ? "—" : text.slice(0, split), 112, 82);
+      context.fillStyle = "#244c42"; context.textAlign = "left"; context.font = "bold 62px system-ui, sans-serif";
+      context.fillText(split < 0 ? text.slice(0, 28) : text.slice(split + 3, 34), 220, 82);
+      const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace; textures.push(texture); return texture;
     };
+    const landscapeGroup = new THREE.Group(); scene.add(landscapeGroup);
+    const titleCanvas = document.createElement("canvas"); titleCanvas.width = 1024; titleCanvas.height = 180;
+    const titleContext = titleCanvas.getContext("2d")!; titleContext.fillStyle = "#173f37"; titleContext.fillRect(0, 0, 1024, 180);
+    titleContext.strokeStyle = "#e7bd72"; titleContext.lineWidth = 10; titleContext.strokeRect(16, 16, 992, 148);
+    titleContext.fillStyle = "#fff4d6"; titleContext.font = "bold 70px system-ui, sans-serif"; titleContext.textAlign = "center"; titleContext.textBaseline = "middle"; titleContext.fillText("สวนผลงานนักเรียน", 512, 90);
+    const titleTexture = new THREE.CanvasTexture(titleCanvas); titleTexture.colorSpace = THREE.SRGBColorSpace; textures.push(titleTexture);
+    const entrance = new THREE.Group(); scene.add(entrance);
+    const archMaterial = new THREE.MeshStandardMaterial({ color: 0x315f4c, roughness: 0.82 });
+    for (const x of [-4.4, 4.4]) {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.42, 4.4, 0.5), archMaterial); post.position.set(x, 2.2, 18); entrance.add(post);
+    }
+    const archTop = new THREE.Mesh(new THREE.BoxGeometry(9.4, 0.5, 0.62), archMaterial); archTop.position.set(0, 4.1, 18); entrance.add(archTop);
+    const archSign = new THREE.Mesh(new THREE.PlaneGeometry(7.6, 1.35), new THREE.MeshBasicMaterial({ map: titleTexture })); archSign.position.set(0, 3.2, 17.66); entrance.add(archSign);
     const blockMap = new Map<string, Manifest["blocks"][number]>();
     const blockGroups = new Map<string, THREE.Group>();
     const studentModels = new Map<string, GalleryModel[]>();
@@ -205,16 +232,30 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     const trainTrackGroup = new THREE.Group(); scene.add(trainTrackGroup);
     const trainGroup = new THREE.Group(); scene.add(trainGroup);
     trainGroup.visible = false;
+    const trainMaterials = new Map<number, THREE.Material>();
     const addTrainPart = (parent: THREE.Object3D, size: [number, number, number], position: [number, number, number], color: number, material?: THREE.Material) => {
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(...size), material ?? new THREE.MeshStandardMaterial({ color, roughness: 0.72 })); mesh.position.set(...position); parent.add(mesh); return mesh;
+      const shared = material ?? trainMaterials.get(color) ?? new THREE.MeshStandardMaterial({ color, roughness: 0.72, flatShading: true });
+      if (!material) trainMaterials.set(color, shared);
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(...size), shared); mesh.position.set(...position); parent.add(mesh); return mesh;
     };
-    addTrainPart(trainGroup, [1.8, 0.7, 2.2], [0, 0.65, 2.3], 0x2a7d87);
-    addTrainPart(trainGroup, [1.2, 0.9, 1.0], [0, 1.35, 2.7], 0xe9bc56);
-    addTrainPart(trainGroup, [0.55, 0.55, 0.55], [0, 1.8, 3.4], 0x394b54);
+    addTrainPart(trainGroup, [1.8, 0.7, 2.2], [0, 0.65, 2.3], 0x267a6b);
+    addTrainPart(trainGroup, [1.2, 0.9, 1.0], [0, 1.35, 2.7], 0xe8c777);
+    addTrainPart(trainGroup, [0.55, 0.9, 0.55], [0, 1.8, 3.4], 0x315a4c);
+    addTrainPart(trainGroup, [1.55, 0.12, 0.14], [0, 1.1, 3.43], 0xf5e9c8);
+    const chimney = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.21, 0.52, 6), trainMaterials.get(0x315a4c)); chimney.position.set(0, 2.05, 2.95); trainGroup.add(chimney);
+    const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 5), new THREE.MeshStandardMaterial({ color: 0xffe7a0, emissive: 0xc98622, emissiveIntensity: 0.6, flatShading: true })); lamp.position.set(0, 1.28, 3.48); trainGroup.add(lamp);
+    const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x354940, roughness: 0.9, flatShading: true });
+    const wheels = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.31, 0.31, 0.14, 8), wheelMaterial, 12);
+    const wheelPose = new THREE.Object3D(); let wheelIndex = 0;
+    for (const center of [2.2, -1.8, -6.2]) for (const z of [center - 1, center + 1]) for (const x of [-0.9, 0.9]) {
+      wheelPose.position.set(x, 0.31, z); wheelPose.rotation.set(0, 0, Math.PI / 2); wheelPose.updateMatrix(); wheels.setMatrixAt(wheelIndex++, wheelPose.matrix);
+    }
+    trainGroup.add(wheels);
     for (const z of [-1.8, -6.2]) {
-      addTrainPart(trainGroup, [2.2, 0.48, 4.0], [0, 0.52, z], 0xb84d4d);
-      addTrainPart(trainGroup, [2.0, 0.35, 3.8], [0, 0.91, z], 0xd98167);
-      for (let row = 0; row < 3; row++) for (const x of [-0.55, 0.55]) addTrainPart(trainGroup, [0.72, 0.13, 0.72], [x, 1.18, z + 1.1 - row * 1.1], 0xf4d987);
+      addTrainPart(trainGroup, [2.2, 0.48, 4.0], [0, 0.52, z], 0xe8e0c9);
+      addTrainPart(trainGroup, [2.0, 0.35, 3.8], [0, 0.91, z], 0x267a6b);
+      addTrainPart(trainGroup, [2.02, 0.09, 0.16], [0, 1.1, z + 1.94], 0xe8c777);
+      for (let row = 0; row < 3; row++) for (const x of [-0.55, 0.55]) addTrainPart(trainGroup, [0.72, 0.13, 0.72], [x, 1.18, z + 1.1 - row * 1.1], 0xf5e9c8);
     }
     const trainTarget = { x: 0, z: 2, rotation: 0 };
     const trainSamples: TrainSample[] = [];
@@ -224,8 +265,21 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         child.traverse((object) => { const mesh = object as THREE.Mesh; mesh.geometry?.dispose?.(); const materials = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : []; materials.forEach((material) => material.dispose()); });
       }
       trainTrackGroup.clear();
-      const points = trainTrack(studentCount).map((point) => new THREE.Vector3(point.x, 0.025, point.z));
+      const route = trainTrack(studentCount);
+      const points = route.map((point) => new THREE.Vector3(point.x, 0.025, point.z));
       if (points.length < 2) return;
+      const stations = route.filter((point) => point.id);
+      const stationPad = new THREE.InstancedMesh(new THREE.CylinderGeometry(1.45, 1.45, 0.16, 8), new THREE.MeshStandardMaterial({ color: 0xd7c49b, roughness: 0.85 }), stations.length);
+      const stationPosts = new THREE.InstancedMesh(new THREE.BoxGeometry(0.2, 1.6, 0.2), new THREE.MeshStandardMaterial({ color: 0x3a6d58, roughness: 0.82 }), stations.length);
+      const stationSigns = new THREE.InstancedMesh(new THREE.BoxGeometry(1.5, 0.65, 0.12), new THREE.MeshStandardMaterial({ color: 0xf3dfaa, roughness: 0.78 }), stations.length);
+      const stationPose = new THREE.Object3D();
+      stations.forEach((point, index) => {
+        stationPose.position.set(point.x, 0.08, point.z); stationPose.rotation.set(0, 0, 0); stationPose.scale.set(1, 1, 1); stationPose.updateMatrix(); stationPad.setMatrixAt(index, stationPose.matrix);
+        stationPose.position.set(point.x + 2.1, 0.86, point.z); stationPose.updateMatrix(); stationPosts.setMatrixAt(index, stationPose.matrix);
+        stationPose.position.set(point.x + 2.1, 1.68, point.z); stationPose.updateMatrix(); stationSigns.setMatrixAt(index, stationPose.matrix);
+      });
+      stationPad.instanceMatrix.needsUpdate = true; stationPosts.instanceMatrix.needsUpdate = true; stationSigns.instanceMatrix.needsUpdate = true;
+      trainTrackGroup.add(stationPad, stationPosts, stationSigns);
       for (let index = 0; index < points.length; index++) {
         const from = points[index]!, to = points[(index + 1) % points.length]!;
         const dx = to.x - from.x, dz = to.z - from.z, length = Math.hypot(dx, dz), segment = new THREE.Group();
@@ -239,10 +293,52 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     let blockSignature = "", layoutChanged = false;
     const addBlock = (block: Manifest["blocks"][number]) => {
       const position = blockPosition(block.layoutIndex); const group = new THREE.Group(); group.position.set(position.x, 0, position.z); scene.add(group);
-      const platform = new THREE.Mesh(new THREE.BoxGeometry(12, 0.55, 10), new THREE.MeshStandardMaterial({ color: colorFor(block.studentId) })); platform.position.y = 0.28; group.add(platform);
-      const back = new THREE.Mesh(new THREE.BoxGeometry(10.8, 3.7, 0.28), new THREE.MeshStandardMaterial({ color: 0xf5f3e9 })); back.position.set(0, 2.15, -4.55); group.add(back);
-      const label = new THREE.Mesh(new THREE.PlaneGeometry(9.6, 0.9), new THREE.MeshBasicMaterial({ map: labelTexture(`${block.studentNumber ?? "—"} · ${block.displayName}`) })); label.position.set(0, 4.1, -4.35); group.add(label);
+      const label = new THREE.Mesh(new THREE.PlaneGeometry(9.1, 1.18), new THREE.MeshBasicMaterial({ map: labelTexture(`${block.studentNumber ?? "—"} · ${block.displayName}`) })); label.position.set(0, 2.85, -4.43); group.add(label);
       blockMap.set(block.studentId, block); blockGroups.set(block.studentId, group);
+    };
+    const rebuildLandscape = (blocks: Manifest["blocks"][number][], layoutCount: number) => {
+      for (const child of [...landscapeGroup.children]) {
+        child.traverse((object) => { const mesh = object as THREE.Mesh; mesh.geometry?.dispose?.(); const materials = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : []; materials.forEach((material) => material.dispose()); });
+      }
+      landscapeGroup.clear();
+      if (!blocks.length) return;
+      const count = blocks.length, rows = Math.ceil(layoutCount / 4), treeCount = count * 2 + rows * 2, pose = new THREE.Object3D();
+      const pads = new THREE.InstancedMesh(new THREE.BoxGeometry(12, 0.42, 10), new THREE.MeshStandardMaterial({ color: 0x718b67, roughness: 0.98 }), count);
+      const decks = new THREE.InstancedMesh(new THREE.BoxGeometry(11.7, 0.08, 9.7), new THREE.MeshStandardMaterial({ color: 0xe8ddc1, roughness: 0.98 }), count);
+      const thresholds = new THREE.InstancedMesh(new THREE.BoxGeometry(11.6, 0.08, 0.28), new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.88 }), count);
+      const signPosts = new THREE.InstancedMesh(new THREE.BoxGeometry(0.22, 1.58, 0.24), new THREE.MeshStandardMaterial({ color: 0x315f4c, roughness: 0.82 }), count * 2);
+      const signBoards = new THREE.InstancedMesh(new THREE.BoxGeometry(9.5, 1.42, 0.18), new THREE.MeshStandardMaterial({ color: 0x315f4c, roughness: 0.82 }), count);
+      const trunks = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.14, 0.21, 0.82, 5), new THREE.MeshStandardMaterial({ color: 0x83613f, roughness: 0.98, flatShading: true }), treeCount);
+      const crowns = new THREE.InstancedMesh(new THREE.ConeGeometry(0.84, 2.22, 5), new THREE.MeshStandardMaterial({ color: 0x4b8060, roughness: 0.94, flatShading: true }), treeCount);
+      const flowers = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(0.18, 0), new THREE.MeshStandardMaterial({ color: 0xe6a66c, roughness: 0.8, flatShading: true }), count * 2);
+      const paths = new THREE.InstancedMesh(new THREE.BoxGeometry(72, 0.035, 1.8), new THREE.MeshStandardMaterial({ color: 0xc8b98f, roughness: 1 }), Math.max(1, rows - 1)); paths.count = Math.max(0, rows - 1);
+      blocks.forEach((block, index) => {
+        const base = blockPosition(block.layoutIndex);
+        pose.position.set(base.x, 0.22, base.z); pose.rotation.set(0, 0, 0); pose.scale.set(1, 1, 1); pose.updateMatrix(); pads.setMatrixAt(index, pose.matrix);
+        pose.position.y = 0.48; pose.updateMatrix(); decks.setMatrixAt(index, pose.matrix);
+        pose.position.set(base.x, 0.55, base.z + 4.55); pose.updateMatrix(); thresholds.setMatrixAt(index, pose.matrix);
+        thresholds.setColorAt(index, colorFor(block.studentId).lerp(new THREE.Color("#e8c777"), 0.55));
+        pose.position.set(base.x, 3.0, base.z - 4.58); pose.updateMatrix(); signBoards.setMatrixAt(index, pose.matrix);
+        for (const [sideIndex, side] of [-1, 1].entries()) {
+          const instance = index * 2 + sideIndex;
+          pose.position.set(base.x + side * 4.55, 2.85, base.z - 4.58); pose.updateMatrix(); signPosts.setMatrixAt(instance, pose.matrix);
+          pose.position.set(base.x + side * 5.08, 1.03, base.z + 3.55); pose.updateMatrix(); trunks.setMatrixAt(instance, pose.matrix);
+          pose.position.set(base.x + side * 5.08, 2.32, base.z + 3.55); pose.updateMatrix(); crowns.setMatrixAt(instance, pose.matrix);
+          pose.position.set(base.x + side * 4.72, 0.78, base.z + 3.9); pose.scale.set(1, 0.8, 1); pose.updateMatrix(); flowers.setMatrixAt(instance, pose.matrix); pose.scale.set(1, 1, 1);
+          flowers.setColorAt(instance, new THREE.Color(sideIndex ? "#e99b73" : "#e5c16d"));
+        }
+      });
+      blocks.forEach((block) => {
+        const row = blockPosition(block.layoutIndex).z;
+        if (block.layoutIndex % 4 !== 0 || Math.floor(block.layoutIndex / 4) >= rows - 1) return;
+        pose.position.set(0, 0.025, row - 8.5); pose.rotation.set(0, 0, 0); pose.scale.set(1, 1, 1); pose.updateMatrix(); paths.setMatrixAt(Math.floor(block.layoutIndex / 4), pose.matrix);
+      });
+      for (let row = 0; row < rows; row++) for (const [sideIndex, side] of [-1, 1].entries()) {
+        const instance = count * 2 + row * 2 + sideIndex, base = blockPosition(row * 4);
+        pose.position.set(side * 5.25, 1.03, base.z); pose.updateMatrix(); trunks.setMatrixAt(instance, pose.matrix);
+        pose.position.set(side * 5.25, 2.32, base.z); pose.updateMatrix(); crowns.setMatrixAt(instance, pose.matrix);
+      }
+      for (const mesh of [pads, decks, thresholds, signPosts, signBoards, trunks, crowns, flowers, paths]) { mesh.instanceMatrix.needsUpdate = true; if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true; mesh.computeBoundingSphere(); landscapeGroup.add(mesh); }
     };
     const syncBlocks = () => {
       const roster = manifestRef.current?.blocks ?? [], current = new Set(roster.map((block) => block.studentId));
@@ -258,10 +354,13 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       blockSignature = signature; layoutChanged = true;
       for (const [studentId, group] of blockGroups) { scene.remove(group); disposeAvatarCharacter(group); blockGroups.delete(studentId); blockMap.delete(studentId); }
       for (const block of blocks) if (current.has(block.studentId)) addBlock(block);
+      rebuildLandscape(blocks, layoutCount);
       rebuildTrack(layoutCount);
       const rows = Math.ceil(layoutCount / 4), depth = Math.max(2120, rows * 17 + 220), centerZ = -depth / 2 + 30;
-      floor.geometry.dispose(); floor.geometry = new THREE.PlaneGeometry(120, depth); floor.position.z = centerZ;
-      scene.remove(grid); grid.geometry.dispose(); (Array.isArray(grid.material) ? grid.material : [grid.material]).forEach((material) => material.dispose()); grid = new THREE.GridHelper(Math.max(200, depth), Math.round(Math.max(200, depth) / 10), 0x9eaf9b, 0xb7c6b5); grid.position.set(0, 0, centerZ); scene.add(grid);
+      groundDepth = depth; groundZ = centerZ;
+      for (const [mesh, width] of [[floor, 120], [centerWalk, 8], ...groundEdges.map((edge) => [edge, 0.16] as [THREE.Mesh, number])] as [THREE.Mesh, number][]) {
+        mesh.geometry.dispose(); mesh.geometry = new THREE.PlaneGeometry(width, depth); mesh.position.z = centerZ;
+      }
     };
     syncBlocks();
     const addExhibit = (item: GalleryModel) => {
@@ -715,10 +814,10 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   return <>
     <section className="gallery-shell">
       <header className={`gallery-toolbar${menuOpen ? " menu-open" : ""}`}>
-        <div className="gallery-toolbar-room"><strong>{manifest?.classroomName ?? "โลกเสมือน"}</strong><small>{online} คนออนไลน์ · WASD/ลูกศร เดิน · Space กระโดด · ลากเพื่อหมุนมุมมอง</small></div>
+        <div className="gallery-toolbar-room"><span className="gallery-room-mark" aria-hidden="true">✦</span><div><strong>{manifest?.classroomName ?? "โลกเสมือน"}</strong><small><span className="gallery-online-dot" aria-hidden="true" />{online} คนออนไลน์ · WASD/Space หรือจอยสติ๊ก</small></div></div>
         <div className="gallery-toolbar-actions">
-          <button className="button button-quiet" aria-expanded={menuOpen} aria-controls="gallery-menu" onClick={() => setMenuOpen((open) => !open)}>{menuOpen ? "ปิดเมนู" : "เมนู"}</button>
-          <button className="button button-quiet" onClick={nativeFullscreen ? exitFullscreenView : toggleFullscreen}>{nativeFullscreen ? "ออกจากเต็มจอ" : "เต็มจอ"}</button>{immersive && !nativeFullscreen && <button className="button button-quiet" onClick={exitFullscreenView}>ออกจากเต็มจอ</button>}
+          <button className="button button-quiet gallery-menu-toggle" aria-expanded={menuOpen} aria-controls="gallery-menu" onClick={() => setMenuOpen((open) => !open)}><span aria-hidden="true">☰</span>{menuOpen ? "ปิดเมนู" : "เมนู"}</button>
+          <button className="button button-quiet gallery-fullscreen-toggle" onClick={immersive ? exitFullscreenView : toggleFullscreen}><span aria-hidden="true">⛶</span>{immersive ? "ออกจากเต็มจอ" : "เต็มจอ"}</button>
         </div>
       </header>
       <div id="gallery-menu" className="gallery-menu" hidden={!menuOpen}>
@@ -791,19 +890,21 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
 }
 
 function CharacterCustomizer({ appearance, onChange, onCancel, onSave, saving, error }: { appearance: AvatarAppearance; onChange: (value: AvatarAppearance) => void; onCancel: () => void; onSave: () => void; saving: boolean; error: string }) {
-  const selections = [
-    ["hairStyle", "ทรงผม", [["none", "ไม่มีผม"], ["short", "สั้น"], ["long", "ยาว"], ["ponytail", "หางม้า"], ["bun", "มวยผม"], ["spiky", "ตั้ง"], ["bob", "บ๊อบ"]]],
-    ["hatStyle", "หมวก", [["none", "ไม่มี"], ["cap", "หมวกแก๊ป"], ["beanie", "หมวกไหมพรม"], ["wizard", "หมวกพ่อมด"]]],
-    ["glassesStyle", "แว่นตา", [["none", "ไม่มี"], ["round", "ทรงกลม"], ["square", "ทรงเหลี่ยม"]]],
-    ["shoeStyle", "รองเท้า", [["none", "ไม่มี"], ["sneakers", "รองเท้าผ้าใบ"], ["boots", "รองเท้าบูต"]]],
-  ] as const;
-  const colors = [["skinColor", "สีผิว"], ["hairColor", "สีผม"], ["shirtColor", "เสื้อ"], ["trousersColor", "กางเกง"], ["hatColor", "หมวก"], ["glassesColor", "แว่นตา"], ["shoeColor", "รองเท้า"]] as const;
+  const choices = {
+    hairStyle: [["none", "ไม่มีผม"], ["short", "สั้น"], ["long", "ยาว"], ["ponytail", "หางม้า"], ["bun", "มวยผม"], ["spiky", "ตั้ง"], ["bob", "บ๊อบ"]],
+    hatStyle: [["none", "ไม่มี"], ["cap", "หมวกแก๊ป"], ["beanie", "หมวกไหมพรม"], ["wizard", "หมวกพ่อมด"]],
+    glassesStyle: [["none", "ไม่มี"], ["round", "ทรงกลม"], ["square", "ทรงเหลี่ยม"]],
+    shoeStyle: [["none", "ไม่มี"], ["sneakers", "รองเท้าผ้าใบ"], ["boots", "รองเท้าบูต"]],
+  } as const;
   return <div className="character-editor-backdrop"><section className="character-editor" role="dialog" aria-modal="true" aria-labelledby="character-editor-title">
     <header><h2 id="character-editor-title">ปรับแต่งตัวละคร</h2><button className="icon-button" onClick={onCancel} aria-label="ยกเลิก">×</button></header>
-    {error && <p className="form-error" role="alert">{error}</p>}<CharacterPreview appearance={appearance} />
-    <div className="character-controls">
-      {selections.map(([key, label, options]) => <label key={key}>{label}<select value={appearance[key]} onChange={(event) => onChange({ ...appearance, [key]: event.target.value } as AvatarAppearance)}>{options.map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select></label>)}
-      {colors.map(([key, label]) => <label key={key}>{label}<input type="color" value={appearance[key]} onChange={(event) => onChange({ ...appearance, [key]: event.target.value })} /></label>)}
+    {error && <p className="form-error" role="alert">{error}</p>}
+    <div className="character-editor-layout"><div className="character-preview-column"><span>ตัวอย่างตัวละคร</span><CharacterPreview appearance={appearance} /></div>
+      <div className="character-controls">
+        <section className="character-control-group"><h3>ร่างกาย</h3><label>สีผิว<input type="color" value={appearance.skinColor} onChange={(event) => onChange({ ...appearance, skinColor: event.target.value })} /></label></section>
+        <section className="character-control-group"><h3>เสื้อผ้า</h3><label>สีเสื้อ<input type="color" value={appearance.shirtColor} onChange={(event) => onChange({ ...appearance, shirtColor: event.target.value })} /></label><label>สีกางเกง<input type="color" value={appearance.trousersColor} onChange={(event) => onChange({ ...appearance, trousersColor: event.target.value })} /></label><label>รองเท้า<select value={appearance.shoeStyle} onChange={(event) => onChange({ ...appearance, shoeStyle: event.target.value as AvatarAppearance["shoeStyle"] })}>{choices.shoeStyle.map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select></label><label>สีรองเท้า<input type="color" value={appearance.shoeColor} onChange={(event) => onChange({ ...appearance, shoeColor: event.target.value })} /></label></section>
+        <section className="character-control-group"><h3>ทรงผมและเครื่องประดับ</h3><label>ทรงผม<select value={appearance.hairStyle} onChange={(event) => onChange({ ...appearance, hairStyle: event.target.value as AvatarAppearance["hairStyle"] })}>{choices.hairStyle.map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select></label><label>สีผม<input type="color" value={appearance.hairColor} onChange={(event) => onChange({ ...appearance, hairColor: event.target.value })} /></label><label>หมวก<select value={appearance.hatStyle} onChange={(event) => onChange({ ...appearance, hatStyle: event.target.value as AvatarAppearance["hatStyle"] })}>{choices.hatStyle.map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select></label><label>สีหมวก<input type="color" value={appearance.hatColor} onChange={(event) => onChange({ ...appearance, hatColor: event.target.value })} /></label><label>แว่นตา<select value={appearance.glassesStyle} onChange={(event) => onChange({ ...appearance, glassesStyle: event.target.value as AvatarAppearance["glassesStyle"] })}>{choices.glassesStyle.map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select></label><label>สีแว่นตา<input type="color" value={appearance.glassesColor} onChange={(event) => onChange({ ...appearance, glassesColor: event.target.value })} /></label></section>
+      </div>
     </div>
     <footer><button className="button button-quiet" onClick={onCancel} disabled={saving}>ยกเลิก</button><button className="button button-primary" onClick={onSave} disabled={saving}>{saving ? "กำลังบันทึก…" : "บันทึกตัวละคร"}</button></footer>
   </section></div>;
