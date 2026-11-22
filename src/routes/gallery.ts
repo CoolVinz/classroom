@@ -7,6 +7,7 @@ import { checkRequestOrigin } from "../security";
 import { storedFilePath } from "../file-storage";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+const galleryVoteLimit = 10;
 const defaultAppearance = { skinColor: "#f3c8a6", hairColor: "#3e2d27", shirtColor: "#4f9b86", trousersColor: "#435875", hairStyle: "short", hatStyle: "none", glassesStyle: "none", shoeStyle: "sneakers", hatColor: "#b84d4d", glassesColor: "#302721", shoeColor: "#303a4a" };
 const avatarSchema = t.Object({
   skinColor: t.String({ pattern: "^#[0-9a-fA-F]{6}$" }),
@@ -138,7 +139,7 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     const offset = Math.max(0, Math.min(100000, Number(query.offset) || 0));
     const [blocks, models] = await Promise.all([
       sql`SELECT s.id AS "studentId", s.display_name AS "displayName", s.student_number AS "studentNumber", b.block_index AS "blockIndex", (row_number() OVER (ORDER BY s.student_number NULLS LAST, s.display_name, s.id) - 1)::int AS "layoutIndex", FALSE AS archived FROM classroom.gallery_blocks b JOIN classroom.students s ON s.id=b.student_id WHERE b.classroom_id=${params.classroomId} AND s.archived_at IS NULL ORDER BY s.student_number NULLS LAST, s.display_name, s.id`,
-      sql`SELECT f.id, f.student_id AS "studentId", s.display_name AS "displayName", s.student_number AS "studentNumber", a.id AS "assignmentId", a.title AS "assignmentTitle", f.original_name AS "originalName", f.media_type AS "mediaType", f.material_storage_name IS NOT NULL AS "materialAvailable", f.thumbnail_size_bytes IS NOT NULL AS "thumbnailAvailable", f.created_at AS "createdAt", (h.file_id IS NOT NULL) AS hidden, (SELECT COUNT(*)::int FROM classroom.gallery_likes l WHERE l.file_id=f.id) AS likes, ${student?.id ?? null}::uuid IS NOT NULL AND f.student_id <> (SELECT s2.id FROM classroom.students s2 WHERE s2.account_id=${student?.id ?? null} AND s2.classroom_id=${params.classroomId} AND s2.archived_at IS NULL LIMIT 1) AND EXISTS (SELECT 1 FROM classroom.gallery_likes l JOIN classroom.students ls ON ls.id=l.student_id WHERE l.file_id=f.id AND ls.account_id=${student?.id ?? null}) AS "likedByMe"
+      sql`SELECT f.id, f.student_id AS "studentId", s.display_name AS "displayName", s.student_number AS "studentNumber", a.id AS "assignmentId", a.title AS "assignmentTitle", f.original_name AS "originalName", f.media_type AS "mediaType", f.material_storage_name IS NOT NULL AS "materialAvailable", f.thumbnail_size_bytes IS NOT NULL AS "thumbnailAvailable", f.created_at AS "createdAt", (h.file_id IS NOT NULL) AS hidden, (SELECT COUNT(*)::int FROM classroom.gallery_likes l WHERE l.file_id=f.id) AS likes, ${viewerStudentId}::uuid IS NOT NULL AND EXISTS (SELECT 1 FROM classroom.gallery_likes l WHERE l.file_id=f.id AND l.student_id=${viewerStudentId}) AS "likedByMe"
         FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id LEFT JOIN classroom.gallery_hidden_models h ON h.classroom_id=f.classroom_id AND h.file_id=f.id
         WHERE f.classroom_id=${params.classroomId} AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$' AND s.archived_at IS NULL AND a.archived_at IS NULL AND (${teacher !== null} OR h.file_id IS NULL)
         ORDER BY s.student_number NULLS LAST, s.display_name, s.id, f.created_at DESC, f.id LIMIT 40 OFFSET ${offset}`,
@@ -146,6 +147,35 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     const [count] = await sql<{ count: number }[]>`SELECT COUNT(*)::int AS count FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id LEFT JOIN classroom.gallery_hidden_models h ON h.classroom_id=f.classroom_id AND h.file_id=f.id WHERE f.classroom_id=${params.classroomId} AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$' AND s.archived_at IS NULL AND a.archived_at IS NULL AND (${teacher !== null} OR h.file_id IS NULL)`;
     const [train] = await sql<{ mode: "auto" | "manual"; intervalSeconds: number; startStudentId: string | null }[]>`SELECT w.train_mode AS mode, w.train_interval_seconds AS "intervalSeconds", CASE WHEN s.id IS NULL THEN NULL ELSE s.id END AS "startStudentId" FROM classroom.gallery_worlds w LEFT JOIN classroom.students s ON s.id=w.train_start_student_id AND s.classroom_id=w.classroom_id AND s.archived_at IS NULL AND s.student_number IS NOT NULL WHERE w.classroom_id=${params.classroomId}`;
     return { classroomId: params.classroomId, classroomName: world.classroomName, enabled: world.enabled, blocks, models, nextOffset: offset + models.length < count.count ? offset + models.length : null, teacher: Boolean(teacher), viewerStudentId, train: { mode: train?.mode ?? "auto", intervalSeconds: train?.intervalSeconds ?? 120, startStudentId: train?.startStudentId ?? null } };
+  })
+  .get("/classrooms/:classroomId/gallery/votes", async ({ params, request }) => {
+    const teacher = await readActor(request);
+    const student = teacher ? null : await readStudentActor(request);
+    let studentId: string | null = null;
+    if (teacher) await ownedClass(teacher, params.classroomId);
+    else if (student) studentId = await studentClass(student.id, params.classroomId);
+    else throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
+    const [blockTotals, usage, myVotes] = await Promise.all([
+      sql`SELECT f.student_id AS "studentId", COUNT(l.file_id)::int AS votes
+        FROM classroom.files f JOIN classroom.students owner ON owner.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id
+        LEFT JOIN classroom.gallery_hidden_models h ON h.classroom_id=f.classroom_id AND h.file_id=f.id
+        JOIN classroom.gallery_likes l ON l.classroom_id=f.classroom_id AND l.file_id=f.id
+        WHERE f.classroom_id=${params.classroomId} AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$'
+          AND owner.archived_at IS NULL AND a.archived_at IS NULL AND h.file_id IS NULL
+        GROUP BY f.student_id HAVING COUNT(l.file_id)>0`,
+      studentId ? sql`SELECT f.assignment_id AS "assignmentId", a.title AS "assignmentTitle", COUNT(*)::int AS used
+        FROM classroom.gallery_likes l JOIN classroom.files f ON f.id=l.file_id JOIN classroom.assignments a ON a.id=f.assignment_id
+        WHERE l.classroom_id=${params.classroomId} AND l.student_id=${studentId}
+        GROUP BY f.assignment_id,a.title ORDER BY a.title,f.assignment_id` : Promise.resolve([]),
+      studentId ? sql`SELECT f.id AS "fileId", f.assignment_id AS "assignmentId", a.title AS "assignmentTitle", f.original_name AS "originalName",
+          owner.display_name AS "displayName", owner.student_number AS "studentNumber",
+          (h.file_id IS NOT NULL) AS hidden, (owner.archived_at IS NOT NULL OR a.archived_at IS NOT NULL) AS unavailable
+        FROM classroom.gallery_likes l JOIN classroom.files f ON f.id=l.file_id JOIN classroom.students owner ON owner.id=f.student_id
+        JOIN classroom.assignments a ON a.id=f.assignment_id LEFT JOIN classroom.gallery_hidden_models h ON h.classroom_id=f.classroom_id AND h.file_id=f.id
+        WHERE l.classroom_id=${params.classroomId} AND l.student_id=${studentId}
+        ORDER BY a.title, owner.student_number NULLS LAST, owner.display_name, f.original_name, f.id` : Promise.resolve([]),
+    ]);
+    return { limit: galleryVoteLimit, blockTotals, usage, myVotes };
   })
   .put("/classrooms/:classroomId/gallery", async ({ params, body, request }) => {
     checkRequestOrigin(request);
@@ -216,10 +246,12 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     checkRequestOrigin(request);
     const actor = await requireActor(request);
     await ownedClass(actor, params.classroomId);
-    const [file] = await sql<{ id: string }[]>`SELECT id FROM classroom.files WHERE id=${params.fileId} AND classroom_id=${params.classroomId} AND kind IN ('model','submission') AND lower(original_name) ~ '\\.(stl|obj|glb|gltf)$'`;
-    if (!file) throw new HttpError(404, "ไม่พบโมเดลนี้");
-    if (body.hidden) await sql`INSERT INTO classroom.gallery_hidden_models(classroom_id,file_id,hidden_by) VALUES(${params.classroomId},${params.fileId},${actor.id}) ON CONFLICT DO NOTHING`;
-    else await sql`DELETE FROM classroom.gallery_hidden_models WHERE classroom_id=${params.classroomId} AND file_id=${params.fileId}`;
+    await sql.begin(async (tx) => {
+      const [file] = await tx<{ id: string }[]>`SELECT id FROM classroom.files WHERE id=${params.fileId} AND classroom_id=${params.classroomId} AND kind IN ('model','submission') AND lower(original_name) ~ '\\.(stl|obj|glb|gltf)$' FOR UPDATE`;
+      if (!file) throw new HttpError(404, "ไม่พบโมเดลนี้");
+      if (body.hidden) await tx`INSERT INTO classroom.gallery_hidden_models(classroom_id,file_id,hidden_by) VALUES(${params.classroomId},${params.fileId},${actor.id}) ON CONFLICT DO NOTHING`;
+      else await tx`DELETE FROM classroom.gallery_hidden_models WHERE classroom_id=${params.classroomId} AND file_id=${params.fileId}`;
+    });
     return { ok: true, hidden: body.hidden };
   }, { body: t.Object({ hidden: t.Boolean() }) })
   .put("/classrooms/:classroomId/gallery/files/:fileId/like", async ({ params, request }) => {
@@ -227,16 +259,38 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     const actor = await readStudentActor(request);
     if (!actor) throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
     const studentId = await studentClass(actor.id, params.classroomId);
-    const [result] = await sql<{ likes: number; eligible: boolean }[]>`WITH eligible AS (SELECT f.id FROM classroom.files f JOIN classroom.students owner ON owner.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id LEFT JOIN classroom.gallery_hidden_models h ON h.file_id=f.id AND h.classroom_id=f.classroom_id WHERE f.id=${params.fileId} AND f.classroom_id=${params.classroomId} AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$' AND owner.archived_at IS NULL AND a.archived_at IS NULL AND h.file_id IS NULL AND owner.id <> ${studentId}), inserted AS (INSERT INTO classroom.gallery_likes(classroom_id,file_id,student_id) SELECT ${params.classroomId}, eligible.id, ${studentId} FROM eligible ON CONFLICT DO NOTHING RETURNING file_id) SELECT COUNT(l.file_id)::int AS likes, EXISTS(SELECT 1 FROM eligible) AS eligible FROM classroom.gallery_likes l WHERE l.file_id=${params.fileId}`;
-    if (!result.eligible) throw new HttpError(404, "ไม่พบโมเดลนี้หรือไม่สามารถกดถูกใจให้ผลงานตนเองได้");
-    return { likes: result.likes };
+    return sql.begin(async (tx) => {
+      const [membership] = await tx`SELECT s.id FROM classroom.students s JOIN classroom.gallery_student_entry e ON e.student_id=s.id AND e.classroom_id=s.classroom_id JOIN classroom.gallery_worlds w ON w.classroom_id=s.classroom_id WHERE s.id=${studentId} AND s.classroom_id=${params.classroomId} AND s.archived_at IS NULL AND e.entry_allowed AND w.enabled FOR SHARE OF s`;
+      if (!membership) throw new HttpError(403, "สิทธิ์เข้าโลกเสมือนของคุณเปลี่ยนแล้ว");
+      const [target] = await tx<{ assignmentId: string; ownerId: string }[]>`SELECT f.assignment_id AS "assignmentId", owner.id AS "ownerId" FROM classroom.files f JOIN classroom.students owner ON owner.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id WHERE f.id=${params.fileId} AND f.classroom_id=${params.classroomId} AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$' FOR SHARE OF f, owner, a`;
+      if (!target || target.ownerId === studentId) throw new HttpError(404, "ไม่พบโมเดลนี้หรือไม่สามารถกดถูกใจให้ผลงานตนเองได้");
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`${params.classroomId}:${studentId}:${target.assignmentId}`}, 74103))`;
+      const [eligible] = await tx<{ ok: boolean }[]>`SELECT EXISTS(SELECT 1 FROM classroom.files f JOIN classroom.students owner ON owner.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id WHERE f.id=${params.fileId} AND owner.archived_at IS NULL AND a.archived_at IS NULL AND NOT EXISTS(SELECT 1 FROM classroom.gallery_hidden_models h WHERE h.classroom_id=f.classroom_id AND h.file_id=f.id)) AS ok`;
+      if (!eligible.ok) throw new HttpError(404, "ไม่พบโมเดลนี้หรือไม่สามารถกดถูกใจให้ผลงานตนเองได้");
+      const [alreadyVoted] = await tx<{ present: boolean }[]>`SELECT EXISTS(SELECT 1 FROM classroom.gallery_likes WHERE classroom_id=${params.classroomId} AND file_id=${params.fileId} AND student_id=${studentId}) AS present`;
+      if (!alreadyVoted.present) {
+        const [usage] = await tx<{ used: number }[]>`SELECT COUNT(*)::int AS used FROM classroom.gallery_likes l JOIN classroom.files f ON f.id=l.file_id WHERE l.classroom_id=${params.classroomId} AND l.student_id=${studentId} AND f.assignment_id=${target.assignmentId}`;
+        if (usage.used >= galleryVoteLimit) throw new HttpError(409, "ใช้โควตาโหวตครบ 10 ครั้งสำหรับงานนี้แล้ว ยกเลิกโหวตเดิมเพื่อใช้สิทธิ์อีกครั้ง");
+        await tx`INSERT INTO classroom.gallery_likes(classroom_id,file_id,student_id) VALUES(${params.classroomId},${params.fileId},${studentId}) ON CONFLICT DO NOTHING`;
+      }
+      const [count] = await tx<{ likes: number }[]>`SELECT COUNT(*)::int AS likes FROM classroom.gallery_likes WHERE classroom_id=${params.classroomId} AND file_id=${params.fileId}`;
+      const [usage] = await tx<{ used: number }[]>`SELECT COUNT(*)::int AS used FROM classroom.gallery_likes l JOIN classroom.files f ON f.id=l.file_id WHERE l.classroom_id=${params.classroomId} AND l.student_id=${studentId} AND f.assignment_id=${target.assignmentId}`;
+      return { likes: count.likes, likedByMe: true, remaining: Math.max(0, galleryVoteLimit - usage.used) };
+    });
   })
   .delete("/classrooms/:classroomId/gallery/files/:fileId/like", async ({ params, request }) => {
     checkRequestOrigin(request);
     const actor = await readStudentActor(request);
     if (!actor) throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
     const studentId = await studentClass(actor.id, params.classroomId);
-    await sql`DELETE FROM classroom.gallery_likes WHERE classroom_id=${params.classroomId} AND file_id=${params.fileId} AND student_id=${studentId}`;
-    const [row] = await sql<{ likes: number }[]>`SELECT COUNT(*)::int AS likes FROM classroom.gallery_likes WHERE classroom_id=${params.classroomId} AND file_id=${params.fileId}`;
-    return { likes: row.likes };
+    return sql.begin(async (tx) => {
+      const [membership] = await tx`SELECT s.id FROM classroom.students s JOIN classroom.gallery_student_entry e ON e.student_id=s.id AND e.classroom_id=s.classroom_id JOIN classroom.gallery_worlds w ON w.classroom_id=s.classroom_id WHERE s.id=${studentId} AND s.classroom_id=${params.classroomId} AND s.archived_at IS NULL AND e.entry_allowed AND w.enabled FOR SHARE OF s`;
+      if (!membership) throw new HttpError(403, "สิทธิ์เข้าโลกเสมือนของคุณเปลี่ยนแล้ว");
+      const [file] = await tx<{ assignmentId: string }[]>`SELECT assignment_id AS "assignmentId" FROM classroom.files WHERE id=${params.fileId} AND classroom_id=${params.classroomId} FOR SHARE`;
+      if (file) await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`${params.classroomId}:${studentId}:${file.assignmentId}`}, 74103))`;
+      await tx`DELETE FROM classroom.gallery_likes WHERE classroom_id=${params.classroomId} AND file_id=${params.fileId} AND student_id=${studentId}`;
+      const [count] = await tx<{ likes: number }[]>`SELECT COUNT(*)::int AS likes FROM classroom.gallery_likes WHERE classroom_id=${params.classroomId} AND file_id=${params.fileId}`;
+      const [usage] = file ? await tx<{ used: number }[]>`SELECT COUNT(*)::int AS used FROM classroom.gallery_likes l JOIN classroom.files f ON f.id=l.file_id WHERE l.classroom_id=${params.classroomId} AND l.student_id=${studentId} AND f.assignment_id=${file.assignmentId}` : [{ used: 0 }];
+      return { likes: count.likes, likedByMe: false, remaining: Math.max(0, Math.min(galleryVoteLimit, galleryVoteLimit - usage.used)) };
+    });
   });

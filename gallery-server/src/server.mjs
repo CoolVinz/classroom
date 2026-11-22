@@ -109,7 +109,7 @@ class ClassroomGallery extends Room {
         (SELECT COUNT(*)::int FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id WHERE f.classroom_id=$1 AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$' AND s.archived_at IS NULL AND a.archived_at IS NULL) AS files,
         (SELECT COALESCE(MAX(f.created_at)::text,'') FROM classroom.files f WHERE f.classroom_id=$1 AND f.kind IN ('model','submission')) AS latest,
         (SELECT COUNT(*)::int FROM classroom.gallery_hidden_models WHERE classroom_id=$1) AS hidden,
-        (SELECT COUNT(*)::int FROM classroom.gallery_likes WHERE classroom_id=$1) AS likes,
+        (SELECT COALESCE(json_agg(json_build_array(file_id,likes) ORDER BY file_id)::text,'[]') FROM (SELECT file_id,COUNT(*)::int AS likes FROM classroom.gallery_likes WHERE classroom_id=$1 GROUP BY file_id) vote_counts) AS likes,
         (SELECT COALESCE(json_agg(json_build_array(id,student_number,display_name) ORDER BY student_number NULLS LAST,display_name,id)::text,'[]') FROM classroom.students WHERE classroom_id=$1 AND archived_at IS NULL) AS roster,
         (SELECT enabled FROM classroom.gallery_worlds WHERE classroom_id=$1) AS enabled`, [this.classroomId]);
       return JSON.stringify(rows[0]);

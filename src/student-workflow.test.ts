@@ -9,6 +9,7 @@ import { Elysia } from "elysia";
 import sharp from "sharp";
 
 const databaseUrl = process.env.CLASSROOM_TEST_DATABASE_URL;
+type GalleryVoteSummaryTest = { limit: number; blockTotals: { studentId: string; votes: number }[]; usage: { assignmentId: string; used: number }[]; myVotes: { fileId: string; hidden: boolean }[] };
 
 function thumbnailChunk(type: string, data: Buffer) {
   const chunk = Buffer.alloc(data.length + 12);
@@ -844,6 +845,50 @@ describe("student submission API", () => {
       expect(glbUpload.status).toBe(200);
       const glbFile = await glbUpload.json() as { id: string };
       await sql`INSERT INTO classroom.gallery_worlds(classroom_id,enabled) VALUES(${roomA},true) ON CONFLICT(classroom_id) DO UPDATE SET enabled=true`;
+      const voteFileIds = Array.from({ length: 11 }, () => randomUUID());
+      const earlierAssignmentId = randomUUID(), earlierAssignmentModelId = randomUUID();
+      await sql`INSERT INTO classroom.assignments(id,classroom_id,title,created_at) VALUES(${earlierAssignmentId},${roomA},'Earlier project',NOW()-INTERVAL '1 day')`;
+      await sql`INSERT INTO classroom.files(id,classroom_id,assignment_id,student_id,uploaded_by,kind,original_name,storage_name,media_type,size_bytes)
+        VALUES(${earlierAssignmentModelId},${roomA},${earlierAssignmentId},${studentB},${teacherId},'model','earlier.stl',${randomUUID()},'model/stl',8)`;
+      for (const [index, id] of voteFileIds.entries()) await sql`INSERT INTO classroom.files
+        (id,classroom_id,assignment_id,student_id,uploaded_by,kind,original_name,storage_name,media_type,size_bytes)
+        VALUES(${id},${roomA},${assignmentA},${studentB},${teacherId},'model',${`vote-${index + 1}.stl`},${randomUUID()},'model/stl',8)`;
+      const voteRequest = (suffix: string, method = "PUT", headers = studentHeaders) => app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery/files/${suffix}/like`, { method, headers }));
+      const voteSummary = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery/votes`, { headers: studentHeaders }));
+      expect(voteSummary.status).toBe(200);
+      expect(await voteSummary.json()).toMatchObject({ limit: 10, blockTotals: [], usage: [], myVotes: [] });
+      const concurrentVotes = await Promise.all(voteFileIds.map((id) => voteRequest(id)));
+      expect(concurrentVotes.map((response) => response.status).sort()).toEqual([...Array(10).fill(200), 409].sort());
+      const acceptedIds = voteFileIds.filter((_id, index) => concurrentVotes[index]?.status === 200);
+      const rejectedId = voteFileIds.find((_id, index) => concurrentVotes[index]?.status === 409)!;
+      const fullVoteSummary = await (await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery/votes`, { headers: studentHeaders }))).json() as GalleryVoteSummaryTest;
+      expect(fullVoteSummary).toMatchObject({ limit: 10, usage: [{ assignmentId: assignmentA, used: 10 }] });
+      expect(fullVoteSummary.myVotes).toHaveLength(10);
+      expect(fullVoteSummary.blockTotals).toContainEqual({ studentId: studentB, votes: 10 });
+      expect((await voteRequest(acceptedIds[0]!, "PUT")).status).toBe(200); // Retries do not spend another slot.
+      expect((await voteRequest(rejectedId)).status).toBe(409);
+      expect(await (await voteRequest(earlierAssignmentModelId)).json()).toMatchObject({ likedByMe: true, remaining: 9 });
+      expect((await (await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery/votes`, { headers: studentHeaders }))).json() as GalleryVoteSummaryTest).usage).toEqual(expect.arrayContaining([
+        { assignmentId: assignmentA, used: 10 }, { assignmentId: earlierAssignmentId, used: 1 },
+      ]));
+      const hiddenVote = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery/files/${acceptedIds[0]}/visibility`, {
+        method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ hidden: true }),
+      }));
+      expect(hiddenVote.status).toBe(200);
+      const hiddenVotes = await (await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery/votes`, { headers: studentHeaders }))).json() as GalleryVoteSummaryTest;
+      expect(hiddenVotes.myVotes.find((vote) => vote.fileId === acceptedIds[0])).toMatchObject({ hidden: true });
+      const visibleManifest = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery`, { headers: studentHeaders }));
+      expect((await visibleManifest.json() as { models: { id: string }[] }).models.some((model) => model.id === acceptedIds[0])).toBe(false);
+      const undoHiddenVote = await voteRequest(acceptedIds[0]!, "DELETE");
+      expect(await undoHiddenVote.json()).toMatchObject({ likedByMe: false, remaining: 1 });
+      expect((await (await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery/votes`, { headers: studentHeaders }))).json() as GalleryVoteSummaryTest).myVotes).toHaveLength(10);
+      expect((await voteRequest(rejectedId)).status).toBe(200);
+      expect((await voteRequest(peerFile)).status).toBe(409);
+      expect((await voteRequest(uploadedModel.id)).status).toBe(404); // Self-likes stay forbidden.
+      const teacherVotes = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery/votes`, { headers: teacherHeaders }));
+      expect(teacherVotes.status).toBe(200);
+      expect(await teacherVotes.json()).toMatchObject({ limit: 10, usage: [], myVotes: [] });
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery/votes`, { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).status).toBe(404);
       const worldContent = `http://localhost/api/classrooms/${roomA}/gallery/files/${glbFile.id}/content`;
       const glbRead = await app.handle(new Request(worldContent, { headers: studentHeaders }));
       expect(glbRead.status).toBe(200); expect(new Uint8Array(await glbRead.arrayBuffer())).toEqual(new Uint8Array(glbBytes));

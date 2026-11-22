@@ -16,6 +16,7 @@ import { canBoardTrain } from "../../gallery-server/src/train-rules.mjs";
 
 type User = { role: "owner" | "teacher" | "student"; displayName: string };
 type GalleryModel = { id: string; studentId: string; displayName: string; studentNumber: number | null; assignmentId: string; assignmentTitle: string; originalName: string; mediaType: string; materialAvailable: boolean; createdAt: string; hidden: boolean; likes: number; likedByMe: boolean };
+type VoteSummary = { limit: number; blockTotals: { studentId: string; votes: number }[]; usage: { assignmentId: string; assignmentTitle: string; used: number }[]; myVotes: { fileId: string; assignmentId: string; assignmentTitle: string; originalName: string; displayName: string; studentNumber: number | null; hidden: boolean; unavailable: boolean }[] };
 type TrainSettings = { mode: "auto" | "manual"; intervalSeconds: 60 | 120; startStudentId: string | null };
 type TrainView = TrainSettings & { active: boolean; x: number; z: number; rotation: number; phase: "waiting" | "boarding" | "moving" | "dwell"; stopId: string; nextStopId: string; departureAt: number; arrivalAt: number; seats: number; revision: number; layoutRoster: string };
 type Manifest = { enabled: boolean; classroomId: string; classroomName: string; blocks: { studentId: string; displayName: string; studentNumber: number | null; blockIndex: number; layoutIndex: number; archived: boolean }[]; models: GalleryModel[]; nextOffset: number | null; teacher: boolean; viewerStudentId: string | null; train: TrainSettings };
@@ -47,6 +48,8 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [models, setModels] = useState<GalleryModel[]>([]);
   const modelsRef = useRef(models);
+  const [voteSummary, setVoteSummary] = useState<VoteSummary | null>(null);
+  const voteSummaryRef = useRef(voteSummary);
   const [displayPages, setDisplayPages] = useState<Record<string, number>>({});
   const displayPagesRef = useRef(displayPages);
   const [selected, setSelected] = useState<GalleryModel | null>(null);
@@ -123,6 +126,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     return () => window.clearInterval(timer);
   }, [knockSeconds > 0]);
   useEffect(() => { modelsRef.current = models; }, [models]);
+  useEffect(() => { voteSummaryRef.current = voteSummary; }, [voteSummary]);
   useEffect(() => { displayPagesRef.current = displayPages; }, [displayPages]);
   useEffect(() => { manifestRef.current = manifest; }, [manifest]);
   useEffect(() => {
@@ -136,9 +140,13 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   wandRef.current = wandMode;
   appearanceRef.current = appearance;
   const load = useCallback(async (offset = 0) => {
-    const value = await api<Manifest>(apiPath(classroomId, `?offset=${offset}`));
+    const [value, votes] = await Promise.all([
+      api<Manifest>(apiPath(classroomId, `?offset=${offset}`)),
+      api<VoteSummary>(apiPath(classroomId, "/votes")).catch((reason) => { setError(reason instanceof Error ? reason.message : "โหลดโควตาโหวตไม่สำเร็จ"); return null; }),
+    ]);
     setManifest(value); setEnabled(value.enabled);
     setModels((current) => offset ? [...current, ...value.models] : value.models);
+    if (votes) setVoteSummary(votes);
   }, [classroomId]);
   const loadGalleryAccess = useCallback(async () => {
     setGalleryAccess(await api<GalleryAccess>(apiPath(classroomId, "/access")));
@@ -149,8 +157,8 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     let alive = true;
     void api<AvatarAppearance>("/gallery/avatar").then((value) => { if (alive) setAppearance(value); }).catch((reason) => { if (alive) setError(reason instanceof Error ? reason.message : "โหลดตัวละครไม่สำเร็จ"); });
     void api<{ url: string }>("/gallery/config").then((server) => { if (alive) setConfig(server.url); }).catch(() => {});
-    void api<Manifest>(apiPath(classroomId)).then((value) => {
-      if (alive) { setManifest(value); setEnabled(value.enabled); setModels(value.models); }
+    void Promise.all([api<Manifest>(apiPath(classroomId)), api<VoteSummary>(apiPath(classroomId, "/votes")).catch((reason) => { if (alive) setError(reason instanceof Error ? reason.message : "โหลดโควตาโหวตไม่สำเร็จ"); return null; })]).then(([value, votes]) => {
+      if (alive) { setManifest(value); setEnabled(value.enabled); setModels(value.models); if (votes) setVoteSummary(votes); }
     }).catch((reason) => {
       if (!alive) return;
       setEnabled(false);
@@ -196,8 +204,14 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     const modelMeshes = new Map<string, THREE.Object3D>();
     const renderedModels = new Set<string>();
     const modelRoots = new WeakMap<THREE.Object3D, string>();
+    const modelVoteBadges = new Map<string, { sprite: THREE.Sprite; votes: number }>();
     const textures: THREE.Texture[] = [];
-    const labelTexture = (text: string) => {
+    const disposeTrackedTexture = (texture: THREE.Texture | null) => {
+      if (!texture) return;
+      texture.dispose(); const index = textures.indexOf(texture); if (index >= 0) textures.splice(index, 1);
+    };
+    const voteColor = (votes: number, block = false) => votes >= (block ? 15 : 6) ? "#f1c75b" : votes >= (block ? 5 : 3) ? "#9db8c3" : "#bd8251";
+    const labelTexture = (text: string, votes = 0) => {
       const canvas = document.createElement("canvas"); canvas.width = 1024; canvas.height = 160;
       const context = canvas.getContext("2d")!;
       context.fillStyle = "#173f37"; context.fillRect(0, 0, canvas.width, canvas.height);
@@ -206,7 +220,8 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       context.textBaseline = "middle"; context.textAlign = "center"; context.fillStyle = "#b77f37";
       context.font = "bold 78px system-ui, sans-serif"; context.fillText(split < 0 ? "—" : text.slice(0, split), 112, 82);
       context.fillStyle = "#244c42"; context.textAlign = "left"; context.font = "bold 62px system-ui, sans-serif";
-      context.fillText(split < 0 ? text.slice(0, 28) : text.slice(split + 3, 34), 220, 82);
+      context.fillText(split < 0 ? text.slice(0, 28) : text.slice(split + 3, 34), 220, 82, votes > 0 ? 560 : 780);
+      if (votes > 0) { context.fillStyle = voteColor(votes, true); context.fillRect(814, 22, 190, 116); context.fillStyle = "#28483b"; context.textAlign = "center"; context.font = "bold 42px system-ui, sans-serif"; context.fillText(`★ ${votes}`, 909, 65); context.font = "bold 23px system-ui, sans-serif"; context.fillText(`ระดับ${votes >= 15 ? "ทอง" : votes >= 5 ? "เงิน" : "ทองแดง"}`, 909, 112); }
       const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace; textures.push(texture); return texture;
     };
     const landscapeGroup = new THREE.Group(); scene.add(landscapeGroup);
@@ -224,6 +239,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     const archSign = new THREE.Mesh(new THREE.PlaneGeometry(7.6, 1.35), new THREE.MeshBasicMaterial({ map: titleTexture })); archSign.position.set(0, 3.2, 17.66); entrance.add(archSign);
     const blockMap = new Map<string, Manifest["blocks"][number]>();
     const blockGroups = new Map<string, THREE.Group>();
+    const blockLabels = new Map<string, { mesh: THREE.Mesh; text: string; votes: number }>();
     const studentModels = new Map<string, GalleryModel[]>();
     const groupStudentModels = () => {
       studentModels.clear();
@@ -293,7 +309,9 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     let blockSignature = "", layoutChanged = false;
     const addBlock = (block: Manifest["blocks"][number]) => {
       const position = blockPosition(block.layoutIndex); const group = new THREE.Group(); group.position.set(position.x, 0, position.z); scene.add(group);
-      const label = new THREE.Mesh(new THREE.PlaneGeometry(9.1, 1.18), new THREE.MeshBasicMaterial({ map: labelTexture(`${block.studentNumber ?? "—"} · ${block.displayName}`) })); label.position.set(0, 2.85, -4.43); group.add(label);
+      const text = `${block.studentNumber ?? "—"} · ${block.displayName}`, votes = voteSummaryRef.current?.blockTotals.find((item) => item.studentId === block.studentId)?.votes ?? 0;
+      const label = new THREE.Mesh(new THREE.PlaneGeometry(9.1, 1.18), new THREE.MeshBasicMaterial({ map: labelTexture(text, votes) })); label.position.set(0, 2.85, -4.43); group.add(label);
+      blockLabels.set(block.studentId, { mesh: label, text, votes });
       blockMap.set(block.studentId, block); blockGroups.set(block.studentId, group);
     };
     const rebuildLandscape = (blocks: Manifest["blocks"][number][], layoutCount: number) => {
@@ -352,7 +370,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       const signature = JSON.stringify(blocks.map((block) => [block.studentId, block.layoutIndex, block.studentNumber, block.displayName]));
       if (signature === blockSignature) return;
       blockSignature = signature; layoutChanged = true;
-      for (const [studentId, group] of blockGroups) { scene.remove(group); disposeAvatarCharacter(group); blockGroups.delete(studentId); blockMap.delete(studentId); }
+      for (const [studentId, group] of blockGroups) { const label = blockLabels.get(studentId); if (label) disposeTrackedTexture((label.mesh.material as THREE.MeshBasicMaterial).map); scene.remove(group); disposeAvatarCharacter(group); blockGroups.delete(studentId); blockMap.delete(studentId); blockLabels.delete(studentId); }
       for (const block of blocks) if (current.has(block.studentId)) addBlock(block);
       rebuildLandscape(blocks, layoutCount);
       rebuildTrack(layoutCount);
@@ -378,6 +396,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       if (layoutChanged) {
         for (const modelId of [...renderedModels]) {
           evictModel(modelId);
+          removeModelVoteBadge(modelId);
           const exhibit = modelMeshes.get(modelId); if (exhibit) { scene.remove(exhibit); disposeAvatarCharacter(exhibit); modelMeshes.delete(modelId); }
           renderedModels.delete(modelId);
         }
@@ -396,8 +415,40 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       }
       for (const modelId of renderedModels) if (!visible.has(modelId)) {
         evictModel(modelId);
+        removeModelVoteBadge(modelId);
         const exhibit = modelMeshes.get(modelId); if (exhibit) { scene.remove(exhibit); disposeAvatarCharacter(exhibit); modelMeshes.delete(modelId); }
         renderedModels.delete(modelId);
+      }
+    };
+    const removeModelVoteBadge = (modelId: string) => {
+      const current = modelVoteBadges.get(modelId); if (!current) return;
+      current.sprite.parent?.remove(current.sprite); disposeTrackedTexture(current.sprite.material.map);
+      current.sprite.material.dispose(); modelVoteBadges.delete(modelId);
+    };
+    const createVoteBadge = (votes: number) => {
+      const canvas = document.createElement("canvas"); canvas.width = 256; canvas.height = 104;
+      const context = canvas.getContext("2d")!; context.fillStyle = voteColor(votes); context.fillRect(8, 8, 240, 88);
+      context.fillStyle = "#263d35"; context.textAlign = "center"; context.textBaseline = "middle"; context.font = "bold 42px system-ui, sans-serif"; context.fillText(`★ ${votes}`, 128, 37); context.font = "bold 18px system-ui, sans-serif"; context.fillText(`ระดับ${votes >= 6 ? "ทอง" : votes >= 3 ? "เงิน" : "ทองแดง"}`, 128, 74);
+      const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace; textures.push(texture);
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false })); sprite.position.set(0, 2.55, 0); sprite.scale.set(1.5, 0.61, 1); sprite.renderOrder = 3;
+      return sprite;
+    };
+    const syncVoteVisuals = () => {
+      const totals = new Map((voteSummaryRef.current?.blockTotals ?? []).map((item) => [item.studentId, item.votes]));
+      for (const [studentId, label] of blockLabels) {
+        const votes = totals.get(studentId) ?? 0;
+        if (votes === label.votes) continue;
+        const material = label.mesh.material as THREE.MeshBasicMaterial;
+        disposeTrackedTexture(material.map); material.map = labelTexture(label.text, votes); material.needsUpdate = true;
+        label.votes = votes;
+      }
+      const currentModels = new Map(modelsRef.current.map((item) => [item.id, item]));
+      for (const [modelId, exhibit] of modelMeshes) {
+        const item = currentModels.get(modelId), votes = item && !item.hidden ? item.likes : 0;
+        const current = modelVoteBadges.get(modelId);
+        if (current?.votes === votes) continue;
+        removeModelVoteBadge(modelId);
+        if (votes && votes > 0) { const sprite = createVoteBadge(votes); exhibit.add(sprite); modelVoteBadges.set(modelId, { sprite, votes }); }
       }
     };
     const raycaster = new THREE.Raycaster(); const pointer = new THREE.Vector2();
@@ -482,7 +533,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       castReadyAt.current = Date.now() + 2000; setCastReady(false); cooldownTimer = window.setTimeout(() => setCastReady(true), 2000);
     };
     let hiddenAt = document.hidden ? performance.now() : 0;
-    let syncedManifest = manifestRef.current, syncedModels = modelsRef.current, syncedPages = displayPagesRef.current;
+    let syncedManifest = manifestRef.current, syncedModels = modelsRef.current, syncedPages = displayPagesRef.current, syncedVotes = voteSummaryRef.current;
     const modelAbort = new AbortController();
     const loadedModels = new Map<string, { object: THREE.Group; triangles: number; textureBytes: number }>();
     const deferredModels = new Map<string, number>();
@@ -494,7 +545,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       residentTextureBytes -= loaded.textureBytes;
       residentTriangles -= loaded.triangles; loadedModels.delete(id);
     };
-    groupStudentModels(); syncExhibits();
+    groupStudentModels(); syncExhibits(); syncVoteVisuals();
     const updateNearbyModels = () => {
       const candidates = [...studentModels.entries()].flatMap(([studentId, owned]) => {
         const block = blockMap.get(studentId);
@@ -645,8 +696,9 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       for (const visual of boltMeshes.current.values()) visual.group.position.lerp(visual.target, 1 - Math.exp(-45 * dt));
       for (let i = effectMeshes.current.length - 1; i >= 0; i--) { const effect = effectMeshes.current[i]!; const left = effect.until - time; if (left <= 0) { scene.remove(effect.mesh); effect.mesh.geometry.dispose(); (effect.mesh.material as THREE.Material).dispose(); effectMeshes.current.splice(i, 1); } else { effect.mesh.scale.setScalar(1 + (1 - left / 450) * 2); (effect.mesh.material as THREE.MeshBasicMaterial).opacity = left / 450; } }
       if (time - lastModelScan > 500) { lastModelScan = time; updateNearbyModels(); }
-      if (syncedManifest !== manifestRef.current) { syncedManifest = manifestRef.current; syncBlocks(); syncExhibits(); }
-      if (syncedModels !== modelsRef.current || syncedPages !== displayPagesRef.current) { syncedModels = modelsRef.current; syncedPages = displayPagesRef.current; groupStudentModels(); syncExhibits(); }
+      if (syncedManifest !== manifestRef.current) { syncedManifest = manifestRef.current; syncBlocks(); syncExhibits(); syncVoteVisuals(); }
+      if (syncedModels !== modelsRef.current || syncedPages !== displayPagesRef.current) { syncedModels = modelsRef.current; syncedPages = displayPagesRef.current; groupStudentModels(); syncExhibits(); syncVoteVisuals(); }
+      if (syncedVotes !== voteSummaryRef.current) { syncedVotes = voteSummaryRef.current; syncVoteVisuals(); }
       const forward = Number(keys.has("w") || keys.has("arrowup") || touchRef.current.z < -0.15) - Number(keys.has("s") || keys.has("arrowdown") || touchRef.current.z > 0.15);
       const side = Number(keys.has("d") || keys.has("arrowright") || touchRef.current.x > 0.15) - Number(keys.has("a") || keys.has("arrowleft") || touchRef.current.x < -0.15);
       const bufferedTrain = interpolateTrain(trainSamples, time);
@@ -774,13 +826,17 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     try { await api(apiPath(classroomId, `/files/${model.id}/visibility`), { method: "PUT", body: JSON.stringify({ hidden: !model.hidden }) }); setModels((all) => all.map((item) => item.id === model.id ? { ...item, hidden: !item.hidden } : item)); setSelected(null); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "เปลี่ยนการแสดงโมเดลไม่สำเร็จ"); }
   }
-  async function like(model: GalleryModel) {
+  async function toggleVote(fileId: string, undo: boolean) {
     try {
-      const result = await api<{ likes: number }>(apiPath(classroomId, `/files/${model.id}/like`), { method: model.likedByMe ? "DELETE" : "PUT" });
-      setModels((all) => all.map((item) => item.id === model.id ? { ...item, likes: result.likes, likedByMe: !item.likedByMe } : item));
-      setSelected((item) => item?.id === model.id ? { ...item, likes: result.likes, likedByMe: !item.likedByMe } : item);
+      const result = await api<{ likes: number; likedByMe: boolean }>(apiPath(classroomId, `/files/${fileId}/like`), { method: undo ? "DELETE" : "PUT" });
+      setModels((all) => all.map((item) => item.id === fileId ? { ...item, likes: result.likes, likedByMe: result.likedByMe } : item));
+      setSelected((item) => item?.id === fileId ? { ...item, likes: result.likes, likedByMe: result.likedByMe } : item);
+      try { setVoteSummary(await api<VoteSummary>(apiPath(classroomId, "/votes"))); }
+      catch { setError("บันทึกโหวตแล้ว แต่โหลดยอดล่าสุดไม่สำเร็จ"); }
     } catch (reason) { setError(reason instanceof Error ? reason.message : "บันทึกการถูกใจไม่สำเร็จ"); }
   }
+
+  function like(model: GalleryModel) { return toggleVote(model.id, model.likedByMe); }
 
   async function saveAppearance() {
     setLoading(true); setError("");
@@ -801,6 +857,8 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   const selectedStudentWork = selected ? models.filter((item) => item.studentId === selected.studentId && !item.hidden) : [];
   const selectedPage = selected ? displayPages[selected.studentId] ?? 0 : 0;
   const selectedPageCount = Math.ceil(selectedStudentWork.length / 40);
+  const selectedVoteUsed = selected ? voteSummary?.usage.find((item) => item.assignmentId === selected.assignmentId)?.used ?? 0 : 0;
+  const selectedVotesRemaining = voteSummary ? Math.max(0, voteSummary.limit - selectedVoteUsed) : 10;
   function toggleFullscreen() {
     setImmersive(true);
     if (!document.fullscreenElement) void enterGalleryFullscreen();
@@ -824,6 +882,13 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         <div className="gallery-menu-header"><strong>เมนูโลกเสมือน</strong><div><button className="button button-quiet" onClick={() => setMenuOpen(false)}>ปิดเมนู</button>{close && <button className="button button-quiet" onClick={close}>กลับห้องเรียน</button>}</div></div>
         <div className="gallery-menu-room"><strong>{manifest?.classroomName ?? "โลกเสมือน"}</strong><small>{online} คนออนไลน์ · WASD/ลูกศร เดิน · Space กระโดด · ลากเพื่อหมุนมุมมอง</small></div>
         {user.role === "student" && <div className="gallery-attendance"><StudentAttendance /></div>}
+        {user.role === "student" && <section className="gallery-management gallery-vote-list"><strong>โหวตผลงานของเพื่อน · ไม่เกิน 10 ครั้งต่องาน</strong>
+          {voteSummary?.usage.map((item) => <small key={item.assignmentId}>{item.assignmentTitle}: ใช้แล้ว {item.used}/{voteSummary.limit} · เหลือ {Math.max(0, voteSummary.limit - item.used)}</small>)}
+          {voteSummary?.myVotes.length ? voteSummary.myVotes.map((vote) => <div className="gallery-vote-entry" key={vote.fileId}>
+            <span><strong>{vote.studentNumber ?? "—"}. {vote.displayName}</strong><small>{vote.assignmentTitle} · {vote.originalName}{vote.hidden ? " · ครูซ่อนผลงาน" : vote.unavailable ? " · งาน/พื้นที่นี้ไม่แสดงแล้ว" : ""}</small></span>
+            <button className="text-button" onClick={() => void toggleVote(vote.fileId, true)}>ยกเลิก</button>
+          </div>) : <small>{voteSummary ? "ยังไม่ได้โหวต · ยกเลิกโหวตแล้วจะได้สิทธิ์คืน" : "กำลังโหลดโหวต…"}</small>}
+        </section>}
         <aside className="gallery-train-panel" aria-label="รถไฟเที่ยวชมโลกเสมือน">
           <div className="gallery-train-status"><strong>🚂 รถไฟเที่ยวชม</strong><span>{trainStatus}</span><small>{trainView?.active ? `${trainView.seats}/12 ที่นั่ง · ${trainView.mode === "auto" ? "อัตโนมัติ" : "เริ่มโดยครู"}` : ""}</small></div>
           <div className="gallery-train-actions">{teacher && trainView?.active && trainView.mode === "manual" && trainView.phase === "waiting" && <button className="button button-quiet" onClick={() => trainCommand("train-start")}>เริ่มเที่ยวรถ · นับถอยหลัง 10 วินาที</button>}</div>
@@ -882,7 +947,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       {trainAction && <button className="gallery-train-quick-action button button-primary" onClick={() => trainCommand(trainAction === "board" ? "train-board" : "train-leave")}>{trainAction === "board" ? "ขึ้นรถไฟ" : "ลงจากรถไฟ"}</button>}
       <div className="gallery-touch" role="group" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); moveTouchJoystick(event, touchKnobRef.current, touchRef.current); }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) moveTouchJoystick(event, touchKnobRef.current, touchRef.current); }} onPointerUp={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} onPointerCancel={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} onLostPointerCapture={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} aria-label="ลากจอยสติ๊กเพื่อเดิน"><span ref={touchKnobRef} className="gallery-touch-knob" aria-hidden="true" /></div>
       <button className="gallery-jump button button-quiet" disabled={customizerOpen || knockSeconds > 0} onPointerDown={(event) => { event.preventDefault(); jumpRef.current = true; }} onClick={(event) => { if (event.detail === 0) jumpRef.current = true; }}>กระโดด ↑</button>
-      {selected && <aside className="gallery-inspect"><button className="icon-button" onClick={() => setSelected(null)} aria-label="ปิด">×</button><p className="eyebrow">{selected.displayName} · เลขที่ {selected.studentNumber ?? "—"}</p><h3>{selected.originalName}</h3><p className="muted">{selected.assignmentTitle}</p><p>{selected.likes} ถูกใจ</p>{selectedPageCount > 1 && <div className="gallery-display-pages"><span>ผลงานในพื้นที่ {selectedPage * 40 + 1}–{Math.min(selectedPage * 40 + 40, selectedStudentWork.length)} จาก {selectedStudentWork.length}</span><button className="text-button" disabled={selectedPage === 0} onClick={() => { const next = selectedStudentWork[(selectedPage - 1) * 40]; setDisplayPages((pages) => ({ ...pages, [selected.studentId]: selectedPage - 1 })); if (next) setSelected(next); }}>ก่อนหน้า</button><button className="text-button" disabled={selectedPage + 1 >= selectedPageCount} onClick={() => { const next = selectedStudentWork[(selectedPage + 1) * 40]; setDisplayPages((pages) => ({ ...pages, [selected.studentId]: selectedPage + 1 })); if (next) setSelected(next); }}>ถัดไป</button></div>}{user.role === "student" && selected.studentId !== manifest?.viewerStudentId && <button className="button button-quiet" onClick={() => void like(selected)}>{selected.likedByMe ? "ยกเลิกถูกใจ" : "ถูกใจ"}</button>}{teacher && <button className="button button-quiet" onClick={() => void setHidden(selected)}>{selected.hidden ? "แสดงผลงาน" : "ซ่อนผลงาน"}</button>}<button className="button button-primary" onClick={() => setPreview(selected)}>เปิดดูโมเดล</button></aside>}
+      {selected && <aside className="gallery-inspect"><button className="icon-button" onClick={() => setSelected(null)} aria-label="ปิด">×</button><p className="eyebrow">{selected.displayName} · เลขที่ {selected.studentNumber ?? "—"}</p><h3>{selected.originalName}</h3><p className="muted">{selected.assignmentTitle}</p><p>{selected.likes} ถูกใจ{selected.likes >= 6 ? " · ระดับทอง" : selected.likes >= 3 ? " · ระดับเงิน" : selected.likes > 0 ? " · ระดับทองแดง" : ""}</p>{selectedPageCount > 1 && <div className="gallery-display-pages"><span>ผลงานในพื้นที่ {selectedPage * 40 + 1}–{Math.min(selectedPage * 40 + 40, selectedStudentWork.length)} จาก {selectedStudentWork.length}</span><button className="text-button" disabled={selectedPage === 0} onClick={() => { const next = selectedStudentWork[(selectedPage - 1) * 40]; setDisplayPages((pages) => ({ ...pages, [selected.studentId]: selectedPage - 1 })); if (next) setSelected(next); }}>ก่อนหน้า</button><button className="text-button" disabled={selectedPage + 1 >= selectedPageCount} onClick={() => { const next = selectedStudentWork[(selectedPage + 1) * 40]; setDisplayPages((pages) => ({ ...pages, [selected.studentId]: selectedPage + 1 })); if (next) setSelected(next); }}>ถัดไป</button></div>}{user.role === "student" && selected.studentId !== manifest?.viewerStudentId && <><small>เหลือ {selectedVotesRemaining}/{voteSummary?.limit ?? 10} โหวตสำหรับงานนี้</small><button className="button button-quiet" disabled={!selected.likedByMe && selectedVotesRemaining <= 0} onClick={() => void like(selected)}>{selected.likedByMe ? "ยกเลิกโหวต · ได้สิทธิ์คืน" : selectedVotesRemaining <= 0 ? "โหวตครบแล้ว" : "โหวตผลงานนี้"}</button></>}{teacher && <button className="button button-quiet" onClick={() => void setHidden(selected)}>{selected.hidden ? "แสดงผลงาน" : "ซ่อนผลงาน"}</button>}<button className="button button-primary" onClick={() => setPreview(selected)}>เปิดดูโมเดล</button></aside>}
       {customizerOpen && <CharacterCustomizer appearance={draftAppearance} onChange={setDraftAppearance} onCancel={() => setCustomizerOpen(false)} onSave={() => void saveAppearance()} saving={loading} error={error} />}
     </section>
     {preview && <ModelPreview file={preview} contentPath={galleryFileUrl(classroomId, preview.id, "content")} materialPath={preview.materialAvailable ? galleryFileUrl(classroomId, preview.id, "material") : undefined} close={() => setPreview(null)} />}
