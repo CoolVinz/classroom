@@ -4,12 +4,11 @@ import { Elysia } from "elysia";
 import { createStudentSession, sessionCookie } from "../auth/session";
 import { sql } from "../db/client";
 import { HttpError } from "../http-error";
-import { normalizeEmail } from "../security";
+import { googleWorkspaceDomain, normalizeEmail } from "../security";
 
 const google = new OAuth2Client();
 const appUrl = process.env.APP_URL ?? "http://localhost:3000";
 const clientId = () => process.env.GOOGLE_CLIENT_ID?.trim() ?? "";
-const workspaceDomain = () => (process.env.GOOGLE_WORKSPACE_DOMAIN?.trim() || "banjan.ac.th").toLowerCase();
 
 function loginRedirect(reason: "config" | "signin" | "domain" | "roster", returnPath = "/") {
   const safeReturn = /^\/quizzes\/[0-9a-f-]{36}\/?$/i.test(returnPath) ? returnPath : "/";
@@ -34,7 +33,7 @@ export const studentAuthRoutes = new Elysia({ prefix: "/api/auth/student" })
   .get("/config", () => ({
     enabled: Boolean(clientId()),
     clientId: clientId() || null,
-    domain: workspaceDomain(),
+    domain: googleWorkspaceDomain(),
     loginUri: new URL("/api/auth/student/google", appUrl).href,
   }))
   .post("/google", async ({ request }) => {
@@ -51,7 +50,7 @@ export const studentAuthRoutes = new Elysia({ prefix: "/api/auth/student" })
       payload = ticket.getPayload();
     } catch { return loginRedirect("signin", returnPath); }
 
-    const domain = workspaceDomain();
+    const domain = googleWorkspaceDomain();
     const email = normalizeEmail(payload?.email);
     const audiences = Array.isArray(payload?.aud) ? payload.aud : [payload?.aud];
     if (!payload?.sub || !email || payload.email_verified !== true || payload.hd?.toLowerCase() !== domain

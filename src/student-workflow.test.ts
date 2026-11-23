@@ -171,6 +171,53 @@ describe("student submission API", () => {
       let studentHeaders = { cookie: signedIn.headers.get("set-cookie")!.split(";")[0], origin: "http://localhost:3000" };
       const teacherHeaders = { cookie: `classroom_session=${teacherToken}`, origin: "http://localhost:3000" };
 
+      const refreshClasses = (headers?: HeadersInit) => app.handle(new Request("http://localhost/api/student/classrooms/refresh", { method: "POST", headers }));
+      const getClassIds = async (response: Response) => {
+        expect(response.status).toBe(200);
+        return (await response.json() as { classroomId: string }[]).map((room) => room.classroomId).sort();
+      };
+      expect((await refreshClasses()).status).toBe(401);
+      expect((await refreshClasses(teacherHeaders)).status).toBe(401);
+      expect((await refreshClasses({ ...studentHeaders, origin: "https://other.example" })).status).toBe(403);
+      const oldClasses = [roomA, roomB].sort();
+      expect(await getClassIds(await refreshClasses(studentHeaders))).toEqual(oldClasses);
+
+      const lateMember = randomUUID(); const occupiedMember = randomUUID(); const lateAssignment = randomUUID();
+      try {
+        await sql`INSERT INTO classroom.students (id, classroom_id, display_name, email) VALUES (${lateMember}, ${emptyRoom}, 'New membership', ${"wrong-" + accountEmail})`;
+        expect(await getClassIds(await refreshClasses(studentHeaders))).toEqual(oldClasses);
+        await sql`UPDATE classroom.students SET email = ${accountEmail}, archived_at = NOW() WHERE id = ${lateMember}`;
+        expect(await getClassIds(await refreshClasses(studentHeaders))).toEqual(oldClasses);
+        await sql`UPDATE classroom.students SET archived_at = NULL WHERE id = ${lateMember}`;
+        await sql`UPDATE classroom.classrooms SET archived_at = NOW() WHERE id = ${emptyRoom}`;
+        expect(await getClassIds(await refreshClasses(studentHeaders))).toEqual(oldClasses);
+        await sql`UPDATE classroom.classrooms SET archived_at = NULL WHERE id = ${emptyRoom}`;
+        await sql`INSERT INTO classroom.students (id, classroom_id, display_name, account_id, archived_at) VALUES (${occupiedMember}, ${emptyRoom}, 'Previous membership', ${accountId}, NOW())`;
+        expect(await getClassIds(await refreshClasses(studentHeaders))).toEqual(oldClasses);
+        await sql`DELETE FROM classroom.students WHERE id = ${occupiedMember}`;
+        const withNewClass = [...oldClasses, emptyRoom].sort();
+        const refreshed = await Promise.all([refreshClasses(studentHeaders), refreshClasses(studentHeaders)]);
+        for (const result of refreshed) expect(await getClassIds(result)).toEqual(withNewClass);
+
+        const listStudentAssignments = async () => {
+          const response = await app.handle(new Request("http://localhost/api/student/assignments", { headers: studentHeaders }));
+          expect(response.status).toBe(200);
+          return (await response.json() as { assignmentId: string }[]).map((assignment) => assignment.assignmentId).sort();
+        };
+        expect(await listStudentAssignments()).toEqual([assignmentA, assignmentB].sort());
+        await sql`INSERT INTO classroom.assignments (id, classroom_id, title) VALUES (${lateAssignment}, ${emptyRoom}, 'New assignment')`;
+        expect(await listStudentAssignments()).toEqual([assignmentA, assignmentB, lateAssignment].sort());
+        const lateFiles = () => app.handle(new Request(`http://localhost/api/student/classrooms/${emptyRoom}/assignments/${lateAssignment}/files`, { headers: studentHeaders }));
+        expect((await lateFiles()).status).toBe(200);
+        await sql`UPDATE classroom.students SET archived_at = NOW() WHERE id = ${lateMember}`;
+        expect((await lateFiles()).status).toBe(404);
+        expect(await getClassIds(await refreshClasses(studentHeaders))).toEqual(oldClasses);
+      } finally {
+        await sql`DELETE FROM classroom.assignments WHERE id = ${lateAssignment}`;
+        await sql`DELETE FROM classroom.students WHERE id IN (${lateMember}, ${occupiedMember})`;
+        await sql`UPDATE classroom.classrooms SET archived_at = NULL WHERE id = ${emptyRoom}`;
+      }
+
       const createGroupSet = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/group-sets`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title: "Project groups", studentLimit: 1, groupLimit: 3 }) }));
       expect(createGroupSet.status).toBe(200);
       const groupSet = await createGroupSet.json() as { id: string };
@@ -897,7 +944,7 @@ describe("student submission API", () => {
       expect((await voteRequest(rejectedId)).status).toBe(409);
       expect(await (await voteRequest(earlierAssignmentModelId)).json()).toMatchObject({ likedByMe: true, remaining: 9 });
       expect((await (await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery/votes`, { headers: studentHeaders }))).json() as GalleryVoteSummaryTest).usage).toEqual(expect.arrayContaining([
-        { assignmentId: assignmentA, used: 10 }, { assignmentId: earlierAssignmentId, used: 1 },
+        { assignmentId: assignmentA, assignmentTitle: "Build", used: 10 }, { assignmentId: earlierAssignmentId, assignmentTitle: "Earlier project", used: 1 },
       ]));
       const hiddenVote = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery/files/${acceptedIds[0]}/visibility`, {
         method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ hidden: true }),
@@ -917,6 +964,10 @@ describe("student submission API", () => {
       expect(teacherVotes.status).toBe(200);
       expect(await teacherVotes.json()).toMatchObject({ limit: 10, usage: [], myVotes: [] });
       expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery/votes`, { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).status).toBe(404);
+      await sql.begin(async (tx) => {
+        await tx`DELETE FROM classroom.files WHERE id = ANY(${[...voteFileIds, earlierAssignmentModelId]}::uuid[])`;
+        await tx`DELETE FROM classroom.assignments WHERE id = ${earlierAssignmentId}`;
+      });
       const worldContent = `http://localhost/api/classrooms/${roomA}/gallery/files/${glbFile.id}/content`;
       const glbRead = await app.handle(new Request(worldContent, { headers: studentHeaders }));
       expect(glbRead.status).toBe(200); expect(new Uint8Array(await glbRead.arrayBuffer())).toEqual(new Uint8Array(glbBytes));

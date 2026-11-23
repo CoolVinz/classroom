@@ -16,6 +16,7 @@ Authenticate owner and teacher accounts with passwords and students with verifie
 - Google ID tokens are verified for signature, audience, issuer, expiry, verified email, and the configured Workspace `hd` claim. A school email suffix alone is not sufficient.
 - First sign-in reuses a matching legacy student account when it has no conflicting Google subject, then attaches eligible active roster rows in a transaction. A conflicting account or roster link is rejected; accounts are never merged.
 - New student accounts are created only when an active, nonarchived classroom roster row matches the verified school email. Later sign-ins by the same Google subject continue only while an active classroom membership exists.
+- The student home calls `POST /api/student/classrooms/refresh` on entry and on request. A valid student session can link new active roster entries using its Google account's verified school email. The transaction skips existing or conflicting links and returns every active linked classroom, including classrooms without assignments.
 - Teacher and student sessions are stored in separate tables; a student session cannot authorize teacher APIs. The one-time migration clears existing student sessions and invitation/reset tokens while preserving teacher sessions and historical password hashes.
 - Student password and invitation endpoints return HTTP 410; old `/student/activate`, `/student/forgot`, and `/student/reset` links redirect to Google sign-in.
 

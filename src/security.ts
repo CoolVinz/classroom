@@ -56,6 +56,10 @@ export function normalizeEmail(value: string | null | undefined) {
   return email;
 }
 
+export function googleWorkspaceDomain() {
+  return (process.env.GOOGLE_WORKSPACE_DOMAIN?.trim() || "banjan.ac.th").toLowerCase();
+}
+
 export function studentEmailForCode(code: string | null | undefined) {
   return code && /^[0-9]+$/.test(code) ? `${code}@banjan.ac.th` : null;
 }

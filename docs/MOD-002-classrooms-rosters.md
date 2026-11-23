@@ -17,7 +17,7 @@ Let an authenticated teacher create and manage their own classrooms and student 
 - Create multiple independent group sets for different projects or equipment sessions. Each can limit students per group, total groups, or both; students beyond combined capacity remain unassigned.
 - Teachers create named groups, move students, preview a balanced random split, and apply it only if the set revision and roster snapshot still match. Sets move through private draft, open, locked, and archived states; teachers can edit locked sets and reopen them.
 - Students see only open or locked sets. In an open set they can create a group (joining it), join or switch groups, or leave. Capacity is checked transactionally. Archiving a student removes their group membership; restoring leaves them unassigned.
-- A verified student Google email automatically links matching active roster rows across classrooms on sign-in. Teachers can edit a roster email when it is missing or incorrect.
+- A verified student Google email links matching active roster rows across classrooms on sign-in or on refreshing the student home. Teachers can edit a roster email when it is missing or incorrect. Students can view all linked classrooms and filter assignments by classroom.
 
 ## Business rules
 

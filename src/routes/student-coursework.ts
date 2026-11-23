@@ -5,7 +5,7 @@ import { basename, resolve } from "node:path";
 import { requireStudent } from "../auth/session";
 import { sql } from "../db/client";
 import { HttpError } from "../http-error";
-import { checkRequestOrigin } from "../security";
+import { checkRequestOrigin, googleWorkspaceDomain } from "../security";
 import { deleteStoredFile, maxStoredBytes, saveFileThumbnail, saveStudentWorkingFile, storedFilePath, uploadRoot, uploadThumbnailPath, validateMaterialUpload, validateStudentUpload, validateThumbnail, validateWorkingFile } from "../file-storage";
 
 async function activeMembership(classroomId: string, assignmentId: string, accountId: string) {
@@ -23,6 +23,36 @@ async function activeMembership(classroomId: string, assignmentId: string, accou
 }
 
 export const studentCourseworkRoutes = new Elysia({ prefix: "/api/student" })
+  .post("/classrooms/refresh", async ({ request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireStudent(request);
+    return sql.begin(async (tx) => {
+      // Read the current Google identity under the same account lock used at sign-in.
+      const [account] = await tx<{ email: string }[]>`
+        SELECT email FROM classroom.student_accounts
+        WHERE id = ${actor.id} AND google_subject IS NOT NULL FOR NO KEY UPDATE
+      `;
+      if (account?.email.endsWith(`@${googleWorkspaceDomain()}`)) {
+        await tx`
+          UPDATE classroom.students AS candidate SET account_id = ${actor.id}
+          FROM classroom.classrooms AS c
+          WHERE candidate.classroom_id = c.id AND c.archived_at IS NULL
+            AND candidate.archived_at IS NULL AND candidate.account_id IS NULL
+            AND candidate.email = ${account.email}
+            AND NOT EXISTS (
+              SELECT 1 FROM classroom.students AS linked
+              WHERE linked.classroom_id = c.id AND linked.account_id = ${actor.id}
+            )
+        `;
+      }
+      return tx`
+        SELECT c.id AS "classroomId", c.name AS "classroomName"
+        FROM classroom.students AS s JOIN classroom.classrooms AS c ON c.id = s.classroom_id
+        WHERE s.account_id = ${actor.id} AND s.archived_at IS NULL AND c.archived_at IS NULL
+        ORDER BY c.name, c.id
+      `;
+    });
+  })
   .get("/assignments", async ({ request }) => {
     const actor = await requireStudent(request);
     return sql`

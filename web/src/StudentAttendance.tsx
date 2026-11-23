@@ -11,7 +11,7 @@ function showTime(value: string) {
   return new Intl.DateTimeFormat("th-TH", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Bangkok" }).format(new Date(value));
 }
 
-export function StudentAttendance() {
+export function StudentAttendance({ refreshVersion = 1 }: { refreshVersion?: number }) {
   const [lessons, setLessons] = useState<Lesson[]>([]);
   const [now, setNow] = useState(Date.now());
   const [selected, setSelected] = useState("");
@@ -21,13 +21,18 @@ export function StudentAttendance() {
     try { setLessons(await api<Lesson[]>("/student/lessons")); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "โหลดเวลาเรียนไม่สำเร็จ"); }
   }, []);
-  useEffect(() => { void load(); const timer = setInterval(() => void load(), 60000); return () => clearInterval(timer); }, [load]);
+  useEffect(() => {
+    if (!refreshVersion) return;
+    void load();
+    const timer = setInterval(() => void load(), 60000);
+    return () => clearInterval(timer);
+  }, [load, refreshVersion]);
   useEffect(() => {
     const tick = setInterval(() => setNow(Date.now()), 1000);
-    const refresh = () => { if (document.visibilityState === "visible") void load(); };
+    const refresh = () => { if (refreshVersion && document.visibilityState === "visible") void load(); };
     document.addEventListener("visibilitychange", refresh);
     return () => { clearInterval(tick); document.removeEventListener("visibilitychange", refresh); };
-  }, [load]);
+  }, [load, refreshVersion]);
 
   const active = lessons.filter((lesson) => now >= Date.parse(lesson.startsAt) && now < Date.parse(lesson.endsAt));
   useEffect(() => {

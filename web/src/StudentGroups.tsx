@@ -1,19 +1,28 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 
 type Member = { studentId: string; displayName: string; studentNumber: number | null };
 type StudentGroup = { id: string; name: string; members: Member[] };
 type GroupSet = { setId: string; classroomId: string; classroomName: string; title: string; studentLimit: number | null; groupLimit: number | null; status: "open" | "locked"; myGroupId: string | null; groups: StudentGroup[]; unassigned: Member[] };
 
-export function StudentGroups({ onError }: { onError: (message: string) => void }) {
+export function StudentGroups({ onError, refreshVersion }: { onError: (message: string) => void; refreshVersion: number }) {
   const [sets, setSets] = useState<GroupSet[]>([]);
   const [names, setNames] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
-  async function load() {
-    try { setSets(await api<GroupSet[]>("/student/group-sets")); }
-    catch (reason) { onError(reason instanceof Error ? reason.message : "โหลดกลุ่มไม่สำเร็จ"); }
-  }
-  useEffect(() => { void load(); }, []);
+  const load = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const next = await api<GroupSet[]>("/student/group-sets", { signal });
+      if (!signal?.aborted) setSets(next);
+    } catch (reason) {
+      if (!signal?.aborted) onError(reason instanceof Error ? reason.message : "โหลดกลุ่มไม่สำเร็จ");
+    }
+  }, [onError]);
+  useEffect(() => {
+    if (!refreshVersion) return;
+    const controller = new AbortController();
+    void load(controller.signal);
+    return () => controller.abort();
+  }, [load, refreshVersion]);
   async function act(work: () => Promise<unknown>) {
     setBusy(true);
     try { await work(); await load(); }
