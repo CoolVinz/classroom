@@ -140,6 +140,10 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
         `;
         if (body.archived) await tx`UPDATE classroom.attendance_presence SET active_view = NULL
           WHERE classroom_id = ${params.classroomId} AND student_id = ${params.studentId}`;
+        if (body.archived) {
+          await tx`DELETE FROM classroom.group_memberships WHERE student_id = ${params.studentId}`;
+          await tx`DELETE FROM classroom.student_groups g WHERE g.creator_student_id = ${params.studentId} AND NOT EXISTS (SELECT 1 FROM classroom.group_memberships m WHERE m.group_id = g.id)`;
+        }
       });
       return { ok: true };
     } catch (error) {

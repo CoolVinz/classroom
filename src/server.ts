@@ -19,6 +19,7 @@ import { quizRoutes, studentQuizRoutes } from "./routes/quizzes";
 import { appFramePolicy } from "./content-security-policy";
 import { galleryRoutes } from "./routes/gallery";
 import { gradebookRoutes } from "./routes/gradebook";
+import { groupSetRoutes } from "./routes/group-sets";
 
 const port = Number(process.env.PORT ?? 3000);
 const appUrl = process.env.APP_URL ?? "http://localhost:3000";
@@ -50,6 +51,7 @@ const app = new Elysia({ serve: { maxRequestBodySize: maxUploadBytes() + 1024 * 
   .use(studentQuizRoutes)
   .use(galleryRoutes)
   .use(gradebookRoutes)
+  .use(groupSetRoutes)
   .use(lessonPageApiRoutes)
   .use(teacherRoutes)
   .get("/student/*", () => new Response(null, { status: 302, headers: { Location: "/?role=student" } }))

@@ -3,6 +3,7 @@ import { api } from "./api";
 import { StudentAttendance } from "./StudentAttendance";
 import { FileThumbnail } from "./FileThumbnail";
 import { generateThumbnail } from "./thumbnail-jobs";
+import { StudentGroups } from "./StudentGroups";
 
 const ModelPreview = lazy(() => import("./ModelPreview"));
 export type StudentUser = { id: string; username: string; displayName: string; role: "student" };
@@ -131,6 +132,7 @@ export function StudentPortal({ user, logout, openWorld }: { user: StudentUser; 
       {error && <div className="notice" role="alert">{error}<button onClick={() => setError("")} aria-label="ปิด">×</button></div>}
       <div className="page-heading"><div><p className="eyebrow">พื้นที่นักเรียน</p><h1>งานของฉัน</h1><p className="muted page-description">ดูคำชี้แจงและไฟล์ใบงาน แล้วส่งงานของคุณ</p></div></div>
       <StudentAttendance />
+      <StudentGroups onError={setError}/>
       {(worlds.length > 0 || worldsError) && <section className="panel">
         <header className="panel-heading compact">
           <h2>โลกเสมือน</h2>

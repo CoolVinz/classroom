@@ -51,16 +51,16 @@ describe("student submission API", () => {
     const { sql } = await import("./db/client");
     const { createSession, createStudentSession } = await import("./auth/session");
     const { galleryRoutes } = await import("./routes/gallery");
-    const [{ authRoutes }, { studentAuthRoutes }, { classroomRoutes }, { courseworkRoutes }, { studentCourseworkRoutes }, { attendanceScheduleRoutes }, { studentAttendanceRoutes }, { lessonPageApiRoutes }, { quizRoutes, studentQuizRoutes }, { gradebookRoutes }, { handleAppError }] = await Promise.all([
+    const [{ authRoutes }, { studentAuthRoutes }, { classroomRoutes }, { courseworkRoutes }, { studentCourseworkRoutes }, { attendanceScheduleRoutes }, { studentAttendanceRoutes }, { lessonPageApiRoutes }, { quizRoutes, studentQuizRoutes }, { gradebookRoutes }, { groupSetRoutes }, { handleAppError }] = await Promise.all([
       import("./routes/auth"), import("./routes/student-auth"), import("./routes/classrooms"),
       import("./routes/coursework"), import("./routes/student-coursework"), import("./routes/attendance-schedule"), import("./routes/student-attendance"),
       import("./routes/lesson-pages"),
       import("./routes/quizzes"),
       import("./routes/gradebook"),
-      import("./error-handler"),
+      import("./routes/group-sets"), import("./error-handler"),
     ]);
     const { ensureUploadRoot, cleanupUnusedLessonImages } = await import("./file-storage");
-    const app = new Elysia().onError(handleAppError).use(authRoutes).use(studentAuthRoutes).use(classroomRoutes).use(attendanceScheduleRoutes).use(courseworkRoutes).use(studentCourseworkRoutes).use(studentAttendanceRoutes).use(quizRoutes).use(studentQuizRoutes).use(gradebookRoutes).use(lessonPageApiRoutes).use(galleryRoutes);
+    const app = new Elysia().onError(handleAppError).use(authRoutes).use(studentAuthRoutes).use(classroomRoutes).use(attendanceScheduleRoutes).use(courseworkRoutes).use(studentCourseworkRoutes).use(studentAttendanceRoutes).use(quizRoutes).use(studentQuizRoutes).use(gradebookRoutes).use(groupSetRoutes).use(lessonPageApiRoutes).use(galleryRoutes);
     const teacherId = randomUUID(); const accountId = randomUUID();
     const roomA = randomUUID(); const roomB = randomUUID(); const emptyRoom = randomUUID();
     const studentA = randomUUID(); const studentB = randomUUID(); const studentC = randomUUID(); const studentD = randomUUID();
@@ -170,6 +170,34 @@ describe("student submission API", () => {
       studentToken = signedIn.headers.get("set-cookie")!.split(";")[0].split("=")[1];
       let studentHeaders = { cookie: signedIn.headers.get("set-cookie")!.split(";")[0], origin: "http://localhost:3000" };
       const teacherHeaders = { cookie: `classroom_session=${teacherToken}`, origin: "http://localhost:3000" };
+
+      const createGroupSet = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/group-sets`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ title: "Project groups", studentLimit: 1, groupLimit: 3 }) }));
+      expect(createGroupSet.status).toBe(200);
+      const groupSet = await createGroupSet.json() as { id: string };
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/group-sets`, { headers: studentHeaders }))).status).toBe(401);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/group-sets`, { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).status).toBe(404);
+      const createTeacherGroup = (name: string) => app.handle(new Request(`http://localhost/api/classrooms/${roomA}/group-sets/${groupSet.id}/groups`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ name }) }));
+      const firstGroupResponse = await createTeacherGroup("Blue"); const secondGroupResponse = await createTeacherGroup("Green");
+      expect(firstGroupResponse.status).toBe(200); expect(secondGroupResponse.status).toBe(200);
+      const firstGroup = await firstGroupResponse.json() as { id: string }; const secondGroup = await secondGroupResponse.json() as { id: string };
+      expect((await app.handle(new Request("http://localhost/api/student/group-sets", { headers: studentHeaders })).then((r) => r.json()) as { setId: string }[]).some((s) => s.setId === groupSet.id)).toBe(false);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/group-sets/${groupSet.id}/open`, { method: "POST", headers: teacherHeaders }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/group-sets/${groupSet.id}/memberships/${studentA}`, { method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ groupId: firstGroup.id }) }))).status).toBe(200);
+      const studentGroups = () => app.handle(new Request("http://localhost/api/student/group-sets", { headers: studentHeaders }));
+      expect((await studentGroups().then((r) => r.json()) as { setId: string; myGroupId: string }[]).find((s) => s.setId === groupSet.id)?.myGroupId).toBe(firstGroup.id);
+      expect((await app.handle(new Request(`http://localhost/api/student/classrooms/${roomA}/group-sets/${groupSet.id}/groups/${secondGroup.id}/join`, { method: "POST", headers: studentHeaders }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/student/classrooms/${roomA}/group-sets/${groupSet.id}/groups`, { method: "POST", headers: { ...studentHeaders, "content-type": "application/json" }, body: JSON.stringify({ name: "Student group" }) }))).status).toBe(409);
+      expect((await app.handle(new Request(`http://localhost/api/student/classrooms/${roomA}/group-sets/${groupSet.id}/membership`, { method: "DELETE", headers: studentHeaders }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/group-sets/${groupSet.id}/groups/${secondGroup.id}`, { method: "DELETE", headers: teacherHeaders }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/student/classrooms/${roomA}/group-sets/${groupSet.id}/groups`, { method: "POST", headers: { ...studentHeaders, "content-type": "application/json" }, body: JSON.stringify({ name: "Student group" }) }))).status).toBe(200);
+      const previewGroups = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/group-sets/${groupSet.id}/random-preview`, { method: "POST", headers: teacherHeaders }));
+      expect(previewGroups.status).toBe(200);
+      const previewBody = await previewGroups.json() as { revision: number; rosterFingerprint: string; groups: { name: string; studentIds: string[] }[]; unassigned: string[] };
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/group-sets/${groupSet.id}/random-apply`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify(previewBody) }))).status).toBe(200);
+      const changedPreview = await (await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/group-sets/${groupSet.id}/random-preview`, { method: "POST", headers: teacherHeaders }))).json() as typeof previewBody;
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/group-sets/${groupSet.id}/lock`, { method: "POST", headers: teacherHeaders }))).status).toBe(200);
+      expect((await app.handle(new Request(`http://localhost/api/student/classrooms/${roomA}/group-sets/${groupSet.id}/membership`, { method: "DELETE", headers: studentHeaders }))).status).toBe(409);
+      expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/group-sets/${groupSet.id}/random-apply`, { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify(changedPreview) }))).status).toBe(409);
 
       const initialGradebook = await app.handle(new Request(`http://localhost/api/classrooms/${roomB}/gradebook`, { headers: teacherHeaders }));
       expect(initialGradebook.status).toBe(200);
