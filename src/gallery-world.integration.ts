@@ -10,7 +10,7 @@ import { Client, type Room } from "@colyseus/sdk";
 import { Elysia } from "elysia";
 
 const database = process.env.CLASSROOM_TEST_DATABASE_URL;
-test.skipIf(!database)("a student's own 3D upload unlocks gallery access in both entry modes", async () => {
+test.skipIf(!database)("checks gallery admission, train respawns and vehicle controls in a live room", async () => {
   process.env.DATABASE_URL = database!;
   process.env.DATABASE_SSL = process.env.CLASSROOM_TEST_DATABASE_SSL ?? "disable";
   process.env.APP_URL = "http://localhost:3000";
@@ -55,7 +55,7 @@ test.skipIf(!database)("a student's own 3D upload unlocks gallery access in both
     };
     const initialManifest = await (await request(teacherToken)).json();
     expect(initialManifest.enabled).toBe(false);
-    expect(initialManifest.train).toEqual({ mode: "auto", intervalSeconds: 120, startStudentId: null });
+    expect(initialManifest.train).toEqual({ mode: "auto", intervalSeconds: 120, startStudentId: null, stationWaitSeconds: {} });
     expect(initialManifest.blocks[0]).toMatchObject({ studentId: member, studentNumber: 1, layoutIndex: 0 });
     const entrySettings = await (await request(teacherToken, "/access")).json();
     expect(entrySettings).toMatchObject({ mode: "submission", requiredAssignmentId: assignment, requiredAssignmentTitle: "Synthetic current assignment" });
@@ -95,18 +95,51 @@ test.skipIf(!database)("a student's own 3D upload unlocks gallery access in both
     expect((await request(studentToken)).status).toBe(200);
     const currentAssignment = assignment;
     expect((await request(studentToken, "/train", "PUT", { mode: "manual", intervalSeconds: 60, startStudentId: member })).status).toBe(401);
-    expect((await request(teacherToken, "/train", "PUT", { mode: "manual", intervalSeconds: 60, startStudentId: member })).status).toBe(200);
+    const waits = { entrance: 5, "row-1": 7 };
+    expect((await request(teacherToken, "/train", "PUT", { mode: "manual", intervalSeconds: 60, startStudentId: member, stationWaitSeconds: waits })).status).toBe(200);
     const configured = await (await request(teacherToken)).json();
-    expect(configured.train).toEqual({ mode: "manual", intervalSeconds: 60, startStudentId: member });
+    expect(configured.train).toEqual({ mode: "manual", intervalSeconds: 60, startStudentId: member, stationWaitSeconds: waits });
     expect((await request(teacherToken, "/train", "PUT", { mode: "auto", intervalSeconds: 30, startStudentId: member })).status).toBe(422);
+    expect((await request(teacherToken, "/train", "PUT", { mode: "manual", intervalSeconds: 60, stationWaitSeconds: { entrance: 2 } })).status).toBe(422);
+    expect((await request(teacherToken, "/train", "PUT", { mode: "manual", intervalSeconds: 60, stationWaitSeconds: { "row-2": 12 } })).status).toBe(400);
+    expect((await (await request(teacherToken, "", "GET", undefined, other)).json()).train.stationWaitSeconds).toEqual({});
     await request(teacherToken, "/train", "PUT", { mode: "manual", intervalSeconds: 60, startStudentId: null });
     expect((await request(studentToken, "/ticket", "POST", undefined, other)).status).toBe(404);
     const teacherRoom = await join(teacherToken), studentRoom = await join(studentToken);
-    const train = (teacherRoom.state as any).train;
+    const scene = (room: Room) => room.state as any;
+    const rider = (room: Room) => scene(room).players.get(room.sessionId);
+    const train = scene(teacherRoom).train;
+    const waitFor = async (condition: () => boolean, limit = 4000) => {
+      const deadline = Date.now() + limit;
+      while (!condition() && Date.now() < deadline) await Bun.sleep(30);
+      expect(condition()).toBe(true);
+    };
+    const vehicleCommand = async (room: Room, action: string, kind: string, confirmedDriverId?: string) => {
+      const vehicle = scene(room).vehicles.get(kind);
+      const result = new Promise<{ ok: boolean }>((resolve) => room.onMessage("vehicle-result", resolve));
+      room.send("vehicle-" + action, { kind, revision: vehicle?.revision ?? 0, confirmedDriverId: confirmedDriverId ?? vehicle?.driverId ?? "" });
+      return (await Promise.race([result, Bun.sleep(2000).then(() => null)]))?.ok;
+    };
+    const moveTo = async (room: Room, x: number, z: number) => {
+      for (let step = 0; step < 70; step++) {
+        const player = rider(room);
+        const dx = x - player.x, dz = z - player.z, distance = Math.hypot(dx, dz);
+        if (distance < 0.35) return;
+        const scale = Math.min(1, 0.5 / distance);
+        room.send("move", { dx: dx * scale, dz: dz * scale, sequence: player.sequence + 1, movementEpoch: player.movementEpoch });
+        await Bun.sleep(120);
+      }
+      throw new Error("Could not move the synthetic avatar");
+    };
     expect(train?.active).toBe(true);
+    expect(await vehicleCommand(studentRoom, "reset", "bike")).toBe(false);
+    expect(await vehicleCommand(teacherRoom, "reset", "car")).toBe(false);
     const trainStartResult = new Promise<{ ok: boolean }>((resolve) => teacherRoom.onMessage("train-result", resolve));
     teacherRoom.send("train-start", { revision: train.revision });
     expect((await Promise.race([trainStartResult, Bun.sleep(2000).then(() => ({ ok: false }))])).ok).toBe(true);
+    await waitFor(() => train.phase === "boarding");
+    const departure = train.departureAt;
+    expect(departure - Date.now()).toBeGreaterThan(4500);
     await Bun.sleep(550);
     const boardResult = new Promise<{ ok: boolean }>((resolve) => teacherRoom.onMessage("train-result", resolve));
     teacherRoom.send("train-board", { revision: train.revision });
@@ -122,10 +155,55 @@ test.skipIf(!database)("a student's own 3D upload unlocks gallery access in both
     const studentCast = new Promise<{ ok: boolean }>((resolve) => studentRoom.onMessage("cast-result", resolve));
     studentRoom.send("cast", { shotId: randomUUID(), dx: 0, dy: 0, dz: 1 });
     expect((await Promise.race([studentCast, Bun.sleep(2000).then(() => ({ ok: true }))])).ok).toBe(false);
+    expect((await request(teacherToken, "/train", "PUT", { mode: "manual", intervalSeconds: 60, stationWaitSeconds: { entrance: 3, "row-1": 4 } })).status).toBe(200);
+    expect(train.departureAt).toBe(departure);
+    await moveTo(studentRoom, 0, -4);
+    await waitFor(() => rider(studentRoom).knockCause === "train", 6500);
+    const respawnAt = rider(studentRoom).respawnAt;
+    await studentRoom.leave();
+    const afterTrainHit = await join(studentToken);
+    expect(rider(afterTrainHit)).toMatchObject({ knocked: true, knockCause: "train", respawnAt });
+    await waitFor(() => scene(teacherRoom).train.phase === "dwell");
+    expect(train.departureAt - train.arrivalAt).toBe(7000);
+    await waitFor(() => !rider(afterTrainHit).knocked, 11000);
+    expect(rider(afterTrainHit)).toMatchObject({ x: -8, z: 11 });
+    expect(rider(afterTrainHit).protectedUntil).toBeGreaterThan(Date.now());
+
+    await sql`UPDATE classroom.teachers SET role='owner' WHERE id=${teacher}`;
+    expect(await vehicleCommand(teacherRoom, "reset", "car")).toBe(true);
+    await waitFor(() => scene(afterTrainHit).vehicles.has("car"));
+    expect(await vehicleCommand(afterTrainHit, "enter", "car")).toBe(false);
+    await Promise.all([moveTo(teacherRoom, 11, 11), moveTo(afterTrainHit, 12, 11)]);
+    const contenders = await Promise.all([vehicleCommand(teacherRoom, "enter", "car"), vehicleCommand(afterTrainHit, "enter", "car")]);
+    expect(contenders.sort()).toEqual([false, true]);
+    await waitFor(() => Boolean(scene(teacherRoom).vehicles.get("car").driverId));
+    const driver = scene(teacherRoom).vehicles.get("car").driverId === teacherRoom.sessionId ? teacherRoom : afterTrainHit;
+    await waitFor(() => rider(driver).vehicleId === "car");
+    const car = scene(driver).vehicles.get("car");
+    const initialZ = car.z;
+    for (let step = 0; step < 6; step++) {
+      driver.send("vehicle-input", { revision: car.revision, epoch: rider(driver).movementEpoch, throttle: 1, turn: 0, lift: 0 });
+      await Bun.sleep(80);
+    }
+    await waitFor(() => car.z < initialZ - 1);
+    await Bun.sleep(450);
+    const stoppedZ = car.z;
+    await Bun.sleep(250);
+    expect(car.z).toBe(stoppedZ);
+    expect(await vehicleCommand(teacherRoom, "reset", "car", "")).toBe(false);
+    await Bun.sleep(320);
+    expect(await vehicleCommand(teacherRoom, "reset", "car")).toBe(true);
+    await waitFor(() => !rider(driver).vehicleId);
+    expect(rider(driver)).toMatchObject({ x: 14.5, z: 11 });
+    await Bun.sleep(320);
+    expect(await vehicleCommand(teacherRoom, "reset", "helicopter")).toBe(true);
+    await sql`UPDATE classroom.teachers SET role='teacher' WHERE id=${teacher}`;
+    await Bun.sleep(320);
+    expect(await vehicleCommand(teacherRoom, "reset", "bike")).toBe(false);
     const { ticket: preRevocationTicket } = await (await request(studentToken, "/ticket", "POST")).json();
-    const revoked = new Promise<number>((resolve) => studentRoom.onLeave(resolve));
+    const revoked = new Promise<number>((resolve) => afterTrainHit.onLeave(resolve));
     expect((await request(teacherToken, `/access/${member}`, "PUT", { assignmentId: currentAssignment, approved: false })).status).toBe(200);
-    studentRoom.send("refresh-avatar");
+    afterTrainHit.send("refresh-avatar");
     expect(await Promise.race([revoked, Bun.sleep(3000).then(() => -1)])).toBe(4003);
     expect((await request(studentToken, "/ticket", "POST")).status).toBe(403);
     await expect(client.joinOrCreate("classroom", { classroomId: classroom, ticket: preRevocationTicket })).rejects.toThrow();
@@ -170,4 +248,4 @@ test.skipIf(!database)("a student's own 3D upload unlocks gallery access in both
     await sql`DELETE FROM classroom.teachers WHERE id=${teacher}`;
     await rm(uploadDir, { recursive: true, force: true });
   }
-}, 20000);
+}, 45000);

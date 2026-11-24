@@ -6,15 +6,18 @@ import { boundedMove } from "./movement.mjs";
 import { applyAppearance } from "./avatar.mjs";
 import { advanceBolt, knockPlayer, playerHitFraction, respawnPlayer, validAim } from "./combat.mjs";
 import { databaseConfig } from "./database-config.mjs";
-import { distanceToNextStation, TRAIN_BOARDING_MS, TRAIN_DWELL_MS, TRAIN_SPEED, trainTrack } from "./train-layout.mjs";
-import { canBoardTrain, firstDepartureAt, nextDepartureAt } from "./train-rules.mjs";
+import { distanceToNextStation, TRAIN_SPEED, trainTrack } from "./train-layout.mjs";
+import { canBoardTrain, firstDepartureAt, nextDepartureAt, stationWaitMs } from "./train-rules.mjs";
+import { advanceVehicle, hitsMovingBody, LANDING_HEIGHT, trainBodies, validVehicleInput, VEHICLE_BAY_Z, VEHICLE_ENTER_DISTANCE, vehicleKinds, vehicleSpecs } from "./vehicles.mjs";
 
 if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
 const pool = new pg.Pool(databaseConfig());
-const Player = schema({ displayName: t.string(), role: t.string(), skinColor: t.string(), hairColor: t.string(), shirtColor: t.string(), trousersColor: t.string(), hairStyle: t.string(), hatStyle: t.string(), glassesStyle: t.string(), shoeStyle: t.string(), hatColor: t.string(), glassesColor: t.string(), shoeColor: t.string(), x: t.number().default(0), z: t.number().default(0), rotation: t.number().default(0), sequence: t.number().default(0), jump: t.number().default(0), movementEpoch: t.number().default(0), knocked: t.boolean().default(false), respawnAt: t.number().default(0), protectedUntil: t.number().default(0), trainSeat: t.number().default(-1) });
+const Player = schema({ displayName: t.string(), role: t.string(), skinColor: t.string(), hairColor: t.string(), shirtColor: t.string(), trousersColor: t.string(), hairStyle: t.string(), hatStyle: t.string(), glassesStyle: t.string(), shoeStyle: t.string(), hatColor: t.string(), glassesColor: t.string(), shoeColor: t.string(), x: t.number().default(0), z: t.number().default(0), rotation: t.number().default(0), sequence: t.number().default(0), jump: t.number().default(0), movementEpoch: t.number().default(0), knocked: t.boolean().default(false), knockCause: t.string().default(""), vehicleId: t.string().default(""), respawnAt: t.number().default(0), protectedUntil: t.number().default(0), trainSeat: t.number().default(-1) });
 const Bolt = schema({ id: t.string(), x: t.number(), y: t.number(), z: t.number() });
 const Train = schema({ active: t.boolean().default(false), x: t.number().default(0), z: t.number().default(2), rotation: t.number().default(0), phase: t.string().default("waiting"), stopId: t.string().default("entrance"), nextStopId: t.string().default(""), departureAt: t.number().default(0), arrivalAt: t.number().default(0), mode: t.string().default("auto"), intervalSeconds: t.number().default(120), seats: t.number().default(0), revision: t.number().default(0), startStudentId: t.string().default(""), layoutRoster: t.string().default("[]") });
-const GalleryState = schema({ players: t.map(Player), bolts: t.map(Bolt), train: Train });
+const Vehicle = schema({ kind: t.string(), x: t.number(), y: t.number(), z: t.number(), rotation: t.number(), revision: t.number(), driverId: t.string() });
+const GalleryState = schema({ players: t.map(Player), bolts: t.map(Bolt), train: Train, vehicles: t.map(Vehicle) });
+const idleVehicleInput = { throttle: 0, turn: 0, lift: 0 };
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
 async function consumeTicket(token, classroomId) {
@@ -46,11 +49,12 @@ async function consumeTicket(token, classroomId) {
   } finally { client.release(); }
 }
 
-async function stillAllowed(auth) {
+async function stillAllowed(auth, requireOwner = false) {
+  if (requireOwner && auth.role !== "teacher") return false;
   const query = auth.role === "teacher"
-    ? `SELECT EXISTS(SELECT 1 FROM classroom.sessions s JOIN classroom.teachers t ON t.id=s.teacher_id JOIN classroom.classrooms c ON c.id=$3 JOIN classroom.gallery_worlds w ON w.classroom_id=c.id WHERE s.token_hash=$1 AND s.teacher_id=$2 AND s.expires_at>NOW() AND t.active AND c.owner_id=t.id AND c.archived_at IS NULL) AS allowed`
+    ? `SELECT EXISTS(SELECT 1 FROM classroom.sessions s JOIN classroom.teachers t ON t.id=s.teacher_id JOIN classroom.classrooms c ON c.id=$3 JOIN classroom.gallery_worlds w ON w.classroom_id=c.id WHERE s.token_hash=$1 AND s.teacher_id=$2 AND s.expires_at>NOW() AND t.active AND c.owner_id=t.id AND c.archived_at IS NULL AND (NOT $4::boolean OR t.role='owner')) AS allowed`
     : `SELECT EXISTS(SELECT 1 FROM classroom.student_sessions ss JOIN classroom.students s ON s.id=$4 JOIN classroom.classrooms c ON c.id=s.classroom_id JOIN classroom.gallery_worlds w ON w.classroom_id=c.id JOIN classroom.gallery_student_entry e ON e.classroom_id=c.id AND e.student_id=s.id AND e.account_id=ss.account_id WHERE ss.token_hash=$1 AND ss.account_id=$2 AND ss.expires_at>NOW() AND s.classroom_id=$3 AND s.account_id=ss.account_id AND s.archived_at IS NULL AND c.archived_at IS NULL AND w.enabled AND e.entry_allowed) AS allowed`;
-  const values = auth.role === "teacher" ? [auth.sessionHash, auth.accountId, auth.classroomId] : [auth.sessionHash, auth.accountId, auth.classroomId, auth.studentId];
+  const values = [auth.sessionHash, auth.accountId, auth.classroomId, auth.role === "teacher" ? requireOwner : auth.studentId];
   const { rows } = await pool.query(query, values);
   return rows[0]?.allowed === true;
 }
@@ -76,10 +80,14 @@ class ClassroomGallery extends Room {
   pendingTrainConfig = null;
   trainLegIndex = 0;
   trainCircuitActive = false;
+  trainFinishing = false;
   trainLastTick = 0;
   trainLastDeparture = 0;
   trainSeats = new Map();
   trainCommandTimes = new Map();
+  vehicleInputs = new Map();
+  vehicleCommandTimes = new Map();
+  vehicleBounds = { minZ: -35 };
 
   async onAuth(_client, options) {
     if (typeof options.classroomId !== "string") throw new ServerError(4001, "Classroom is required");
@@ -94,7 +102,7 @@ class ClassroomGallery extends Room {
     this.onMessage("move", (client, message) => this.move(client, message));
     this.onMessage("jump", (client) => {
       const player = this.state.players.get(client.sessionId), now = Date.now();
-      if (!player || player.knocked || player.trainSeat >= 0 || now - (this.jumpTimes.get(client.sessionId) ?? 0) < 900) return;
+      if (!player || player.knocked || player.trainSeat >= 0 || player.vehicleId || now - (this.jumpTimes.get(client.sessionId) ?? 0) < 900) return;
       this.jumpTimes.set(client.sessionId, now); this.jumpStarts.set(client.sessionId, now); player.jump++;
     });
     this.onMessage("cast", (client, message) => { void this.cast(client, message).catch(() => client.send("cast-result", { ok: false })); });
@@ -102,6 +110,12 @@ class ClassroomGallery extends Room {
     this.onMessage("train-start", (client, message) => { void this.startTrain(client, message).catch(() => client.send("train-result", { ok: false, message: "เริ่มรถไฟไม่ได้" })); });
     this.onMessage("train-board", (client, message) => { void this.boardTrain(client, message).catch(() => client.send("train-result", { ok: false, message: "ขึ้นรถไฟไม่ได้" })); });
     this.onMessage("train-leave", (client, message) => { void this.leaveTrain(client, message).catch(() => client.send("train-result", { ok: false, message: "ลงจากรถไฟไม่ได้" })); });
+    for (const action of ["reset", "enter", "exit"]) {
+      this.onMessage("vehicle-" + action, (client, message) => {
+        void this.vehicleCommand(client, action, message).catch(() => client.send("vehicle-result", { ok: false, message: "ใช้ยานพาหนะไม่ได้" }));
+      });
+    }
+    this.onMessage("vehicle-input", (client, message) => this.vehicleInput(client, message));
     this.state.train = new Train();
     await this.refreshTrainConfiguration(true).catch(() => {});
     const readSignature = async () => {
@@ -138,7 +152,7 @@ class ClassroomGallery extends Room {
         if (auth && !(await stillAllowed(auth).catch(() => false))) client.leave(4003, "Classroom access expired");
       }
     }, 15000);
-    this.combatTimer = setInterval(() => { this.updateCombat(); this.updateTrain(); }, 50);
+    this.combatTimer = setInterval(() => { this.updateCombat(); this.updateTrain(); this.updateVehicles(); }, 50);
     this.trainSettingsTimer = setInterval(() => { void this.refreshTrainConfiguration().catch(() => {}); }, 5000);
   }
 
@@ -153,11 +167,8 @@ class ClassroomGallery extends Room {
     player.displayName = auth.displayName;
     player.role = auth.role;
     applyAppearance(player, auth.appearance);
-    let life = this.lifeStates.get(auth.accountId);
-    if (life?.knocked && life.respawnAt <= Date.now()) {
-      life = { x: 0, z: 0, rotation: 0, knocked: false, respawnAt: 0, protectedUntil: Date.now() + 3000, movementEpoch: life.movementEpoch + 1 };
-      this.lifeStates.set(auth.accountId, life);
-    }
+    const life = this.lifeStates.get(auth.accountId);
+    if (life) respawnPlayer(life, Date.now());
     if (life && (life.knocked || life.protectedUntil > Date.now())) Object.assign(player, life);
     else { player.x = Math.random() * 4 - 2; player.z = Math.random() * 4 - 2; }
     player.trainSeat = -1;
@@ -167,7 +178,7 @@ class ClassroomGallery extends Room {
 
   move(client, message) {
     const player = this.state.players.get(client.sessionId);
-    if (!player || !message || player.knocked || player.trainSeat >= 0 || message.movementEpoch !== player.movementEpoch) return;
+    if (!player || !message || player.knocked || player.trainSeat >= 0 || player.vehicleId || message.movementEpoch !== player.movementEpoch) return;
     const now = Date.now();
     const count = this.movementMessages.get(client.sessionId) ?? { start: now, total: 0 };
     if (now - count.start > 1000) { count.start = now; count.total = 0; }
@@ -185,28 +196,29 @@ class ClassroomGallery extends Room {
 
   async readTrainConfiguration() {
     const [{ rows: worlds }, { rows: roster }] = await Promise.all([
-      pool.query(`SELECT w.train_mode AS mode, w.train_interval_seconds AS "intervalSeconds", CASE WHEN s.id IS NOT NULL THEN s.id ELSE NULL END AS "startStudentId"
+      pool.query(`SELECT w.train_mode AS mode, w.train_interval_seconds AS "intervalSeconds", CASE WHEN s.id IS NOT NULL THEN s.id ELSE NULL END AS "startStudentId", w.train_station_wait_seconds AS waits
         FROM classroom.gallery_worlds w LEFT JOIN classroom.students s ON s.id=w.train_start_student_id AND s.classroom_id=w.classroom_id AND s.archived_at IS NULL AND s.student_number IS NOT NULL WHERE w.classroom_id=$1`, [this.classroomId]),
       pool.query(`SELECT id, student_number AS "studentNumber", display_name AS "displayName" FROM classroom.students WHERE classroom_id=$1 AND archived_at IS NULL ORDER BY student_number NULLS LAST, display_name, id`, [this.classroomId]),
     ]);
     const world = worlds[0] ?? { mode: "auto", intervalSeconds: 120, startStudentId: null };
     const startIndex = world.startStudentId ? roster.findIndex((student) => student.id === world.startStudentId) : -1;
     const route = trainTrack(roster.length, startIndex < 0 ? null : startIndex);
-    return { mode: world.mode, intervalSeconds: Number(world.intervalSeconds), startStudentId: startIndex < 0 ? null : world.startStudentId, roster: roster.map((student) => ({ studentId: student.id, studentNumber: student.studentNumber, displayName: student.displayName })), route };
+    return { mode: world.mode, intervalSeconds: Number(world.intervalSeconds), startStudentId: startIndex < 0 ? null : world.startStudentId, waits: world.waits ?? {}, roster: roster.map((student) => ({ studentId: student.id, studentNumber: student.studentNumber, displayName: student.displayName })), route };
   }
 
   async refreshTrainConfiguration(initial = false) {
     const config = await this.readTrainConfiguration();
     const signature = JSON.stringify(config);
-    if (signature === this.trainConfig?.signature) return;
+    if (signature === this.trainConfig?.signature) { this.pendingTrainConfig = null; return; }
     config.signature = signature;
-    if (initial || (!this.trainCircuitActive && this.trainSeats.size === 0)) this.applyTrainConfiguration(config);
+    if (initial || (!this.trainFinishing && !this.trainCircuitActive && this.state.train.phase === "waiting" && this.trainSeats.size === 0)) this.applyTrainConfiguration(config);
     else this.pendingTrainConfig = config;
   }
 
   applyTrainConfiguration(config, schedule = true) {
     this.trainConfig = config;
     this.trainRoute = config.route;
+    this.vehicleBounds.minZ = Math.min(-25, ...config.route.map((point) => point.z)) - 10;
     const train = this.state.train;
     train.revision++;
     train.active = this.trainRoute.length > 0;
@@ -221,7 +233,7 @@ class ClassroomGallery extends Room {
     if (!train.active) { train.phase = "waiting"; train.stopId = ""; train.nextStopId = ""; train.departureAt = 0; train.arrivalAt = 0; train.x = 0; train.z = 2; return; }
     train.x = this.trainRoute[0].x; train.z = this.trainRoute[0].z; train.rotation = 0;
     train.stopId = this.trainRoute[0].id; train.phase = schedule && config.mode === "auto" ? "boarding" : "waiting";
-    train.departureAt = firstDepartureAt(Date.now(), config.mode);
+    train.departureAt = schedule ? firstDepartureAt(Date.now(), config.mode, stationWaitMs(config.waits, train.stopId, true)) : 0;
     train.arrivalAt = 0;
     this.updateTrainNextStop();
   }
@@ -239,22 +251,35 @@ class ClassroomGallery extends Room {
   async startTrain(client, message) {
     const auth = this.members.get(client.sessionId), train = this.state.train, now = Date.now();
     const commandKey = auth ? `start:${auth.accountId}` : "";
-    if (!auth || auth.role !== "teacher" || !message || message.revision !== train.revision || train.mode !== "manual" || train.phase !== "waiting" || !train.active || now - (this.trainCommandTimes.get(commandKey) ?? 0) < 500) { client.send("train-result", { ok: false, message: "รถไฟไม่พร้อมออกหรือข้อมูลเปลี่ยนแล้ว" }); return; }
+    if (!auth || auth.role !== "teacher" || !message || message.revision !== train.revision || train.mode !== "manual" || train.phase !== "waiting" || !train.active || this.trainFinishing || now - (this.trainCommandTimes.get(commandKey) ?? 0) < 500) { client.send("train-result", { ok: false, message: "รถไฟไม่พร้อมออกหรือข้อมูลเปลี่ยนแล้ว" }); return; }
     this.trainCommandTimes.set(commandKey, now);
     if (!(await stillAllowed(auth).catch(() => false)) || this.members.get(client.sessionId) !== auth) { client.leave(4003, "Classroom access expired"); return; }
-    if (message.revision !== train.revision || train.mode !== "manual" || train.phase !== "waiting") { client.send("train-result", { ok: false, message: "รถไฟเริ่มไปแล้วหรือข้อมูลเปลี่ยนแล้ว" }); return; }
-    train.phase = "boarding"; train.departureAt = now + TRAIN_BOARDING_MS; train.stopId = this.trainRoute[this.trainLegIndex]?.id ?? "entrance";
-    client.send("train-result", { ok: true, message: "รถไฟจะออกใน 10 วินาที" });
+    const latest = await this.readTrainConfiguration().catch(() => null);
+    if (this.members.get(client.sessionId) !== auth) return;
+    if (message.revision !== train.revision || train.mode !== "manual" || train.phase !== "waiting" || this.trainFinishing) { client.send("train-result", { ok: false, message: "รถไฟเริ่มไปแล้วหรือข้อมูลเปลี่ยนแล้ว" }); return; }
+    if (latest && this.trainConfig) {
+      latest.signature = JSON.stringify(latest);
+      if (this.trainSeats.size === 0 && latest.signature !== this.trainConfig.signature) {
+        this.applyTrainConfiguration(latest);
+        if (train.mode !== "manual" || !train.active) { client.send("train-result", { ok: false, message: "ตารางรถไฟเปลี่ยนแล้ว" }); return; }
+      } else {
+        this.trainConfig.waits = latest.waits;
+      }
+    }
+    train.stopId = this.trainRoute[this.trainLegIndex]?.id ?? "entrance";
+    const wait = stationWaitMs(this.trainConfig?.waits, train.stopId, true);
+    train.phase = "boarding"; train.departureAt = Date.now() + wait;
+    client.send("train-result", { ok: true, message: `รถไฟจะออกใน ${wait / 1000} วินาที` });
   }
 
   async boardTrain(client, message) {
     const auth = this.members.get(client.sessionId), player = this.state.players.get(client.sessionId), train = this.state.train, now = Date.now();
     const commandKey = auth ? `board:${auth.accountId}` : "";
     const last = auth ? this.trainCommandTimes.get(commandKey) ?? 0 : 0;
-    if (!auth || !player || !message || message.revision !== train.revision || player.trainSeat >= 0 || !canBoardTrain({ active: train.active, phase: train.phase, seats: this.trainSeats.size, distance: Math.hypot(player.x - train.x, player.z - train.z) }) || now - last < 250) { client.send("train-result", { ok: false, message: "อยู่ใกล้สถานีและรอให้รถหยุดก่อนขึ้นรถไฟ" }); return; }
+    if (!auth || !player || !message || message.revision !== train.revision || player.trainSeat >= 0 || player.knocked || player.vehicleId || this.trainFinishing || !canBoardTrain({ active: train.active, phase: train.phase, seats: this.trainSeats.size, distance: Math.hypot(player.x - train.x, player.z - train.z) }) || now - last < 250) { client.send("train-result", { ok: false, message: "อยู่ใกล้สถานีและรอให้รถหยุดก่อนขึ้นรถไฟ" }); return; }
     this.trainCommandTimes.set(commandKey, now);
     if (!(await stillAllowed(auth).catch(() => false)) || this.members.get(client.sessionId) !== auth) { client.leave(4003, "Classroom access expired"); return; }
-    if (message.revision !== train.revision || player.trainSeat >= 0 || !canBoardTrain({ active: train.active, phase: train.phase, seats: this.trainSeats.size, distance: Math.hypot(player.x - train.x, player.z - train.z) })) { client.send("train-result", { ok: false, message: "รถไฟออกแล้วหรือไม่มีที่นั่งว่าง" }); return; }
+    if (message.revision !== train.revision || player.trainSeat >= 0 || player.knocked || player.vehicleId || this.trainFinishing || !canBoardTrain({ active: train.active, phase: train.phase, seats: this.trainSeats.size, distance: Math.hypot(player.x - train.x, player.z - train.z) })) { client.send("train-result", { ok: false, message: "รถไฟออกแล้วหรือไม่มีที่นั่งว่าง" }); return; }
     const occupied = new Set(this.trainSeats.values()); let seat = 0; while (occupied.has(seat)) seat++;
     this.trainSeats.set(client.sessionId, seat); player.trainSeat = seat; player.x = train.x; player.z = train.z; player.rotation = train.rotation; player.movementEpoch++;
     this.jumpStarts.delete(client.sessionId); train.seats = this.trainSeats.size;
@@ -288,14 +313,17 @@ class ClassroomGallery extends Room {
     let remaining = TRAIN_SPEED * Math.min(0.1, Math.max(0, (now - this.trainLastTick) / 1000)); this.trainLastTick = now;
     while (remaining > 0) {
       const nextIndex = (this.trainLegIndex + 1) % route.length, target = route[nextIndex], dx = target.x - train.x, dz = target.z - train.z, distance = Math.hypot(dx, dz);
+      const from = { x: train.x, y: 0, z: train.z };
       if (distance <= remaining + 0.001) {
         train.x = target.x; train.z = target.z; if (distance > 0) train.rotation = Math.atan2(dx, dz);
         remaining -= distance; this.trainLegIndex = nextIndex;
+        this.collideVehicle(from, { x: train.x, y: 0, z: train.z, rotation: train.rotation }, trainBodies, "train", now);
         if (nextIndex === 0) { void this.finishTrainCircuit(now); return; }
-        if (target.id) { train.phase = "dwell"; train.stopId = target.id; train.arrivalAt = now; train.departureAt = now + TRAIN_DWELL_MS; this.updateTrainNextStop(); this.syncTrainRiders(); return; }
+        if (target.id) { train.phase = "dwell"; train.stopId = target.id; train.arrivalAt = now; train.departureAt = now + stationWaitMs(this.trainConfig?.waits, target.id, false); this.updateTrainNextStop(); this.syncTrainRiders(); return; }
         continue;
       }
       const fraction = remaining / distance; train.x += dx * fraction; train.z += dz * fraction; train.rotation = Math.atan2(dx, dz); remaining = 0;
+      this.collideVehicle(from, { x: train.x, y: 0, z: train.z, rotation: train.rotation }, trainBodies, "train", now);
     }
     this.syncTrainRiders();
   }
@@ -311,6 +339,7 @@ class ClassroomGallery extends Room {
   async finishTrainCircuit(now) {
     const train = this.state.train;
     if (train.phase !== "moving") return;
+    this.trainFinishing = true;
     train.phase = "waiting"; train.stopId = this.trainRoute[0]?.id ?? "entrance"; train.arrivalAt = now; train.departureAt = 0;
     for (const [sessionId, seat] of this.trainSeats) {
       const player = this.state.players.get(sessionId);
@@ -319,20 +348,137 @@ class ClassroomGallery extends Room {
     this.trainSeats.clear(); train.seats = 0; this.trainCircuitActive = false;
     const config = await this.readTrainConfiguration().catch(() => this.pendingTrainConfig ?? this.trainConfig);
     if (config) { config.signature = JSON.stringify(config); this.pendingTrainConfig = null; this.applyTrainConfiguration(config, false); }
+    this.trainFinishing = false;
     if (!train.active) return;
     train.phase = train.mode === "auto" ? "boarding" : "waiting";
-    train.departureAt = nextDepartureAt(train.mode, train.intervalSeconds, this.trainLastDeparture, now);
+    train.departureAt = nextDepartureAt(train.mode, train.intervalSeconds, this.trainLastDeparture, now, stationWaitMs(this.trainConfig?.waits, train.stopId, true));
+  }
+
+  async vehicleCommand(client, action, message) {
+    const { sessionId } = client;
+    const auth = this.members.get(sessionId), player = this.state.players.get(sessionId);
+    const kind = message?.kind;
+    const now = Date.now();
+    const result = (ok, text) => client.send("vehicle-result", { ok, message: text });
+    if (!auth || !player || !vehicleKinds.includes(kind)) return;
+    const commandKey = sessionId + ":" + kind;
+    if (now - (this.vehicleCommandTimes.get(commandKey) ?? 0) < 300) {
+      result(false, "โปรดรอสักครู่แล้วลองใหม่"); return;
+    }
+    this.vehicleCommandTimes.set(commandKey, now);
+    if (!(await stillAllowed(auth, action === "reset")) || this.members.get(sessionId) !== auth) {
+      result(false, "คุณไม่มีสิทธิ์ใช้คำสั่งนี้"); return;
+    }
+    const vehicles = this.state.vehicles, current = vehicles.get(kind);
+    if (message.revision !== (current?.revision ?? 0)) {
+      result(false, "สถานะยานพาหนะเปลี่ยนไปแล้ว กรุณาลองใหม่"); return;
+    }
+    if (action === "reset") {
+      if ((current?.driverId ?? "") !== message.confirmedDriverId) {
+        result(false, "คนขับเปลี่ยนแล้ว กรุณายืนยันใหม่"); return;
+      }
+      const spec = vehicleSpecs[kind];
+      if (current?.driverId) this.releaseVehicle(current, { x: spec.bayX + 2.5, z: VEHICLE_BAY_Z });
+      const vehicle = new Vehicle();
+      Object.assign(vehicle, { kind, x: spec.bayX, y: 0, z: VEHICLE_BAY_Z, rotation: Math.PI, driverId: "", revision: (current?.revision ?? 0) + 1 });
+      vehicles.set(kind, vehicle);
+      result(true, "ยานพาหนะพร้อมที่จุดจอด"); return;
+    }
+    if (action === "exit") {
+      if (!current || current.driverId !== sessionId || player.vehicleId !== kind) return;
+      if (current.y > LANDING_HEIGHT) { result(false, "ลงจอดก่อนออกจากเฮลิคอปเตอร์"); return; }
+      this.releaseVehicle(current);
+      result(true, "ออกจากยานพาหนะแล้ว"); return;
+    }
+    if (!current || current.driverId || player.knocked || player.vehicleId || player.trainSeat >= 0
+      || current.y > LANDING_HEIGHT || Math.hypot(player.x - current.x, player.z - current.z) > VEHICLE_ENTER_DISTANCE) {
+      result(false, "ยานพาหนะไม่ว่างหรืออยู่ไกลเกินไป"); return;
+    }
+    current.driverId = sessionId;
+    current.revision++;
+    player.vehicleId = kind;
+    player.movementEpoch++;
+    player.jump = 0;
+    player.x = current.x; player.z = current.z; player.rotation = current.rotation;
+    this.jumpStarts.delete(sessionId);
+    result(true, "พร้อมขับยานพาหนะ");
+  }
+
+  releaseVehicle(vehicle, position) {
+    if (!vehicle?.driverId) return;
+    const player = this.state.players.get(vehicle.driverId);
+    if (player) {
+      const side = vehicle.x > 0 ? -2.5 : 2.5;
+      player.x = position?.x ?? vehicle.x + side;
+      player.z = position?.z ?? vehicle.z;
+      player.vehicleId = "";
+      player.movementEpoch++;
+    }
+    this.vehicleInputs.delete(vehicle.kind);
+    vehicle.driverId = "";
+    vehicle.y = 0;
+    vehicle.revision++;
+  }
+
+  vehicleInput(client, message) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player?.vehicleId || player.knocked || message?.epoch !== player.movementEpoch || !validVehicleInput(message)) return;
+    const vehicle = this.state.vehicles.get(player.vehicleId);
+    if (vehicle?.driverId !== client.sessionId || vehicle.revision !== message.revision) return;
+    const at = Date.now();
+    if (at - (this.vehicleInputs.get(vehicle.kind)?.at ?? 0) < 35) return;
+    const { throttle, turn, lift } = message;
+    this.vehicleInputs.set(vehicle.kind, { throttle, turn, lift, at });
+  }
+
+  updateVehicles() {
+    const now = Date.now();
+    for (const vehicle of this.state.vehicles.values()) {
+      if (!vehicle.driverId) continue;
+      const player = this.state.players.get(vehicle.driverId);
+      if (!player) { this.releaseVehicle(vehicle); continue; }
+      const input = this.vehicleInputs.get(vehicle.kind);
+      const active = input && now - input.at <= 300 ? input : idleVehicleInput;
+      const from = { x: vehicle.x, y: vehicle.y, z: vehicle.z };
+      const next = advanceVehicle(vehicle, active, 0.05, this.vehicleBounds);
+      Object.assign(vehicle, next);
+      player.x = next.x; player.z = next.z; player.rotation = next.rotation;
+      this.collideVehicle(from, next, [vehicleSpecs[vehicle.kind]], vehicle.kind, now);
+    }
+  }
+
+  collideVehicle(from, to, bodies, cause, now) {
+    if (Math.hypot(to.x - from.x, to.y - from.y, to.z - from.z) < 0.001) return;
+    for (const [sessionId, player] of this.state.players) {
+      if (player.knocked || player.protectedUntil > now || player.trainSeat >= 0 || player.vehicleId) continue;
+      const elapsed = (now - (this.jumpStarts.get(sessionId) ?? -Infinity)) / 1000;
+      const height = elapsed < 0.75 ? Math.max(0, 6 * elapsed - 8 * elapsed * elapsed) : 0;
+      if (bodies.some((body) => hitsMovingBody(from, to, body, player, height))) this.knockAvatar(sessionId, player, now, cause);
+    }
+  }
+
+  knockAvatar(sessionId, player, now, cause) {
+    if (!knockPlayer(player, now, cause)) return false;
+    if (player.trainSeat >= 0) {
+      this.trainSeats.delete(sessionId);
+      player.trainSeat = -1;
+      this.state.train.seats = this.trainSeats.size;
+    }
+    if (player.vehicleId) this.releaseVehicle(this.state.vehicles.get(player.vehicleId));
+    this.jumpStarts.delete(sessionId);
+    this.clients.find((client) => client.sessionId === sessionId)?.send("knocked", { respawnAt: player.respawnAt, cause });
+    return true;
   }
 
   async cast(client, message) {
     const auth=this.members.get(client.sessionId), player=this.state.players.get(client.sessionId), aim=validAim(message), now=Date.now();
-    if (!auth || auth.role!=="teacher" || !player || !aim || now-(this.castTimes.get(auth.accountId)??0)<2000 || this.usedShotIds.has(aim.shotId)) {
+    if (!auth || auth.role!=="teacher" || !player || player.knocked || player.vehicleId || !aim || now-(this.castTimes.get(auth.accountId)??0)<2000 || this.usedShotIds.has(aim.shotId)) {
       client.send("cast-result",{ok:false}); return;
     }
     this.usedShotIds.add(aim.shotId);
     if (this.usedShotIds.size > 4096) this.usedShotIds.delete(this.usedShotIds.values().next().value);
     this.castTimes.set(auth.accountId,now);
-    if (!(await stillAllowed(auth).catch(()=>false)) || this.members.get(client.sessionId) !== auth || this.state.players.get(client.sessionId) !== player) {
+    if (!(await stillAllowed(auth).catch(()=>false)) || this.members.get(client.sessionId) !== auth || this.state.players.get(client.sessionId) !== player || player.knocked || player.vehicleId) {
       client.send("cast-result",{ok:false}); return;
     }
     const bolt=new Bolt(); bolt.id=aim.shotId;
@@ -346,16 +492,16 @@ class ClassroomGallery extends Room {
   updateCombat() {
     const now=Date.now();
     for (const [accountId, life] of this.lifeStates) {
-      if (life.knocked && life.respawnAt <= now) this.lifeStates.set(accountId,{x:0,z:0,rotation:0,knocked:false,respawnAt:0,protectedUntil:now+3000,movementEpoch:life.movementEpoch+1});
-      else if (!life.knocked && life.protectedUntil <= now && life.protectedUntil !== 0) this.lifeStates.set(accountId,{...life,protectedUntil:0});
+      respawnPlayer(life, now);
+      if (!life.knocked && life.protectedUntil <= now) this.lifeStates.delete(accountId);
     }
     for (const client of this.clients) {
       const auth=this.members.get(client.sessionId), player=this.state.players.get(client.sessionId);
       if (auth && player && player.knocked && respawnPlayer(player,now)) {
         player.jump=0;
-        this.jumpStarts.delete(client.sessionId); this.lifeStates.set(auth.accountId,{x:0,z:0,rotation:0,knocked:false,respawnAt:0,protectedUntil:player.protectedUntil,movementEpoch:player.movementEpoch});
-        client.send("respawn",{movementEpoch:player.movementEpoch,x:0,z:0});
-      } else if (auth && player) this.lifeStates.set(auth.accountId,{x:player.x,z:player.z,rotation:player.rotation,knocked:player.knocked,respawnAt:player.respawnAt,protectedUntil:player.protectedUntil,movementEpoch:player.movementEpoch});
+        this.jumpStarts.delete(client.sessionId);
+        client.send("respawn",{movementEpoch:player.movementEpoch,x:player.x,z:player.z});
+      }
     }
     for (const [id,bolt] of this.state.bolts) {
       const details=this.boltDetails.get(id); if (!details) { this.state.bolts.delete(id); continue; }
@@ -366,16 +512,12 @@ class ClassroomGallery extends Room {
         if (player.role!=="student" || player.knocked || player.protectedUntil>now) continue;
         const started=this.jumpStarts.get(sessionId)??-Infinity, elapsed=(now-started)/1000;
         const jump=elapsed>0&&elapsed<0.75?Math.max(0,6*elapsed-8*elapsed*elapsed):0;
-        const fraction=playerHitFraction(from,to,player,jump);
+        const altitude = this.state.vehicles.get(player.vehicleId)?.y ?? 0;
+        const fraction=playerHitFraction(from,to,player,jump + altitude);
         if (fraction!==null && fraction<nearest) { nearest=fraction; hit={sessionId,player,x:from.x+(to.x-from.x)*fraction,y:from.y+(to.y-from.y)*fraction,z:from.z+(to.z-from.z)*fraction}; }
       }
       if (hit) {
-        const targetClient=this.clients.find((candidate)=>candidate.sessionId===hit.sessionId);
-        if (knockPlayer(hit.player,now)) {
-          if (hit.player.trainSeat >= 0) { this.trainSeats.delete(hit.sessionId); hit.player.trainSeat = -1; this.state.train.seats = this.trainSeats.size; }
-          targetClient?.send("knocked",{respawnAt:hit.player.respawnAt});
-          this.broadcast("wand-impact",{id,x:hit.x,y:hit.y,z:hit.z});
-        }
+        if (this.knockAvatar(hit.sessionId, hit.player, now, "wand")) this.broadcast("wand-impact",{id,x:hit.x,y:hit.y,z:hit.z});
       }
       if (hit || expired) { this.state.bolts.delete(id); this.boltDetails.delete(id); }
     }
@@ -407,7 +549,14 @@ class ClassroomGallery extends Room {
 
   onLeave(client) {
     const auth=this.members.get(client.sessionId), player=this.state.players.get(client.sessionId);
-    if (auth && player) this.lifeStates.set(auth.accountId,{x:player.x,z:player.z,rotation:player.rotation,knocked:player.knocked,respawnAt:player.respawnAt,protectedUntil:player.protectedUntil,movementEpoch:player.movementEpoch});
+    if (player?.vehicleId) this.releaseVehicle(this.state.vehicles.get(player.vehicleId));
+    if (auth && player && (player.knocked || player.protectedUntil > Date.now())) {
+      this.lifeStates.set(auth.accountId, {
+        x: player.x, z: player.z, rotation: player.rotation, knocked: player.knocked, knockCause: player.knockCause,
+        respawnAt: player.respawnAt, protectedUntil: player.protectedUntil, movementEpoch: player.movementEpoch,
+      });
+    } else if (auth) this.lifeStates.delete(auth.accountId);
+    for (const kind of vehicleKinds) this.vehicleCommandTimes.delete(client.sessionId + ":" + kind);
     if (this.trainSeats.delete(client.sessionId)) this.state.train.seats=this.trainSeats.size;
     if (auth) for (const action of ["start", "board", "leave"]) this.trainCommandTimes.delete(`${action}:${auth.accountId}`);
     this.state.players.delete(client.sessionId);
@@ -419,10 +568,12 @@ class ClassroomGallery extends Room {
     this.jumpStarts.delete(client.sessionId);
   }
 
-  onDispose() { clearInterval(this.accessTimer); clearInterval(this.galleryTimer); clearInterval(this.worldTimer); clearInterval(this.combatTimer); clearInterval(this.trainSettingsTimer); this.state.bolts.clear(); this.boltDetails.clear(); this.lifeStates.clear(); this.usedShotIds.clear(); this.trainSeats.clear(); this.trainCommandTimes.clear(); }
+  onDispose() { clearInterval(this.accessTimer); clearInterval(this.galleryTimer); clearInterval(this.worldTimer); clearInterval(this.combatTimer); clearInterval(this.trainSettingsTimer); this.state.bolts.clear(); this.boltDetails.clear(); this.lifeStates.clear(); this.usedShotIds.clear(); this.trainSeats.clear(); this.trainCommandTimes.clear(); this.state.vehicles.clear(); this.vehicleInputs.clear(); this.vehicleCommandTimes.clear(); }
 }
 
-const gameServer = new Server({ express: (app) => app.get("/__healthcheck", (_request, response) => response.status(200).type("text").send("OK")) });
+const gameServer = new Server({
+  express: (app) => app.get("/__gallery_protocol", (_request, response) => response.type("text").send("vehicles-v1")),
+});
 gameServer.define("classroom", ClassroomGallery).filterBy(["classroomId"]);
 await gameServer.listen(Number(process.env.PORT ?? 2567));
 console.log(`Classroom Colyseus server listening on ${process.env.PORT ?? 2567}`);

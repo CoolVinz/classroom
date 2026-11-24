@@ -33,4 +33,7 @@ test("serves the Coolify health check", async (t) => {
   }
   assert.equal(response?.status, 200);
   assert.equal(await response.text(), "OK");
+  const protocol = await fetch(`http://127.0.0.1:${port}/__gallery_protocol`);
+  assert.equal(protocol.status, 200);
+  assert.equal(await protocol.text(), "vehicles-v1");
 });

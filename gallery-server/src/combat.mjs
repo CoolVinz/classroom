@@ -1,3 +1,5 @@
+import { vehicleRespawn } from "./vehicles.mjs";
+
 export function validAim(message) {
   if (!message || typeof message.shotId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(message.shotId)) return null;
   const { dx, dy, dz } = message;
@@ -26,14 +28,16 @@ export function playerHitFraction(from,to,player,jump=0) {
   const hits=[0.4,1.05,1.7].map((height)=>segmentHitFraction(from,to,{x:player.x,y:jump+height,z:player.z},0.55)).filter((value)=>value!==null);
   return hits.length ? Math.min(...hits) : null;
 }
-export function knockPlayer(player, now) {
-  if (player.role !== "student" || player.knocked || player.protectedUntil > now) return false;
+export function knockPlayer(player, now, cause = "wand") {
+  if ((cause === "wand" && player.role !== "student") || player.knocked || player.protectedUntil > now) return false;
   player.knocked = true; player.respawnAt = now + 10_000; player.movementEpoch++;
+  player.knockCause = cause;
   return true;
 }
 export function respawnPlayer(player, now) {
   if (!player.knocked || player.respawnAt > now) return false;
-  player.knocked = false; player.respawnAt = 0; player.x=0; player.z=0; player.rotation=0;
+  const position = player.knockCause && player.knockCause !== "wand" ? vehicleRespawn : { x: 0, z: 0 };
+  player.knocked = false; player.respawnAt = 0; player.knockCause = ""; player.x = position.x; player.z = position.z; player.rotation = 0;
   player.protectedUntil=now+3000; player.movementEpoch++;
   return true;
 }
