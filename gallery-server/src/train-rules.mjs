@@ -1,11 +1,17 @@
-import { TRAIN_BOARDING_MS, TRAIN_SEATS } from "./train-layout.mjs";
+import { TRAIN_BOARDING_MS, TRAIN_DWELL_MS, TRAIN_SEATS } from "./train-layout.mjs";
 
-export function firstDepartureAt(now, mode) {
-  return mode === "auto" ? now + TRAIN_BOARDING_MS : 0;
+export function stationWaitMs(waits, stationId, starting) {
+  const seconds = waits?.[stationId];
+  return Number.isInteger(seconds) && seconds >= 3 && seconds <= 120
+    ? seconds * 1000 : starting ? TRAIN_BOARDING_MS : TRAIN_DWELL_MS;
 }
 
-export function nextDepartureAt(mode, intervalSeconds, lastDeparture, returnedAt) {
-  return mode === "auto" ? Math.max(lastDeparture + intervalSeconds * 1000, returnedAt + TRAIN_BOARDING_MS) : 0;
+export function firstDepartureAt(now, mode, waitMs = TRAIN_BOARDING_MS) {
+  return mode === "auto" ? now + waitMs : 0;
+}
+
+export function nextDepartureAt(mode, intervalSeconds, lastDeparture, returnedAt, waitMs = TRAIN_BOARDING_MS) {
+  return mode === "auto" ? Math.max(lastDeparture + intervalSeconds * 1000, returnedAt + waitMs) : 0;
 }
 
 export function canBoardTrain({ active, phase, seats, distance }) {

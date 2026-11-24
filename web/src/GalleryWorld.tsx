@@ -11,18 +11,21 @@ import { animateAvatarCharacter, avatarNameLabelY, createAvatarCharacter, defaul
 import { correctionOffset, facingRotation, interpolateTrain, jumpHeight, reconcilePosition, touchDirection, walkingStep, type Move, type TrainSample } from "./gallery-motion";
 import { canvasAimPoint, wandAim } from "./gallery-aim";
 import { enterGalleryFullscreen, unlockGalleryOrientation } from "./gallery-fullscreen";
-import { blockPosition, exhibitPosition, trainTrack } from "../../gallery-server/src/train-layout.mjs";
-import { canBoardTrain } from "../../gallery-server/src/train-rules.mjs";
+import { blockPosition, exhibitPosition, trainStartStation, trainTrack } from "../../gallery-server/src/train-layout.mjs";
+import { canBoardTrain, stationWaitMs } from "../../gallery-server/src/train-rules.mjs";
+import { LANDING_HEIGHT, VEHICLE_BAY_Z, VEHICLE_ENTER_DISTANCE, vehicleKinds, vehicleSpecs, type VehicleKind } from "../../gallery-server/src/vehicles.mjs";
+import { knockMessages, vehicleModel, vehicleNames, type VehicleState } from "./gallery-vehicles";
 
 type User = { role: "owner" | "teacher" | "student"; displayName: string };
 type GalleryModel = { id: string; studentId: string; displayName: string; studentNumber: number | null; assignmentId: string; assignmentTitle: string; originalName: string; mediaType: string; materialAvailable: boolean; createdAt: string; hidden: boolean; likes: number; likedByMe: boolean };
 type VoteSummary = { limit: number; blockTotals: { studentId: string; votes: number }[]; usage: { assignmentId: string; assignmentTitle: string; used: number }[]; myVotes: { fileId: string; assignmentId: string; assignmentTitle: string; originalName: string; displayName: string; studentNumber: number | null; hidden: boolean; unavailable: boolean }[] };
-type TrainSettings = { mode: "auto" | "manual"; intervalSeconds: 60 | 120; startStudentId: string | null };
-type TrainView = TrainSettings & { active: boolean; x: number; z: number; rotation: number; phase: "waiting" | "boarding" | "moving" | "dwell"; stopId: string; nextStopId: string; departureAt: number; arrivalAt: number; seats: number; revision: number; layoutRoster: string };
+type TrainSettings = { mode: "auto" | "manual"; intervalSeconds: 60 | 120; startStudentId: string | null; stationWaitSeconds?: Record<string, number> };
+type TrainView = Omit<TrainSettings, "stationWaitSeconds"> & { active: boolean; x: number; z: number; rotation: number; phase: "waiting" | "boarding" | "moving" | "dwell"; stopId: string; nextStopId: string; departureAt: number; arrivalAt: number; seats: number; revision: number; layoutRoster: string };
 type Manifest = { enabled: boolean; classroomId: string; classroomName: string; blocks: { studentId: string; displayName: string; studentNumber: number | null; blockIndex: number; layoutIndex: number; archived: boolean }[]; models: GalleryModel[]; nextOffset: number | null; teacher: boolean; viewerStudentId: string | null; train: TrainSettings };
 type GalleryAccessStudent = { studentId: string; accountLinked: boolean; displayName: string; studentNumber: number | null; requiredAssignmentId: string | null; requiredAssignmentTitle: string | null; hasSubmission: boolean; approved: boolean; entryAllowed: boolean };
 type GalleryAccess = { mode: "submission" | "approval"; requiredAssignmentId: string | null; requiredAssignmentTitle: string | null; students: GalleryAccessStudent[] };
-type Avatar = AvatarAppearance & { displayName: string; role: string; x: number; z: number; rotation: number; sequence?: number; jump?: number; movementEpoch?: number; knocked?: boolean; respawnAt?: number; protectedUntil?: number; trainSeat?: number };
+type Avatar = AvatarAppearance & { displayName: string; role: string; x: number; z: number; rotation: number; sequence?: number; jump?: number; movementEpoch?: number; knocked?: boolean; knockCause?: string; respawnAt?: number; protectedUntil?: number; trainSeat?: number; vehicleId?: VehicleKind | "" };
+type VehicleAvailability = Partial<Record<VehicleKind, { revision: number; driverId: string }>>;
 type BoltVisual = { group: THREE.Group; trail: THREE.Line; target: THREE.Vector3 };
 
 function apiPath(classroomId: string, suffix = "") { return `/classrooms/${classroomId}/gallery${suffix}`; }
@@ -63,6 +66,13 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   const [trainAction, setTrainAction] = useState<"board" | "leave" | null>(null);
   const [trainForm, setTrainForm] = useState<TrainSettings>({ mode: "auto", intervalSeconds: 120, startStudentId: null });
   const [trainMessage, setTrainMessage] = useState("");
+  const [vehicles, setVehicles] = useState<VehicleAvailability | null>(null);
+  const [driving, setDriving] = useState<VehicleKind | "">("");
+  const [vehicleNearby, setVehicleNearby] = useState<VehicleKind | "">("");
+  const [canExitVehicle, setCanExitVehicle] = useState(true);
+  const [vehicleMessage, setVehicleMessage] = useState("");
+  const drivingRef = useRef<VehicleKind | "">("");
+  const liftRef = useRef(0);
   const [galleryAccess, setGalleryAccess] = useState<GalleryAccess | null>(null);
   const [entryModeDraft, setEntryModeDraft] = useState<GalleryAccess["mode"] | null>(null);
   const entryMode = entryModeDraft ?? galleryAccess?.mode ?? "submission";
@@ -76,6 +86,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   const aimPoint = useRef(new THREE.Vector2());
   const [castReady, setCastReady] = useState(true);
   const [knockSeconds, setKnockSeconds] = useState(0);
+  const [knockCause, setKnockCause] = useState("wand");
   const roomRef = useRef<any>(null);
   const wandRef = useRef(false);
   const knockedRef = useRef(false);
@@ -89,6 +100,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   const [draftAppearance, setDraftAppearance] = useState<AvatarAppearance>(defaultAvatarAppearance);
   const [customizerOpen, setCustomizerOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const menuOpenRef = useRef(false);
   const [immersive, setImmersive] = useState(true);
   const [landscapeRequired, setLandscapeRequired] = useState(false);
   const customizerOpenRef = useRef(false);
@@ -137,6 +149,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   }, [manifest?.train]);
   useEffect(() => { lastSavedTrainSettings.current = null; setTrainView(null); setTrainSeat(-1); setDisplayPages({}); }, [classroomId]);
   customizerOpenRef.current = customizerOpen;
+  menuOpenRef.current = menuOpen;
   wandRef.current = wandMode;
   appearanceRef.current = appearance;
   const load = useCallback(async (offset = 0) => {
@@ -247,6 +260,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     };
     const trainTrackGroup = new THREE.Group(); scene.add(trainTrackGroup);
     const trainGroup = new THREE.Group(); scene.add(trainGroup);
+    const vehicleMeshes = new Map<VehicleKind, { group: THREE.Group; state: VehicleState; position: THREE.Vector3 }>();
     trainGroup.visible = false;
     const trainMaterials = new Map<number, THREE.Material>();
     const addTrainPart = (parent: THREE.Object3D, size: [number, number, number], position: [number, number, number], color: number, material?: THREE.Material) => {
@@ -254,6 +268,9 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       if (!material) trainMaterials.set(color, shared);
       const mesh = new THREE.Mesh(new THREE.BoxGeometry(...size), shared); mesh.position.set(...position); parent.add(mesh); return mesh;
     };
+    const bays = new THREE.Group();
+    scene.add(bays);
+    for (const kind of vehicleKinds) addTrainPart(bays, [5, 0.05, 6], [vehicleSpecs[kind].bayX, 0.015, VEHICLE_BAY_Z], 0xafa894);
     addTrainPart(trainGroup, [1.8, 0.7, 2.2], [0, 0.65, 2.3], 0x267a6b);
     addTrainPart(trainGroup, [1.2, 0.9, 1.0], [0, 1.35, 2.7], 0xe8c777);
     addTrainPart(trainGroup, [0.55, 0.9, 0.55], [0, 1.8, 3.4], 0x315a4c);
@@ -467,13 +484,16 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       const key = event.key.toLowerCase();
       const target = event.target instanceof HTMLElement ? event.target : null;
       if (!customizerOpenRef.current && key === "f" && wandRef.current && !target?.matches("input, textarea, select") && !target?.isContentEditable) { event.preventDefault(); fireWandRef.current(); return; }
-      if (customizerOpenRef.current || target?.matches("input, textarea, select, button") || target?.isContentEditable) return;
+      if (customizerOpenRef.current || target?.matches("input, textarea, select") || (key === " " && target?.matches("button")) || target?.isContentEditable) return;
+      if (drivingRef.current === "helicopter" && (key === "q" || key === "e")) {
+        event.preventDefault(); keys.add(key); return;
+      }
       if (["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(key)) {
         event.preventDefault(); if (key === " ") { if (!event.repeat) jumpRef.current = true; } else keys.add(key);
       }
     };
     const keyUp = (event: KeyboardEvent) => keys.delete(event.key.toLowerCase());
-    const onBlur = () => { keys.clear(); resetTouchJoystick(touchKnobRef.current, touchRef.current); jumpRef.current = false; cancelPointer(); };
+    const onBlur = () => { keys.clear(); resetTouchJoystick(touchKnobRef.current, touchRef.current); jumpRef.current = false; liftRef.current = 0; cancelPointer(); };
     const updateOrientation = () => {
       const required = touchDevice && window.innerHeight > window.innerWidth;
       landscapeRequiredRef.current = required;
@@ -501,7 +521,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       if (activePointer !== event.pointerId) return;
       const tapped = !dragged && Math.hypot(event.clientX - startX, event.clientY - startY) < 5;
       cancelPointer();
-      if (!tapped || customizerOpenRef.current || document.hidden) return;
+      if (!tapped || customizerOpenRef.current || document.hidden || drivingRef.current) return;
       if (wandRef.current) { moveCrosshair(event); return; }
       const point = canvasAimPoint(event.clientX, event.clientY, canvas.getBoundingClientRect()); pointer.set(point.x, point.y);
       camera.updateMatrixWorld(); raycaster.setFromCamera(pointer, camera);
@@ -519,7 +539,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     const aimOrigin = new THREE.Vector3(), aimBodies: THREE.Object3D[] = [];
     let lastAimCheck = 0, cooldownTimer: number | undefined;
     const currentAim = () => {
-      if (!teacher || !wandRef.current || !initialized || !room?.connection?.isOpen || customizerOpenRef.current || document.hidden || !document.hasFocus()) return null;
+      if (!teacher || !wandRef.current || !initialized || !room?.connection?.isOpen || customizerOpenRef.current || document.hidden || !document.hasFocus() || knockedRef.current || drivingRef.current) return null;
       aimBodies.length = 0;
       for (const avatar of avatarMeshes.values()) if (avatar.userData.role === "student" && avatar.userData.character) aimBodies.push(avatar.userData.character);
       aimOrigin.set(local.x + Math.sin(local.rotation) * 0.45, 1.45, local.z + Math.cos(local.rotation) * 0.45);
@@ -576,7 +596,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         .finally(() => { if (activeModelLoad?.controller === controller) activeModelLoad = null; });
     };
     const client = new Client(config);
-    let lastTrainUi = 0, lastTrainActionScan = 0;
+    let lastTrainUi = 0, lastTrainActionScan = 0, lastVehicleSend = 0;
     const trainSeatPosition = (seat: number) => {
       const localX = seat % 2 === 0 ? -0.55 : 0.55;
       const localZ = -1.8 - Math.floor(seat / 6) * 4.4 - Math.floor((seat % 6) / 2) * 1.1;
@@ -588,6 +608,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       alive = false; cancelAnimationFrame(frame); window.clearTimeout(cooldownTimer); castReadyAt.current = 0; setCastReady(true); setAimValid(false); fireWandRef.current = () => {}; modelAbort.abort(); activeModelLoad?.controller.abort(); room?.leave(); roomRef.current = null; onBlur(); observer.disconnect();
       scene.traverse((object) => { const mesh = object as THREE.Mesh; mesh.geometry?.dispose?.(); const materials = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : []; materials.forEach((material) => material.dispose()); });
       renderer.dispose(); renderer.forceContextLoss(); textures.forEach((texture) => texture.dispose()); avatarMeshes.clear(); boltMeshes.current.clear(); effectMeshes.current = [];
+      drivingRef.current = ""; setDriving(""); setVehicleNearby(""); setVehicles(null);
       window.removeEventListener("keydown", keyDown); window.removeEventListener("keyup", keyUp); window.removeEventListener("blur", onBlur); window.removeEventListener("resize", updateOrientation); window.removeEventListener("orientationchange", updateOrientation); screen.orientation?.removeEventListener("change", updateOrientation); document.removeEventListener("visibilitychange", onVisibilityChange); unlockGalleryOrientation();
       canvas.removeEventListener("pointerdown", onPointerDown); canvas.removeEventListener("pointermove", onPointerMove); canvas.removeEventListener("pointerup", onPointerUp); canvas.removeEventListener("pointercancel", onPointerCancel); canvas.removeEventListener("lostpointercapture", onPointerCancel);
     };
@@ -598,11 +619,12 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       if (!alive) { void room.leave(); return; }
       roomRef.current = room;
       setError("");
-      room.onLeave((code: number) => { if (alive) { if (code === 4403) { setEnabled(false); setManifest(null); setError("ครูหยุดโลกเสมือนสำหรับนักเรียนแล้ว"); return; } if (code === 4003 && !teacher) { initialized = false; setOnline(0); setError("สิทธิ์เข้าโลกเปลี่ยนแล้ว กรุณาตรวจสอบงานล่าสุดหรือรอครูอนุมัติในหน้าห้องเรียน"); return; } initialized = false; setOnline(0); setError("การเชื่อมต่อโลกเสมือนสิ้นสุด กรุณาออกแล้วเข้าใหม่"); } });
+      room.onLeave((code: number) => { if (alive) { drivingRef.current = ""; setDriving(""); setVehicleNearby(""); setVehicles(null); if (code === 4403) { setEnabled(false); setManifest(null); setError("ครูหยุดโลกเสมือนสำหรับนักเรียนแล้ว"); return; } if (code === 4003 && !teacher) { initialized = false; setOnline(0); setError("สิทธิ์เข้าโลกเปลี่ยนแล้ว กรุณาตรวจสอบงานล่าสุดหรือรอครูอนุมัติในหน้าห้องเรียน"); return; } initialized = false; setOnline(0); setError("การเชื่อมต่อโลกเสมือนสิ้นสุด กรุณาออกแล้วเข้าใหม่"); } });
       room.onMessage("gallery-refresh", () => { void load().catch((reason) => setError(reason instanceof Error ? reason.message : "โหลดผลงานใหม่ไม่สำเร็จ")); });
       room.onMessage("cast-result", ({ ok }: { ok: boolean }) => { if (!ok) setError("ยิงไม่ได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง"); });
       room.onMessage("train-result", ({ ok, message }: { ok: boolean; message: string }) => { setTrainMessage(message); if (!ok) setError(message); });
-      room.onMessage("knocked", ({ respawnAt }: { respawnAt: number }) => { knockedRef.current = true; knockUntil.current = respawnAt; setKnockSeconds(Math.max(1, Math.ceil((respawnAt - Date.now()) / 1000))); });
+      room.onMessage("vehicle-result", ({ ok, message }: { ok: boolean; message: string }) => { setVehicleMessage(message); if (!ok) setError(message); });
+      room.onMessage("knocked", ({ respawnAt, cause }: { respawnAt: number; cause?: string }) => { knockedRef.current = true; knockUntil.current = respawnAt; setKnockCause(cause ?? "wand"); setKnockSeconds(Math.max(1, Math.ceil((respawnAt - Date.now()) / 1000))); });
       room.onMessage("respawn", ({ movementEpoch: epoch, x, z }: { movementEpoch: number; x: number; z: number }) => { knockedRef.current = false; knockUntil.current = 0; setKnockSeconds(0); movementEpoch = epoch; local = { x, z, rotation: 0 }; unsent = { dx: 0, dz: 0 }; pending = []; lastAcknowledged = -1; visualOffset = { x: 0, z: 0 }; });
       room.onMessage("wand-impact", ({ x, y, z }: { x: number; y: number; z: number }) => {
         if (effectMeshes.current.length >= 20) { const old = effectMeshes.current.shift()!; scene.remove(old.mesh); old.mesh.geometry.dispose(); (old.mesh.material as THREE.Material).dispose(); }
@@ -611,6 +633,28 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       });
       room.onStateChange((state: any) => {
         if (!alive) return;
+        if (state.vehicles) {
+          const availability: VehicleAvailability = {};
+          state.vehicles.forEach((vehicle: VehicleState, kind: VehicleKind) => {
+            if (!vehicleKinds.includes(kind)) return;
+            const wire = { kind, x: vehicle.x, y: vehicle.y, z: vehicle.z, rotation: vehicle.rotation, revision: vehicle.revision, driverId: vehicle.driverId };
+            availability[kind] = { revision: wire.revision, driverId: wire.driverId };
+            let visual = vehicleMeshes.get(kind);
+            if (!visual) {
+              const group = vehicleModel(kind);
+              scene.add(group);
+              visual = { group, state: wire, position: new THREE.Vector3() };
+              vehicleMeshes.set(kind, visual);
+            }
+            visual.position.set(wire.x, wire.y, wire.z);
+            if (visual.state === wire || visual.state.revision !== wire.revision) {
+              visual.group.position.copy(visual.position);
+              visual.group.rotation.y = wire.rotation;
+            }
+            visual.state = wire;
+          });
+          setVehicles((current) => current && vehicleKinds.every((kind) => current[kind]?.revision === availability[kind]?.revision) ? current : availability);
+        }
         if (state.train) {
           const wire = state.train as TrainView;
           const priorTrain = trainRef.current;
@@ -656,20 +700,28 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
           avatar.userData.target = { x: player.x, z: player.z, rotation: player.rotation };
           avatar.userData.role = player.role;
           avatar.userData.trainSeat = player.trainSeat ?? -1;
+          avatar.userData.vehicleId = player.vehicleId ?? "";
           const character=avatar.userData.character as THREE.Group|undefined;
           if (character) { character.rotation.z = player.knocked ? -Math.PI/2 : 0; character.position.y = player.knocked ? 0.35 : 0; }
           avatar.userData.knocked = player.knocked;
           if (id === room.sessionId) {
             const nextSeat = player.trainSeat ?? -1;
             trainSeatRef.current = nextSeat; setTrainSeat((current) => current === nextSeat ? current : nextSeat);
-            if (trainSeatRef.current >= 0) local = { x: player.x, z: player.z, rotation: player.rotation };
+            const mounted = player.vehicleId ?? "";
+            if (drivingRef.current !== mounted) {
+              onBlur();
+              if (mounted) { yaw = 0; setWandMode(false); }
+              drivingRef.current = mounted;
+              setDriving(mounted);
+            }
+            if (trainSeatRef.current >= 0 || mounted) local = { x: player.x, z: player.z, rotation: player.rotation };
             knockedRef.current=Boolean(player.knocked);
-            if (player.knocked) knockUntil.current = player.respawnAt ?? 0;
+            if (player.knocked) { knockUntil.current = player.respawnAt ?? 0; setKnockCause(player.knockCause || "wand"); }
             else knockUntil.current = 0;
             const seconds=player.knocked ? Math.max(1,Math.ceil(((player.respawnAt??0)-Date.now())/1000)) : 0;
             if (seconds!==lastKnockSecond.current) { lastKnockSecond.current=seconds; setKnockSeconds(seconds); }
             const epoch=player.movementEpoch??0;
-            if (epoch!==movementEpoch) { movementEpoch=epoch; local={x:player.x,z:player.z,rotation:player.rotation}; pending=[]; unsent={dx:0,dz:0}; visualOffset={x:0,z:0}; lastAcknowledged=player.sequence??-1; }
+            if (epoch!==movementEpoch) { movementEpoch=epoch; local={x:player.x,z:player.z,rotation:player.rotation}; pending=[]; unsent={dx:0,dz:0}; visualOffset={x:0,z:0}; lastAcknowledged=player.sequence??-1; jumpTime = -Infinity; }
           }
           if ((player.protectedUntil ?? 0)>Date.now() && !avatar.userData.shield) {
             const shield=new THREE.Mesh(new THREE.TorusGeometry(0.68,0.035,5,20),new THREE.MeshBasicMaterial({color:0x64dbef,transparent:true,opacity:0.65})); shield.rotation.x=Math.PI/2; shield.position.y=0.06; avatar.add(shield); avatar.userData.shield=shield;
@@ -694,6 +746,13 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     const render = (time: number) => {
       if (!alive || document.hidden) { frame = 0; return; } frame = requestAnimationFrame(render); const dt = Math.min((time - lastFrame) / 1000, 0.05); lastFrame = time;
       for (const visual of boltMeshes.current.values()) visual.group.position.lerp(visual.target, 1 - Math.exp(-45 * dt));
+      for (const { group, state, position } of vehicleMeshes.values()) {
+        const blend = 1 - Math.exp(-20 * dt);
+        group.position.lerp(position, blend);
+        const angle = state.rotation - group.rotation.y;
+        group.rotation.y += Math.atan2(Math.sin(angle), Math.cos(angle)) * blend;
+        if (group.userData.rotor && state.driverId) group.userData.rotor.rotation.y += dt * 23;
+      }
       for (let i = effectMeshes.current.length - 1; i >= 0; i--) { const effect = effectMeshes.current[i]!; const left = effect.until - time; if (left <= 0) { scene.remove(effect.mesh); effect.mesh.geometry.dispose(); (effect.mesh.material as THREE.Material).dispose(); effectMeshes.current.splice(i, 1); } else { effect.mesh.scale.setScalar(1 + (1 - left / 450) * 2); (effect.mesh.material as THREE.MeshBasicMaterial).opacity = left / 450; } }
       if (time - lastModelScan > 500) { lastModelScan = time; updateNearbyModels(); }
       if (syncedManifest !== manifestRef.current) { syncedManifest = manifestRef.current; syncBlocks(); syncExhibits(); syncVoteVisuals(); }
@@ -705,47 +764,79 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       if (bufferedTrain) { trainTarget.x = bufferedTrain.x; trainTarget.z = bufferedTrain.z; trainTarget.rotation = bufferedTrain.rotation; }
       const active = initialized && room?.connection?.isOpen && !customizerOpenRef.current && !document.hidden && !landscapeRequiredRef.current && (touchDevice || document.hasFocus()) && !knockedRef.current && trainSeatRef.current < 0;
       if (!active) onBlur();
-      const step = active ? walkingStep(forward, side, yaw, dt) : { dx: 0, dz: 0 };
+      const ownVehicle = drivingRef.current ? vehicleMeshes.get(drivingRef.current) : undefined;
+      const walking = active && !drivingRef.current;
+      const step = walking ? walkingStep(forward, side, yaw, dt) : { dx: 0, dz: 0 };
       local.x += step.dx; local.z += step.dz; unsent.dx += step.dx; unsent.dz += step.dz;
       if (step.dx || step.dz) local.rotation = facingRotation(step.dx, step.dz);
-      if (active && jumpRef.current) {
+      if (walking && jumpRef.current) {
         jumpRef.current = false;
         if (time - jumpTime >= 900) { jumpTime = time; room.send("jump"); }
       }
+      if (ownVehicle && room?.connection?.isOpen && time - lastVehicleSend >= 75) {
+        const acceptsInput = active && !menuOpenRef.current;
+        const lift = liftRef.current || Number(keys.has("q")) - Number(keys.has("e"));
+        room.send("vehicle-input", {
+          revision: ownVehicle.state.revision, epoch: movementEpoch,
+          throttle: acceptsInput ? forward : 0, turn: acceptsInput ? side : 0, lift: acceptsInput ? lift : 0,
+        });
+        lastVehicleSend = time;
+      }
       const decay = Math.exp(-12 * dt);
       visualOffset.x *= decay; visualOffset.z *= decay;
-      const visual = trainSeatRef.current >= 0 ? trainSeatPosition(trainSeatRef.current) : { x: local.x + visualOffset.x, z: local.z + visualOffset.z, rotation: local.rotation };
+      const seated = trainSeatRef.current >= 0 ? trainSeatPosition(trainSeatRef.current) : null;
+      const visual = ownVehicle ? { x: ownVehicle.group.position.x, z: ownVehicle.group.position.z, rotation: ownVehicle.group.rotation.y }
+        : seated ?? { x: local.x + visualOffset.x, z: local.z + visualOffset.z, rotation: local.rotation };
       trainGroup.position.set(trainTarget.x, 0, trainTarget.z);
       trainGroup.rotation.y = trainTarget.rotation;
       if (time - lastTrainActionScan > 250) {
         lastTrainActionScan = time;
         const train = trainRef.current;
         const stopped = Boolean(train && ["waiting", "boarding", "dwell"].includes(train.phase));
-        const action = trainSeatRef.current >= 0 && stopped ? "leave" : train && canBoardTrain({ active: train.active, phase: train.phase, seats: train.seats, distance: Math.hypot(local.x - train.x, local.z - train.z) }) ? "board" : null;
+        const free = initialized && !knockedRef.current && !drivingRef.current && trainSeatRef.current < 0;
+        const action = initialized && trainSeatRef.current >= 0 && stopped ? "leave" : free && train && canBoardTrain({ active: train.active, phase: train.phase, seats: train.seats, distance: Math.hypot(local.x - train.x, local.z - train.z) }) ? "board" : null;
         setTrainAction((current) => current === action ? current : action);
+        let nearby: VehicleKind | "" = "";
+        let nearest = VEHICLE_ENTER_DISTANCE;
+        if (free) for (const { state } of vehicleMeshes.values()) {
+          if (state.driverId || state.y > LANDING_HEIGHT) continue;
+          const distance = Math.hypot(local.x - state.x, local.z - state.z);
+          if (distance <= nearest) { nearby = state.kind; nearest = distance; }
+        }
+        setVehicleNearby((current) => current === nearby ? current : nearby);
+        const landed = !ownVehicle || ownVehicle.state.y <= LANDING_HEIGHT;
+        setCanExitVehicle((current) => current === landed ? current : landed);
       }
       for (const [id, avatar] of avatarMeshes) {
-        const self = id === room?.sessionId, seat = avatar.userData.trainSeat as number, target = seat >= 0 ? trainSeatPosition(seat) : self ? visual : avatar.userData.target;
+        const self = id === room?.sessionId, seat = avatar.userData.trainSeat as number;
+        const driven = vehicleMeshes.get(avatar.userData.vehicleId);
+        const target = driven ? { x: driven.group.position.x, z: driven.group.position.z, rotation: driven.group.rotation.y }
+          : seat >= 0 ? trainSeatPosition(seat) : self ? visual : avatar.userData.target;
         const previousX = avatar.position.x, previousZ = avatar.position.z;
-        const blend = seat >= 0 || self ? 1 : 1 - Math.exp(-16 * dt);
+        const blend = driven || seat >= 0 || self ? 1 : 1 - Math.exp(-16 * dt);
         avatar.position.x += (target.x - avatar.position.x) * blend; avatar.position.z += (target.z - avatar.position.z) * blend;
         avatar.rotation.y += Math.atan2(Math.sin(target.rotation - avatar.rotation.y), Math.cos(target.rotation - avatar.rotation.y)) * blend;
-        const height = jumpHeight((time - (self ? jumpTime : avatar.userData.jumpTime)) / 1000); avatar.position.y = avatar.userData.knocked ? 0 : height;
-        const speed = seat >= 0 ? 0 : (self ? Math.hypot(step.dx, step.dz) : Math.hypot(avatar.position.x - previousX, avatar.position.z - previousZ)) / Math.max(dt, 0.001);
+        const height = driven ? 0 : jumpHeight((time - (self ? jumpTime : avatar.userData.jumpTime)) / 1000);
+        avatar.position.y = driven ? driven.group.position.y + 0.58 : avatar.userData.knocked ? 0 : height;
+        const speed = driven || seat >= 0 ? 0 : (self ? Math.hypot(step.dx, step.dz) : Math.hypot(avatar.position.x - previousX, avatar.position.z - previousZ)) / Math.max(dt, 0.001);
         avatar.userData.walking += (Math.min(1, speed / 4) - avatar.userData.walking) * (1 - Math.exp(-15 * dt));
         avatar.userData.walkPhase += Math.min(speed, 5) * dt * 2.4;
         const character = avatar.userData.character as THREE.Group | undefined;
-        if (character) animateAvatarCharacter(character, avatar.userData.walkPhase, avatar.userData.knocked ? 0 : avatar.userData.walking, height > 0, avatar.userData.knocked, self && teacher && wandRef.current);
+        if (character) animateAvatarCharacter(character, avatar.userData.walkPhase, avatar.userData.knocked ? 0 : avatar.userData.walking, height > 0, avatar.userData.knocked, self && teacher && wandRef.current && !driven, Boolean(driven));
         if (avatar.userData.shield && avatar.userData.shieldExpires <= Date.now()) { avatar.remove(avatar.userData.shield); avatar.userData.shield.geometry.dispose(); (avatar.userData.shield.material as THREE.Material).dispose(); avatar.userData.shield = null; }
       }
-      if (initialized && trainSeatRef.current < 0 && room?.connection?.isOpen && time - lastSend > 100) {
+      if (active && !drivingRef.current && time - lastSend > 100) {
         if (lastAcknowledged < 0) room.send("move", { ...local, movementEpoch });
         else if (unsent.dx || unsent.dz) {
           const move = { ...unsent, sequence: ++sequence }; pending.push(move); room.send("move", { ...move, rotation: local.rotation, movementEpoch });
         }
         unsent = { dx: 0, dz: 0 }; lastSend = time;
       }
-      const distance = 8 + cameraPitch * 10; camera.position.set(visual.x + Math.sin(yaw) * distance, 2 + cameraPitch * 10, visual.z + Math.cos(yaw) * distance); camera.lookAt(visual.x, 1.2, visual.z);
+      const distance = 8 + cameraPitch * 10;
+      const cameraYaw = ownVehicle ? yaw + ownVehicle.group.rotation.y + Math.PI : yaw;
+      const viewHeight = ownVehicle?.group.position.y ?? 0;
+      camera.position.set(visual.x + Math.sin(cameraYaw) * distance, viewHeight + 2 + cameraPitch * 10, visual.z + Math.cos(cameraYaw) * distance);
+      camera.lookAt(visual.x, viewHeight + 1.2, visual.z);
       if (time - lastAimCheck >= 100) {
         lastAimCheck = time;
         const valid = Boolean(currentAim());
@@ -809,10 +900,18 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     finally { setLoading(false); }
   }
   async function saveTrainSettings() {
+    const route = trainTrack(manifest?.blocks.length ?? 0);
+    const stationWaitSeconds = Object.fromEntries(route.filter(({ id }) => id && trainForm.stationWaitSeconds?.[id] !== undefined)
+      .map(({ id }) => [id, trainForm.stationWaitSeconds![id]!]));
+    if (Object.values(stationWaitSeconds).some((seconds) => !Number.isInteger(seconds) || seconds < 3 || seconds > 120)) {
+      setError("กรุณาระบุเวลาจอดเป็นจำนวนเต็ม 3–120 วินาที"); return;
+    }
+    const settings = { ...trainForm, stationWaitSeconds };
     setLoading(true); setError("");
     try {
-      await api(apiPath(classroomId, "/train"), { method: "PUT", body: JSON.stringify(trainForm) });
-      lastSavedTrainSettings.current = { ...trainForm };
+      await api(apiPath(classroomId, "/train"), { method: "PUT", body: JSON.stringify(settings) });
+      lastSavedTrainSettings.current = settings;
+      setTrainForm(settings);
       setTrainMessage("บันทึกตารางรถไฟแล้ว · จะใช้ในการออกเที่ยวถัดไป"); await load();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "บันทึกตารางรถไฟไม่สำเร็จ"); }
     finally { setLoading(false); }
@@ -821,6 +920,16 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     const train = trainRef.current;
     if (!train || !roomRef.current?.connection?.isOpen) return;
     roomRef.current.send(type, { revision: train.revision });
+  }
+  function vehicleCommand(action: "reset" | "enter" | "exit", kind: VehicleKind) {
+    const room = roomRef.current;
+    if (!room?.connection?.isOpen || !vehicles) return;
+    const vehicle = vehicles[kind];
+    if (action === "reset" && vehicle?.driverId && !window.confirm("ย้ายคนขับและยานพาหนะกลับไปที่จุดจอดหรือไม่?")) return;
+    setError("");
+    setVehicleMessage("");
+    if (action !== "reset") { setSelected(null); canvasRef.current?.focus({ preventScroll: true }); }
+    room.send("vehicle-" + action, { kind, revision: vehicle?.revision ?? 0, confirmedDriverId: vehicle?.driverId ?? "" });
   }
   async function setHidden(model: GalleryModel) {
     try { await api(apiPath(classroomId, `/files/${model.id}/visibility`), { method: "PUT", body: JSON.stringify({ hidden: !model.hidden }) }); setModels((all) => all.map((item) => item.id === model.id ? { ...item, hidden: !item.hidden } : item)); setSelected(null); }
@@ -849,6 +958,9 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   }
 
   const trainOpen = Boolean(trainView?.active && ["waiting", "boarding", "dwell"].includes(trainView.phase));
+  const trainBlocks = manifest?.blocks ?? [];
+  const startStation = trainStartStation(trainBlocks.find((block) => block.studentId === trainForm.startStudentId)?.layoutIndex ?? null, trainBlocks.length);
+  const stations = trainTrack(trainBlocks.length).filter(({ id }) => id);
   const trainStatus = !trainView ? "กำลังเชื่อมต่อรถไฟ…" : !trainView.active ? "ไม่มีนักเรียนในห้อง จึงยังไม่มีเส้นทางรถไฟ" : trainView.phase === "moving"
     ? `กำลังไป${stationLabel(trainView.nextStopId, manifest?.blocks ?? [])} · ถึงประมาณ ${countdown(trainView.arrivalAt, trainClock)}`
     : trainView.phase === "dwell" ? `จอดที่${stationLabel(trainView.stopId, manifest?.blocks ?? [])} · ออกใน ${countdown(trainView.departureAt, trainClock)}`
@@ -891,16 +1003,39 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         </section>}
         <aside className="gallery-train-panel" aria-label="รถไฟเที่ยวชมโลกเสมือน">
           <div className="gallery-train-status"><strong>🚂 รถไฟเที่ยวชม</strong><span>{trainStatus}</span><small>{trainView?.active ? `${trainView.seats}/12 ที่นั่ง · ${trainView.mode === "auto" ? "อัตโนมัติ" : "เริ่มโดยครู"}` : ""}</small></div>
-          <div className="gallery-train-actions">{teacher && trainView?.active && trainView.mode === "manual" && trainView.phase === "waiting" && <button className="button button-quiet" onClick={() => trainCommand("train-start")}>เริ่มเที่ยวรถ · นับถอยหลัง 10 วินาที</button>}</div>
+          <div className="gallery-train-actions">{teacher && trainView?.active && trainView.mode === "manual" && trainView.phase === "waiting" && <button className="button button-quiet" onClick={() => trainCommand("train-start")}>เริ่มนับถอยหลังออกจากสถานี</button>}</div>
           {teacher && <div className="gallery-train-settings">
             <label>ตารางรถ<select value={trainForm.mode} onChange={(event) => setTrainForm({ ...trainForm, mode: event.target.value as TrainSettings["mode"] })}><option value="auto">อัตโนมัติ</option><option value="manual">ครูเริ่มเอง</option></select></label>
             {trainForm.mode === "auto" && <label>ช่วงเวลา<select value={trainForm.intervalSeconds} onChange={(event) => setTrainForm({ ...trainForm, intervalSeconds: Number(event.target.value) as 60 | 120 })}><option value={60}>ทุก 1 นาที</option><option value={120}>ทุก 2 นาที</option></select></label>}
             <label>เริ่มจาก<select value={trainForm.startStudentId ?? ""} onChange={(event) => setTrainForm({ ...trainForm, startStudentId: event.target.value || null })}><option value="">สถานีทางเข้า</option>{manifest?.blocks.filter((block) => block.studentNumber !== null).map((block) => <option key={block.studentId} value={block.studentId}>เลขที่ {block.studentNumber} · {block.displayName}</option>)}</select></label>
+            {stations.length > 0 && <fieldset className="gallery-station-waits">
+              <legend>เวลาจอดแต่ละสถานี (วินาที)</legend>
+              <small>เว้นว่างเพื่อใช้ค่าเริ่มต้น</small>
+              {stations.map(({ id }) => <label key={id}>{stationLabel(id, trainBlocks)}
+                <input type="number" inputMode="numeric" min={3} max={120} step={1} placeholder={String(stationWaitMs(undefined, id, id === startStation) / 1000)}
+                  value={trainForm.stationWaitSeconds?.[id] ?? ""}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setTrainForm((form) => {
+                      const waits = { ...form.stationWaitSeconds };
+                      if (value === "") delete waits[id]; else waits[id] = Number(value);
+                      return { ...form, stationWaitSeconds: waits };
+                    });
+                  }} />
+              </label>)}
+            </fieldset>}
             <button className="button button-quiet" disabled={loading} onClick={() => void saveTrainSettings()}>บันทึกตาราง</button>
             <small>ใช้การตั้งค่าเมื่อรถว่างก่อนออกเที่ยวถัดไป · เลขที่ที่เลือกเริ่มที่สถานีประจำกลุ่มแถว</small>
             {trainMessage && <small role="status">{trainMessage}</small>}
           </div>}
         </aside>
+        {user.role === "owner" && vehicles && <section className="gallery-management">
+          <strong>จุดจอดยานพาหนะ</strong>
+          <div className="gallery-management-actions">{vehicleKinds.map((kind) => <button key={kind} className="button button-quiet" onClick={() => vehicleCommand("reset", kind)}>
+            {vehicles[kind] ? "รีเซ็ต" : "เรียก"}{vehicleNames[kind]}{vehicles[kind]?.driverId ? " · มีคนขับ" : ""}
+          </button>)}</div>
+          {vehicleMessage && <small role="status">{vehicleMessage}</small>}
+        </section>}
         <div className="gallery-management"><strong>ตัวละคร</strong><div className="gallery-management-actions"><button className="button button-quiet" onClick={() => { setError(""); setDraftAppearance({ ...appearance }); setCustomizerOpen(true); setMenuOpen(false); }}>ปรับแต่งตัวละคร</button></div></div>
         {teacher && <div className="gallery-management"><strong>จัดการโลกเสมือน</strong><p>{enabled ? "เปิดสำหรับนักเรียน" : "หยุดสำหรับนักเรียน · ครูเข้าชมได้"}</p><div className="gallery-management-actions"><button className="button button-quiet" disabled={loading} onClick={() => void setWorld(!enabled)}>{enabled ? "หยุดโลกสำหรับนักเรียน" : "เปิดโลกสำหรับนักเรียน"}</button><button className="button button-quiet" aria-pressed={wandMode} onClick={() => { setWandMode((value) => !value); setSelected(null); setMenuOpen(false); }}>{wandMode ? "เก็บไม้กายสิทธิ์" : "ถือไม้กายสิทธิ์"}</button></div></div>}
         {teacher && <section className="gallery-management gallery-access">
@@ -936,17 +1071,32 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         {error && <div className="notice" role="alert">{error}</div>}{!config && <p className="gallery-service-note">ยังไม่ได้ตั้งค่า Colyseus ใน Coolify</p>}
       </div>
       {error && !menuOpen && <div className="notice" role="alert">{error}</div>}
-      <canvas ref={canvasRef} className="gallery-canvas" aria-label="โลกเสมือนห้องเรียน กด WASD เพื่อเดิน Space เพื่อกระโดด และลากเพื่อหมุนมุมมอง" />
+      <canvas ref={canvasRef} className="gallery-canvas" tabIndex={0} aria-label="โลกเสมือนห้องเรียน กด WASD เพื่อเดิน Space เพื่อกระโดด และลากเพื่อหมุนมุมมอง" />
       {landscapeRequired && <div className="gallery-rotate-prompt" role="alert"><strong>หมุนโทรศัพท์เป็นแนวนอนเพื่อเล่น</strong><span>หมุนอุปกรณ์เพื่อให้ปุ่มควบคุมแสดงครบ</span>{close && <button className="button button-quiet" onClick={close}>กลับห้องเรียน</button>}</div>}
-      {wandMode && !customizerOpen && <>
+      {wandMode && !customizerOpen && !driving && !knockSeconds && <>
         <div ref={crosshairRef} className={`gallery-crosshair${aimValid ? "" : " unavailable"}`} style={{ left: `${(aimPoint.current.x + 1) * 50}%`, top: `${(1 - aimPoint.current.y) * 50}%` }} aria-hidden="true">{aimValid ? "＋" : "×"}</div>
         <p className="gallery-aim-hint">เลื่อนเมาส์หรือแตะเพื่อเล็ง · ลากเพื่อหมุนกล้อง · กด F หรือปุ่มยิง{!aimValid && <span>จุดนี้ยิงไม่ได้ — เลือกจุดเล็งใหม่</span>}</p>
         <button className="gallery-fire button button-primary" disabled={!castReady || !aimValid || knockSeconds > 0} onClick={() => fireWandRef.current()}>{castReady ? "ยิงเวทมนตร์ · F" : "กำลังชาร์จ…"}</button>
       </>}
-      {knockSeconds > 0 && <div className="gallery-knockdown" role="status">ถูกเวทมนตร์! จะกลับเข้าโลกใน {knockSeconds} วินาที</div>}
+      {knockSeconds > 0 && <div className="gallery-knockdown" role="status">{knockMessages[knockCause] ?? "ตัวละครล้ม"} · ฟื้นใน {knockSeconds} วินาที</div>}
       {trainAction && <button className="gallery-train-quick-action button button-primary" onClick={() => trainCommand(trainAction === "board" ? "train-board" : "train-leave")}>{trainAction === "board" ? "ขึ้นรถไฟ" : "ลงจากรถไฟ"}</button>}
+      {!menuOpen && !customizerOpen && !knockSeconds && (driving || vehicleNearby) && <div className={`gallery-vehicle-controls${driving ? " driving" : ""}`}>
+        {driving ? <>
+          <span className="gallery-drive-hint">{vehicleNames[driving]} · WASD{driving === "helicopter" ? " · Q ขึ้น / E ลง" : ""}</span>
+          {driving === "helicopter" && <div className="gallery-flight-buttons" aria-label="ควบคุมระดับความสูง">
+            {([1, -1] as const).map((direction) => <button key={direction} className="button button-quiet"
+              onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); liftRef.current = direction; }}
+              onPointerUp={() => { if (liftRef.current === direction) liftRef.current = 0; }}
+              onPointerCancel={() => { if (liftRef.current === direction) liftRef.current = 0; }}
+              onLostPointerCapture={() => { if (liftRef.current === direction) liftRef.current = 0; }}>
+              {direction > 0 ? "บินขึ้น ↑" : "ลดระดับ ↓"}
+            </button>)}
+          </div>}
+          <button className="button button-primary" disabled={!canExitVehicle} onClick={() => vehicleCommand("exit", driving)}>{canExitVehicle ? "ออกจากยานพาหนะ" : "ลงจอดก่อนออก"}</button>
+        </> : vehicleNearby && <button className="button button-primary" onClick={() => vehicleCommand("enter", vehicleNearby)}>ขับ{vehicleNames[vehicleNearby]}</button>}
+      </div>}
       <div className="gallery-touch" role="group" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); moveTouchJoystick(event, touchKnobRef.current, touchRef.current); }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) moveTouchJoystick(event, touchKnobRef.current, touchRef.current); }} onPointerUp={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} onPointerCancel={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} onLostPointerCapture={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} aria-label="ลากจอยสติ๊กเพื่อเดิน"><span ref={touchKnobRef} className="gallery-touch-knob" aria-hidden="true" /></div>
-      <button className="gallery-jump button button-quiet" disabled={customizerOpen || knockSeconds > 0} onPointerDown={(event) => { event.preventDefault(); jumpRef.current = true; }} onClick={(event) => { if (event.detail === 0) jumpRef.current = true; }}>กระโดด ↑</button>
+      {!driving && <button className="gallery-jump button button-quiet" disabled={customizerOpen || knockSeconds > 0} onPointerDown={(event) => { event.preventDefault(); jumpRef.current = true; }} onClick={(event) => { if (event.detail === 0) jumpRef.current = true; }}>กระโดด ↑</button>}
       {selected && <aside className="gallery-inspect"><button className="icon-button" onClick={() => setSelected(null)} aria-label="ปิด">×</button><p className="eyebrow">{selected.displayName} · เลขที่ {selected.studentNumber ?? "—"}</p><h3>{selected.originalName}</h3><p className="muted">{selected.assignmentTitle}</p><p>{selected.likes} ถูกใจ{selected.likes >= 6 ? " · ระดับทอง" : selected.likes >= 3 ? " · ระดับเงิน" : selected.likes > 0 ? " · ระดับทองแดง" : ""}</p>{selectedPageCount > 1 && <div className="gallery-display-pages"><span>ผลงานในพื้นที่ {selectedPage * 40 + 1}–{Math.min(selectedPage * 40 + 40, selectedStudentWork.length)} จาก {selectedStudentWork.length}</span><button className="text-button" disabled={selectedPage === 0} onClick={() => { const next = selectedStudentWork[(selectedPage - 1) * 40]; setDisplayPages((pages) => ({ ...pages, [selected.studentId]: selectedPage - 1 })); if (next) setSelected(next); }}>ก่อนหน้า</button><button className="text-button" disabled={selectedPage + 1 >= selectedPageCount} onClick={() => { const next = selectedStudentWork[(selectedPage + 1) * 40]; setDisplayPages((pages) => ({ ...pages, [selected.studentId]: selectedPage + 1 })); if (next) setSelected(next); }}>ถัดไป</button></div>}{user.role === "student" && selected.studentId !== manifest?.viewerStudentId && <><small>เหลือ {selectedVotesRemaining}/{voteSummary?.limit ?? 10} โหวตสำหรับงานนี้</small><button className="button button-quiet" disabled={!selected.likedByMe && selectedVotesRemaining <= 0} onClick={() => void like(selected)}>{selected.likedByMe ? "ยกเลิกโหวต · ได้สิทธิ์คืน" : selectedVotesRemaining <= 0 ? "โหวตครบแล้ว" : "โหวตผลงานนี้"}</button></>}{teacher && <button className="button button-quiet" onClick={() => void setHidden(selected)}>{selected.hidden ? "แสดงผลงาน" : "ซ่อนผลงาน"}</button>}<button className="button button-primary" onClick={() => setPreview(selected)}>เปิดดูโมเดล</button></aside>}
       {customizerOpen && <CharacterCustomizer appearance={draftAppearance} onChange={setDraftAppearance} onCancel={() => setCustomizerOpen(false)} onSave={() => void saveAppearance()} saving={loading} error={error} />}
     </section>

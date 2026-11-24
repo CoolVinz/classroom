@@ -5,6 +5,7 @@ import { sql } from "../db/client";
 import { HttpError } from "../http-error";
 import { checkRequestOrigin } from "../security";
 import { storedFilePath } from "../file-storage";
+import { trainTrack } from "../../gallery-server/src/train-layout.mjs";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const galleryVoteLimit = 10;
@@ -145,8 +146,8 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
         ORDER BY s.student_number NULLS LAST, s.display_name, s.id, f.created_at DESC, f.id LIMIT 40 OFFSET ${offset}`,
     ]);
     const [count] = await sql<{ count: number }[]>`SELECT COUNT(*)::int AS count FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id LEFT JOIN classroom.gallery_hidden_models h ON h.classroom_id=f.classroom_id AND h.file_id=f.id WHERE f.classroom_id=${params.classroomId} AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$' AND s.archived_at IS NULL AND a.archived_at IS NULL AND (${teacher !== null} OR h.file_id IS NULL)`;
-    const [train] = await sql<{ mode: "auto" | "manual"; intervalSeconds: number; startStudentId: string | null }[]>`SELECT w.train_mode AS mode, w.train_interval_seconds AS "intervalSeconds", CASE WHEN s.id IS NULL THEN NULL ELSE s.id END AS "startStudentId" FROM classroom.gallery_worlds w LEFT JOIN classroom.students s ON s.id=w.train_start_student_id AND s.classroom_id=w.classroom_id AND s.archived_at IS NULL AND s.student_number IS NOT NULL WHERE w.classroom_id=${params.classroomId}`;
-    return { classroomId: params.classroomId, classroomName: world.classroomName, enabled: world.enabled, blocks, models, nextOffset: offset + models.length < count.count ? offset + models.length : null, teacher: Boolean(teacher), viewerStudentId, train: { mode: train?.mode ?? "auto", intervalSeconds: train?.intervalSeconds ?? 120, startStudentId: train?.startStudentId ?? null } };
+    const [train] = await sql<{ mode: "auto" | "manual"; intervalSeconds: number; startStudentId: string | null; stationWaitSeconds: Record<string, number> }[]>`SELECT w.train_mode AS mode, w.train_interval_seconds AS "intervalSeconds", CASE WHEN s.id IS NULL THEN NULL ELSE s.id END AS "startStudentId", w.train_station_wait_seconds AS "stationWaitSeconds" FROM classroom.gallery_worlds w LEFT JOIN classroom.students s ON s.id=w.train_start_student_id AND s.classroom_id=w.classroom_id AND s.archived_at IS NULL AND s.student_number IS NOT NULL WHERE w.classroom_id=${params.classroomId}`;
+    return { classroomId: params.classroomId, classroomName: world.classroomName, enabled: world.enabled, blocks, models, nextOffset: offset + models.length < count.count ? offset + models.length : null, teacher: Boolean(teacher), viewerStudentId, train: { mode: train?.mode ?? "auto", intervalSeconds: train?.intervalSeconds ?? 120, startStudentId: train?.startStudentId ?? null, stationWaitSeconds: train?.stationWaitSeconds ?? {} } };
   })
   .get("/classrooms/:classroomId/gallery/votes", async ({ params, request }) => {
     const teacher = await readActor(request);
@@ -192,9 +193,22 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
       const [student] = await sql<{ id: string }[]>`SELECT id FROM classroom.students WHERE id=${body.startStudentId} AND classroom_id=${params.classroomId} AND archived_at IS NULL AND student_number IS NOT NULL`;
       if (!student) throw new HttpError(400, "เลือกนักเรียนที่ยังใช้งานและมีเลขที่ในห้องนี้");
     }
-    await sql`INSERT INTO classroom.gallery_worlds(classroom_id,enabled,train_mode,train_interval_seconds,train_start_student_id) VALUES(${params.classroomId},false,${body.mode},${body.intervalSeconds},${body.startStudentId ?? null}) ON CONFLICT(classroom_id) DO UPDATE SET train_mode=EXCLUDED.train_mode, train_interval_seconds=EXCLUDED.train_interval_seconds, train_start_student_id=EXCLUDED.train_start_student_id, updated_at=NOW()`;
-    return { ok: true, mode: body.mode, intervalSeconds: body.intervalSeconds, startStudentId: body.startStudentId ?? null };
-  }, { body: t.Object({ mode: t.Union([t.Literal("auto"), t.Literal("manual")]), intervalSeconds: t.Union([t.Literal(60), t.Literal(120)]), startStudentId: t.Optional(t.Nullable(t.String({ format: "uuid" }))) }) })
+    if (body.stationWaitSeconds && Object.keys(body.stationWaitSeconds).length) {
+      const [roster] = await sql<{ count: number }[]>`SELECT COUNT(*)::int AS count FROM classroom.students WHERE classroom_id=${params.classroomId} AND archived_at IS NULL`;
+      const stationIds = new Set(trainTrack(roster.count).map((point) => point.id).filter(Boolean));
+      if (Object.keys(body.stationWaitSeconds).some((id) => !stationIds.has(id))) throw new HttpError(400, "เส้นทางรถไฟเปลี่ยนแล้ว กรุณาโหลดสถานีใหม่");
+    }
+    const waits = body.stationWaitSeconds ? sql.json(body.stationWaitSeconds) : null;
+    const [updated] = await sql<{ stationWaitSeconds: Record<string, number> }[]>`
+      INSERT INTO classroom.gallery_worlds(classroom_id,enabled,train_mode,train_interval_seconds,train_start_student_id,train_station_wait_seconds)
+      VALUES(${params.classroomId},false,${body.mode},${body.intervalSeconds},${body.startStudentId ?? null},COALESCE(${waits}::jsonb,'{}'::jsonb))
+      ON CONFLICT(classroom_id) DO UPDATE SET train_mode=EXCLUDED.train_mode,
+        train_interval_seconds=EXCLUDED.train_interval_seconds, train_start_student_id=EXCLUDED.train_start_student_id,
+        train_station_wait_seconds=COALESCE(${waits}::jsonb,gallery_worlds.train_station_wait_seconds), updated_at=NOW()
+      RETURNING train_station_wait_seconds AS "stationWaitSeconds"
+    `;
+    return { ok: true, mode: body.mode, intervalSeconds: body.intervalSeconds, startStudentId: body.startStudentId ?? null, ...updated };
+  }, { body: t.Object({ mode: t.Union([t.Literal("auto"), t.Literal("manual")]), intervalSeconds: t.Union([t.Literal(60), t.Literal(120)]), startStudentId: t.Optional(t.Nullable(t.String({ format: "uuid" }))), stationWaitSeconds: t.Optional(t.Record(t.String(), t.Integer({ minimum: 3, maximum: 120 }))) }) })
   .post("/classrooms/:classroomId/gallery/ticket", async ({ params, request }) => {
     checkRequestOrigin(request);
     const teacher = await readActor(request);

@@ -13,6 +13,7 @@ ENV NODE_ENV=production
 COPY --from=dependencies --chown=bun:bun /app/node_modules ./node_modules
 COPY --from=build --chown=bun:bun /app/package.json ./package.json
 COPY --from=build --chown=bun:bun /app/src ./src
+COPY --from=build --chown=bun:bun /app/gallery-server/src/train-layout.mjs ./gallery-server/src/train-layout.mjs
 COPY --from=build --chown=bun:bun /app/web/dist ./web/dist
 RUN mkdir -p /app/uploads && chown bun:bun /app/uploads
 USER bun

@@ -212,7 +212,7 @@ export function createAvatarCharacter(appearance: AvatarAppearance, withWand = f
   return character;
 }
 
-export function animateAvatarCharacter(character: THREE.Group, phase: number, walking: number, airborne: boolean, knocked = false, aiming = false) {
+export function animateAvatarCharacter(character: THREE.Group, phase: number, walking: number, airborne: boolean, knocked = false, aiming = false, driving = false) {
   const swing = Math.sin(phase) * 0.65 * walking;
   const [leftLeg, rightLeg, leftArm, rightArm] = character.userData.limbs as THREE.Group[];
   if (knocked) {
@@ -220,10 +220,10 @@ export function animateAvatarCharacter(character: THREE.Group, phase: number, wa
     leftArm.rotation.set(-0.45, 0, -0.45); rightArm.rotation.set(-0.25, 0, 0.45);
     return;
   }
-  leftLeg.rotation.x = airborne ? -0.25 : swing;
-  rightLeg.rotation.x = airborne ? 0.25 : -swing;
-  leftArm.rotation.x = airborne ? -0.9 : -swing;
-  rightArm.rotation.set(aiming ? -1.1 : airborne ? -0.9 : swing, 0, aiming ? -0.35 : 0);
+  leftLeg.rotation.x = driving ? -1.15 : airborne ? -0.25 : swing;
+  rightLeg.rotation.x = driving ? -1.15 : airborne ? 0.25 : -swing;
+  leftArm.rotation.x = airborne || driving ? -0.9 : -swing;
+  rightArm.rotation.set(aiming ? -1.1 : airborne || driving ? -0.9 : swing, 0, aiming ? -0.35 : 0);
   const wand = character.userData.wand as THREE.Group | undefined;
   if (wand) wand.visible = aiming;
 }
