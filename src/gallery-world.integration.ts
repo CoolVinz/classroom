@@ -210,6 +210,36 @@ test.skipIf(!database)("checks gallery admission, train respawns and vehicle con
     expect((await request(teacherToken, `/access/${member}`, "PUT", { assignmentId: currentAssignment, approved: true })).status).toBe(200);
     const studentRoomAgain = await join(studentToken);
     expect(studentRoomAgain.connection.isOpen).toBe(true);
+    const santaStarted = new Promise<{ ok: boolean; enabled: boolean }>((resolve) => teacherRoom.onMessage("santa-result", resolve));
+    teacherRoom.send("santa-toggle", { enabled: true });
+    expect(await Promise.race([santaStarted, Bun.sleep(2500).then(() => ({ ok: false, enabled: false }))])).toMatchObject({ ok: true, enabled: true });
+    await waitFor(() => scene(studentRoomAgain).santa.enabled === true);
+    await waitFor(() => scene(studentRoomAgain).presents.size > 0, 10500);
+    const present = [...scene(studentRoomAgain).presents.values()][0];
+    expect(present).not.toHaveProperty("kind");
+    const deniedOpen = new Promise<{ ok: boolean }>((resolve) => teacherRoom.onMessage("present-result", resolve));
+    teacherRoom.send("open-present", { id: present.id });
+    expect(await Promise.race([deniedOpen, Bun.sleep(1500).then(() => ({ ok: true }))])).toMatchObject({ ok: false });
+    await moveTo(studentRoomAgain, present.x, present.z);
+    const failedDuplicate = new Promise<{ ok: boolean }>((resolve) => studentRoomAgain.onMessage("present-result", resolve));
+    const foundGift = new Promise<{ kind: "bomb" | "points"; balance?: number; detonateAt?: number }>((resolve) => studentRoomAgain.onMessage("gift-result", resolve));
+    studentRoomAgain.send("open-present", { id: present.id });
+    studentRoomAgain.send("open-present", { id: present.id });
+    const duplicateResult = await Promise.race([failedDuplicate, Bun.sleep(2000).then(() => null)]);
+    expect(duplicateResult?.ok).toBe(false);
+    const giftResult = await Promise.race([foundGift, Bun.sleep(2500).then(() => null)]);
+    expect(giftResult?.kind === "bomb" || giftResult?.kind === "points").toBe(true);
+    if (giftResult?.kind === "points") {
+      expect(giftResult.balance).toBe(1);
+      expect(await (await app.handle(new Request("http://localhost/api/student/gallery-points", { headers: studentHeaders }))).json()).toEqual({ balance: 1 });
+    } else {
+      await waitFor(() => rider(studentRoomAgain).knockCause === "santa", 7000);
+      expect(rider(studentRoomAgain).respawnAt).toBeGreaterThan(Date.now());
+    }
+    const santaStopped = new Promise<{ ok: boolean; enabled: boolean }>((resolve) => teacherRoom.onMessage("santa-result", resolve));
+    teacherRoom.send("santa-toggle", { enabled: false });
+    expect(await Promise.race([santaStopped, Bun.sleep(2500).then(() => ({ ok: false, enabled: true }))])).toMatchObject({ ok: true, enabled: false });
+    await waitFor(() => !scene(studentRoomAgain).santa.enabled && scene(studentRoomAgain).presents.size === 0 && scene(studentRoomAgain).blasts.size === 0);
     const teacherCasts: { ok: boolean }[] = [];
     const teacherCastResults = new Promise<{ ok: boolean }[]>((resolve) => teacherRoom.onMessage("cast-result", (value: { ok: boolean }) => { teacherCasts.push(value); if (teacherCasts.length === 2) resolve(teacherCasts); }));
     const shotId = randomUUID();
@@ -248,4 +278,4 @@ test.skipIf(!database)("checks gallery admission, train respawns and vehicle con
     await sql`DELETE FROM classroom.teachers WHERE id=${teacher}`;
     await rm(uploadDir, { recursive: true, force: true });
   }
-}, 45000);
+}, 60000);

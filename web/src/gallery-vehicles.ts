@@ -3,7 +3,7 @@ import { vehicleSpecs, type VehicleKind } from "../../gallery-server/src/vehicle
 
 export type VehicleState = { kind: VehicleKind; x: number; y: number; z: number; rotation: number; revision: number; driverId: string };
 export const vehicleNames: Record<VehicleKind, string> = { car: "รถยนต์", bike: "มอเตอร์ไซค์", helicopter: "เฮลิคอปเตอร์" };
-export const knockMessages: Record<string, string> = { train: "ถูกรถไฟชน", car: "ถูกรถยนต์ชน", bike: "ถูกมอเตอร์ไซค์ชน", helicopter: "ถูกเฮลิคอปเตอร์ชน", wand: "ถูกเวทมนตร์" };
+export const knockMessages: Record<string, string> = { train: "ถูกรถไฟชน", car: "ถูกรถยนต์ชน", bike: "ถูกมอเตอร์ไซค์ชน", helicopter: "ถูกเฮลิคอปเตอร์ชน", wand: "ถูกเวทมนตร์", santa: "โดนระเบิดของขวัญซานต้า" };
 
 export function vehicleModel(kind: VehicleKind) {
   const model = new THREE.Group();

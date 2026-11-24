@@ -170,6 +170,15 @@ describe("student submission API", () => {
       studentToken = signedIn.headers.get("set-cookie")!.split(";")[0].split("=")[1];
       let studentHeaders = { cookie: signedIn.headers.get("set-cookie")!.split(";")[0], origin: "http://localhost:3000" };
       const teacherHeaders = { cookie: `classroom_session=${teacherToken}`, origin: "http://localhost:3000" };
+      const pointBalance = (headers?: HeadersInit) => app.handle(new Request("http://localhost/api/student/gallery-points", { headers }));
+      expect((await pointBalance()).status).toBe(401);
+      expect((await pointBalance(teacherHeaders)).status).toBe(401);
+      expect(await (await pointBalance(studentHeaders)).json()).toEqual({ balance: 0 });
+      const pointGiftA = randomUUID(), pointGiftB = randomUUID();
+      await sql`INSERT INTO classroom.gallery_point_claims(gift_id,account_id,classroom_id) VALUES
+        (${pointGiftA},${accountId},${roomA}),(${pointGiftB},${accountId},${roomB})`;
+      await sql`INSERT INTO classroom.gallery_point_claims(gift_id,account_id,classroom_id) VALUES (${pointGiftA},${accountId},${roomB}) ON CONFLICT(gift_id) DO NOTHING`;
+      expect(await (await pointBalance(studentHeaders)).json()).toEqual({ balance: 2 });
 
       const refreshClasses = (headers?: HeadersInit) => app.handle(new Request("http://localhost/api/student/classrooms/refresh", { method: "POST", headers }));
       const getClassIds = async (response: Response) => {

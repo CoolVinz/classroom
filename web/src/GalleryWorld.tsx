@@ -15,6 +15,7 @@ import { blockPosition, exhibitPosition, trainStartStation, trainTrack } from ".
 import { canBoardTrain, stationWaitMs } from "../../gallery-server/src/train-rules.mjs";
 import { LANDING_HEIGHT, VEHICLE_BAY_Z, VEHICLE_ENTER_DISTANCE, vehicleKinds, vehicleSpecs, type VehicleKind } from "../../gallery-server/src/vehicles.mjs";
 import { knockMessages, vehicleModel, vehicleNames, type VehicleState } from "./gallery-vehicles";
+import { createPresentBlast, createPresentModel, createSantaModel, disposeSantaModel } from "./gallery-santa";
 
 type User = { role: "owner" | "teacher" | "student"; displayName: string };
 type GalleryModel = { id: string; studentId: string; displayName: string; studentNumber: number | null; assignmentId: string; assignmentTitle: string; originalName: string; mediaType: string; materialAvailable: boolean; createdAt: string; hidden: boolean; likes: number; likedByMe: boolean };
@@ -27,6 +28,8 @@ type GalleryAccess = { mode: "submission" | "approval"; requiredAssignmentId: st
 type Avatar = AvatarAppearance & { displayName: string; role: string; x: number; z: number; rotation: number; sequence?: number; jump?: number; movementEpoch?: number; knocked?: boolean; knockCause?: string; respawnAt?: number; protectedUntil?: number; trainSeat?: number; vehicleId?: VehicleKind | "" };
 type VehicleAvailability = Partial<Record<VehicleKind, { revision: number; driverId: string }>>;
 type BoltVisual = { group: THREE.Group; trail: THREE.Line; target: THREE.Vector3 };
+type PresentView = { x: number; z: number; expiresAt: number };
+type SantaView = { enabled: boolean; x: number; z: number; rotation: number };
 
 function apiPath(classroomId: string, suffix = "") { return `/classrooms/${classroomId}/gallery${suffix}`; }
 function colorFor(value: string) { let hash = 0; for (const ch of value) hash = (hash * 31 + ch.charCodeAt(0)) | 0; return new THREE.Color().setHSL((Math.abs(hash) % 360) / 360, 0.48, 0.56); }
@@ -53,6 +56,8 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   const modelsRef = useRef(models);
   const [voteSummary, setVoteSummary] = useState<VoteSummary | null>(null);
   const voteSummaryRef = useRef(voteSummary);
+  const santaActiveRef = useRef(false);
+  const presentPositionsRef = useRef(new Map<string, PresentView>());
   const [displayPages, setDisplayPages] = useState<Record<string, number>>({});
   const displayPagesRef = useRef(displayPages);
   const [selected, setSelected] = useState<GalleryModel | null>(null);
@@ -66,6 +71,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   const [trainAction, setTrainAction] = useState<"board" | "leave" | null>(null);
   const [trainForm, setTrainForm] = useState<TrainSettings>({ mode: "auto", intervalSeconds: 120, startStudentId: null });
   const [trainMessage, setTrainMessage] = useState("");
+  const [santaMessage, setSantaMessage] = useState("");
   const [vehicles, setVehicles] = useState<VehicleAvailability | null>(null);
   const [driving, setDriving] = useState<VehicleKind | "">("");
   const [vehicleNearby, setVehicleNearby] = useState<VehicleKind | "">("");
@@ -82,6 +88,13 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   const lastSavedTrainSettings = useRef<TrainSettings | null>(null);
   const [wandMode, setWandMode] = useState(false);
   const [aimValid, setAimValid] = useState(false);
+  const [santaActive, setSantaActive] = useState(false);
+  const [pointBalance, setPointBalance] = useState<number | null>(null);
+  const [nearestPresent, setNearestPresent] = useState("");
+  const [openingPresent, setOpeningPresent] = useState("");
+  const [giftMessage, setGiftMessage] = useState("");
+  const [blastDeadline, setBlastDeadline] = useState(0);
+  const [blastSeconds, setBlastSeconds] = useState(0);
   const crosshairRef = useRef<HTMLDivElement>(null);
   const aimPoint = useRef(new THREE.Vector2());
   const [castReady, setCastReady] = useState(true);
@@ -139,6 +152,18 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   }, [knockSeconds > 0]);
   useEffect(() => { modelsRef.current = models; }, [models]);
   useEffect(() => { voteSummaryRef.current = voteSummary; }, [voteSummary]);
+  useEffect(() => { santaActiveRef.current = santaActive; }, [santaActive]);
+  useEffect(() => {
+    if (!blastDeadline) { setBlastSeconds(0); return; }
+    const update = () => setBlastSeconds(Math.max(0, Math.ceil((blastDeadline - Date.now()) / 1000)));
+    update(); const timer = window.setInterval(update, 200);
+    return () => window.clearInterval(timer);
+  }, [blastDeadline]);
+  useEffect(() => {
+    if (!giftMessage) return;
+    const timer = window.setTimeout(() => setGiftMessage(""), 4000);
+    return () => window.clearTimeout(timer);
+  }, [giftMessage]);
   useEffect(() => { displayPagesRef.current = displayPages; }, [displayPages]);
   useEffect(() => { manifestRef.current = manifest; }, [manifest]);
   useEffect(() => {
@@ -147,7 +172,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       lastSavedTrainSettings.current = { ...manifest.train }; setTrainForm({ ...manifest.train });
     }
   }, [manifest?.train]);
-  useEffect(() => { lastSavedTrainSettings.current = null; setTrainView(null); setTrainSeat(-1); setDisplayPages({}); }, [classroomId]);
+  useEffect(() => { lastSavedTrainSettings.current = null; setTrainView(null); setTrainSeat(-1); setDisplayPages({}); setSantaActive(false); setPointBalance(null); setNearestPresent(""); setGiftMessage(""); }, [classroomId]);
   customizerOpenRef.current = customizerOpen;
   menuOpenRef.current = menuOpen;
   wandRef.current = wandMode;
@@ -169,6 +194,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   useEffect(() => {
     let alive = true;
     void api<AvatarAppearance>("/gallery/avatar").then((value) => { if (alive) setAppearance(value); }).catch((reason) => { if (alive) setError(reason instanceof Error ? reason.message : "โหลดตัวละครไม่สำเร็จ"); });
+    if (!teacher) void api<{ balance: number }>("/student/gallery-points").then(({ balance }) => { if (alive) setPointBalance(balance); }).catch(() => {});
     void api<{ url: string }>("/gallery/config").then((server) => { if (alive) setConfig(server.url); }).catch(() => {});
     void Promise.all([api<Manifest>(apiPath(classroomId)), api<VoteSummary>(apiPath(classroomId, "/votes")).catch((reason) => { if (alive) setError(reason instanceof Error ? reason.message : "โหลดโควตาโหวตไม่สำเร็จ"); return null; })]).then(([value, votes]) => {
       if (alive) { setManifest(value); setEnabled(value.enabled); setModels(value.models); if (votes) setVoteSummary(votes); }
@@ -260,6 +286,11 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     };
     const trainTrackGroup = new THREE.Group(); scene.add(trainTrackGroup);
     const trainGroup = new THREE.Group(); scene.add(trainGroup);
+    const santaGroup = createSantaModel(); santaGroup.visible = false; scene.add(santaGroup);
+    const santaTarget = new THREE.Vector3(-29, 0, 8);
+    const presentMeshes = new Map<string, THREE.Group>();
+    const blastMeshes = new Map<string, THREE.Group>();
+    const presentPositions = new Map<string, PresentView>();
     const vehicleMeshes = new Map<VehicleKind, { group: THREE.Group; state: VehicleState; position: THREE.Vector3 }>();
     trainGroup.visible = false;
     const trainMaterials = new Map<number, THREE.Material>();
@@ -624,6 +655,17 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       room.onMessage("cast-result", ({ ok }: { ok: boolean }) => { if (!ok) setError("ยิงไม่ได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง"); });
       room.onMessage("train-result", ({ ok, message }: { ok: boolean; message: string }) => { setTrainMessage(message); if (!ok) setError(message); });
       room.onMessage("vehicle-result", ({ ok, message }: { ok: boolean; message: string }) => { setVehicleMessage(message); if (!ok) setError(message); });
+      room.onMessage("santa-result", ({ ok, enabled, message }: { ok: boolean; enabled?: boolean; message: string }) => {
+        setSantaMessage(message);
+        if (ok) setSantaActive(Boolean(enabled)); else setError(message);
+      });
+      room.onMessage("present-result", ({ ok, message }: { ok: boolean; message: string }) => { setOpeningPresent(""); if (!ok) setGiftMessage(message); });
+      room.onMessage("present-opened", ({ kind }: { kind: "bomb" | "points" }) => { setGiftMessage(kind === "bomb" ? "กับดักของขวัญ! ออกจากวงสีแดงก่อนระเบิด" : "พบแต้มโลกเสมือน 1 แต้ม!"); });
+      room.onMessage("gift-result", ({ kind, balance, detonateAt }: { kind: "bomb" | "points"; balance?: number; detonateAt?: number }) => {
+        setOpeningPresent("");
+        if (kind === "points" && balance !== undefined) { setPointBalance(balance); setGiftMessage("ได้รับ 1 แต้มโลกเสมือน!"); }
+        if (kind === "bomb" && detonateAt) setGiftMessage(`กับดักของขวัญ! ระเบิดใน ${Math.max(1, Math.ceil((detonateAt - Date.now()) / 1000))} วินาที`);
+      });
       room.onMessage("knocked", ({ respawnAt, cause }: { respawnAt: number; cause?: string }) => { knockedRef.current = true; knockUntil.current = respawnAt; setKnockCause(cause ?? "wand"); setKnockSeconds(Math.max(1, Math.ceil((respawnAt - Date.now()) / 1000))); });
       room.onMessage("respawn", ({ movementEpoch: epoch, x, z }: { movementEpoch: number; x: number; z: number }) => { knockedRef.current = false; knockUntil.current = 0; setKnockSeconds(0); movementEpoch = epoch; local = { x, z, rotation: 0 }; unsent = { dx: 0, dz: 0 }; pending = []; lastAcknowledged = -1; visualOffset = { x: 0, z: 0 }; });
       room.onMessage("wand-impact", ({ x, y, z }: { x: number; y: number; z: number }) => {
@@ -631,8 +673,37 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 6), new THREE.MeshBasicMaterial({ color: 0x84f4ff, transparent: true, opacity: 0.9 }));
         mesh.position.set(x, y, z); scene.add(mesh); effectMeshes.current.push({ mesh, until: performance.now() + 450 });
       });
+      room.onMessage("santa-explosion", ({ x, y, z }: { x: number; y: number; z: number }) => {
+        if (effectMeshes.current.length >= 20) { const old = effectMeshes.current.shift()!; scene.remove(old.mesh); old.mesh.geometry.dispose(); (old.mesh.material as THREE.Material).dispose(); }
+        const mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(1, 1), new THREE.MeshBasicMaterial({ color: 0xff9c43, transparent: true, opacity: 0.92 }));
+        mesh.position.set(x, y + 0.8, z); scene.add(mesh); effectMeshes.current.push({ mesh, until: performance.now() + 600 });
+      });
       room.onStateChange((state: any) => {
         if (!alive) return;
+        if (state.santa) {
+          const wire = state.santa as SantaView;
+          santaActiveRef.current = wire.enabled;
+          setSantaActive((current) => current === wire.enabled ? current : wire.enabled);
+          santaTarget.set(wire.x, 0, wire.z); santaGroup.userData.rotationTarget = wire.rotation; santaGroup.visible = wire.enabled;
+        }
+        const currentPresents = new Set<string>(); presentPositions.clear();
+        state.presents?.forEach((present: { id: string; x: number; z: number; expiresAt: number }, id: string) => {
+          currentPresents.add(id); presentPositions.set(id, { x: present.x, z: present.z, expiresAt: present.expiresAt });
+          let mesh = presentMeshes.get(id);
+          if (!mesh) { mesh = createPresentModel(); scene.add(mesh); presentMeshes.set(id, mesh); }
+          mesh.position.set(present.x, 0, present.z);
+        });
+        presentPositionsRef.current = new Map(presentPositions);
+        for (const [id, mesh] of presentMeshes) if (!currentPresents.has(id)) { scene.remove(mesh); disposeSantaModel(mesh); presentMeshes.delete(id); }
+        const currentBlasts = new Set<string>(); let nextBlast = 0;
+        state.blasts?.forEach((blast: { id: string; x: number; y: number; z: number; detonateAt: number }, id: string) => {
+          currentBlasts.add(id); if (!nextBlast || blast.detonateAt < nextBlast) nextBlast = blast.detonateAt;
+          let mesh = blastMeshes.get(id);
+          if (!mesh) { mesh = createPresentBlast(); scene.add(mesh); blastMeshes.set(id, mesh); }
+          mesh.position.set(blast.x, 0, blast.z);
+        });
+        setBlastDeadline((current) => current === nextBlast ? current : nextBlast);
+        for (const [id, mesh] of blastMeshes) if (!currentBlasts.has(id)) { scene.remove(mesh); disposeSantaModel(mesh); blastMeshes.delete(id); }
         if (state.vehicles) {
           const availability: VehicleAvailability = {};
           state.vehicles.forEach((vehicle: VehicleState, kind: VehicleKind) => {
@@ -746,6 +817,12 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     const render = (time: number) => {
       if (!alive || document.hidden) { frame = 0; return; } frame = requestAnimationFrame(render); const dt = Math.min((time - lastFrame) / 1000, 0.05); lastFrame = time;
       for (const visual of boltMeshes.current.values()) visual.group.position.lerp(visual.target, 1 - Math.exp(-45 * dt));
+      santaGroup.position.lerp(santaTarget, 1 - Math.exp(-12 * dt));
+      const santaAngle = (santaGroup.userData.rotationTarget as number | undefined) ?? 0;
+      santaGroup.rotation.y += Math.atan2(Math.sin(santaAngle - santaGroup.rotation.y), Math.cos(santaAngle - santaGroup.rotation.y)) * (1 - Math.exp(-10 * dt));
+      santaGroup.position.y = Math.sin(time * 0.003) * 0.035;
+      for (const [id, gift] of presentMeshes) { gift.rotation.y += dt * 0.45; gift.position.y = 0.035 + Math.sin(time * 0.004 + id.length) * 0.035; }
+      for (const [id, blast] of blastMeshes) blast.scale.setScalar(5 * (1 + Math.sin(time * 0.012 + id.length) * 0.035));
       for (const { group, state, position } of vehicleMeshes.values()) {
         const blend = 1 - Math.exp(-20 * dt);
         group.position.lerp(position, blend);
@@ -796,6 +873,12 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         const free = initialized && !knockedRef.current && !drivingRef.current && trainSeatRef.current < 0;
         const action = initialized && trainSeatRef.current >= 0 && stopped ? "leave" : free && train && canBoardTrain({ active: train.active, phase: train.phase, seats: train.seats, distance: Math.hypot(local.x - train.x, local.z - train.z) }) ? "board" : null;
         setTrainAction((current) => current === action ? current : action);
+        let giftId = "", giftDistance = 2;
+        if (user.role === "student" && santaActiveRef.current && free) for (const [id, gift] of presentPositionsRef.current) {
+          const distance = Math.hypot(local.x - gift.x, local.z - gift.z);
+          if (gift.expiresAt > Date.now() && distance <= giftDistance) { giftId = id; giftDistance = distance; }
+        }
+        setNearestPresent((current) => current === giftId ? current : giftId);
         let nearby: VehicleKind | "" = "";
         let nearest = VEHICLE_ENTER_DISTANCE;
         if (free) for (const { state } of vehicleMeshes.values()) {
@@ -921,6 +1004,18 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     if (!train || !roomRef.current?.connection?.isOpen) return;
     roomRef.current.send(type, { revision: train.revision });
   }
+  function santaCommand() {
+    const room = roomRef.current;
+    if (!room?.connection?.isOpen) return;
+    const enabled = !santaActive;
+    if (!enabled && !window.confirm("หยุดกิจกรรมซานต้า? ของขวัญและระเบิดที่ยังทำงานทั้งหมดจะถูกเก็บ")) return;
+    setSantaMessage("");
+    room.send("santa-toggle", { enabled });
+  }
+  function openNearestPresent() {
+    if (!nearestPresent || !roomRef.current?.connection?.isOpen || openingPresent) return;
+    setOpeningPresent(nearestPresent); roomRef.current.send("open-present", { id: nearestPresent });
+  }
   function vehicleCommand(action: "reset" | "enter" | "exit", kind: VehicleKind) {
     const room = roomRef.current;
     if (!room?.connection?.isOpen || !vehicles) return;
@@ -994,6 +1089,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         <div className="gallery-menu-header"><strong>เมนูโลกเสมือน</strong><div><button className="button button-quiet" onClick={() => setMenuOpen(false)}>ปิดเมนู</button>{close && <button className="button button-quiet" onClick={close}>กลับห้องเรียน</button>}</div></div>
         <div className="gallery-menu-room"><strong>{manifest?.classroomName ?? "โลกเสมือน"}</strong><small>{online} คนออนไลน์ · WASD/ลูกศร เดิน · Space กระโดด · ลากเพื่อหมุนมุมมอง</small></div>
         {user.role === "student" && <div className="gallery-attendance"><StudentAttendance /></div>}
+        {user.role === "student" && <section className="gallery-management gallery-point-balance"><strong>แต้มโลกเสมือน</strong><span>{pointBalance === null ? "กำลังโหลด…" : `${pointBalance} แต้ม`}</span><small>สะสมข้ามห้องเรียน · ใช้ในกิจกรรมภายหลังได้</small></section>}
         {user.role === "student" && <section className="gallery-management gallery-vote-list"><strong>โหวตผลงานของเพื่อน · ไม่เกิน 10 ครั้งต่องาน</strong>
           {voteSummary?.usage.map((item) => <small key={item.assignmentId}>{item.assignmentTitle}: ใช้แล้ว {item.used}/{voteSummary.limit} · เหลือ {Math.max(0, voteSummary.limit - item.used)}</small>)}
           {voteSummary?.myVotes.length ? voteSummary.myVotes.map((vote) => <div className="gallery-vote-entry" key={vote.fileId}>
@@ -1038,6 +1134,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         </section>}
         <div className="gallery-management"><strong>ตัวละคร</strong><div className="gallery-management-actions"><button className="button button-quiet" onClick={() => { setError(""); setDraftAppearance({ ...appearance }); setCustomizerOpen(true); setMenuOpen(false); }}>ปรับแต่งตัวละคร</button></div></div>
         {teacher && <div className="gallery-management"><strong>จัดการโลกเสมือน</strong><p>{enabled ? "เปิดสำหรับนักเรียน" : "หยุดสำหรับนักเรียน · ครูเข้าชมได้"}</p><div className="gallery-management-actions"><button className="button button-quiet" disabled={loading} onClick={() => void setWorld(!enabled)}>{enabled ? "หยุดโลกสำหรับนักเรียน" : "เปิดโลกสำหรับนักเรียน"}</button><button className="button button-quiet" aria-pressed={wandMode} onClick={() => { setWandMode((value) => !value); setSelected(null); setMenuOpen(false); }}>{wandMode ? "เก็บไม้กายสิทธิ์" : "ถือไม้กายสิทธิ์"}</button></div></div>}
+        {teacher && <section className="gallery-management"><strong>🎅 ซานต้าตัวแสบ</strong><p>{santaActive ? "กำลังกวาดตาดูทางเดิน · ของขวัญใหม่ทุก 8 วินาที" : "กิจกรรมปิดอยู่"}</p><div className="gallery-management-actions"><button className="button button-quiet" onClick={santaCommand}>{santaActive ? "หยุดกิจกรรมและเก็บของขวัญ" : "เริ่มกิจกรรมคริสต์มาส"}</button></div>{santaMessage && <small role="status">{santaMessage}</small>}</section>}
         {teacher && <section className="gallery-management gallery-access">
           <strong>สิทธิ์เข้าโลกของนักเรียน</strong>
           <p>งานล่าสุด: {galleryAccess?.requiredAssignmentTitle ?? "ยังไม่มีงานที่เปิดอยู่"}</p>
@@ -1073,6 +1170,9 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       {error && !menuOpen && <div className="notice" role="alert">{error}</div>}
       <canvas ref={canvasRef} className="gallery-canvas" tabIndex={0} aria-label="โลกเสมือนห้องเรียน กด WASD เพื่อเดิน Space เพื่อกระโดด และลากเพื่อหมุนมุมมอง" />
       {landscapeRequired && <div className="gallery-rotate-prompt" role="alert"><strong>หมุนโทรศัพท์เป็นแนวนอนเพื่อเล่น</strong><span>หมุนอุปกรณ์เพื่อให้ปุ่มควบคุมแสดงครบ</span>{close && <button className="button button-quiet" onClick={close}>กลับห้องเรียน</button>}</div>}
+      {user.role === "student" && nearestPresent && !knockSeconds && <button className="gallery-present-open button button-primary" disabled={Boolean(openingPresent)} onClick={openNearestPresent}>{openingPresent ? "กำลังเปิดของขวัญ…" : "🎁 เปิดของขวัญ"}</button>}
+      {blastSeconds > 0 && <div className="gallery-blast-countdown" role="alert">🎁 ระเบิดของขวัญใน {blastSeconds} วินาที · ออกจากวงสีแดง</div>}
+      {giftMessage && <div className="gallery-gift-message" role="status">{giftMessage}</div>}
       {wandMode && !customizerOpen && !driving && !knockSeconds && <>
         <div ref={crosshairRef} className={`gallery-crosshair${aimValid ? "" : " unavailable"}`} style={{ left: `${(aimPoint.current.x + 1) * 50}%`, top: `${(1 - aimPoint.current.y) * 50}%` }} aria-hidden="true">{aimValid ? "＋" : "×"}</div>
         <p className="gallery-aim-hint">เลื่อนเมาส์หรือแตะเพื่อเล็ง · ลากเพื่อหมุนกล้อง · กด F หรือปุ่มยิง{!aimValid && <span>จุดนี้ยิงไม่ได้ — เลือกจุดเล็งใหม่</span>}</p>

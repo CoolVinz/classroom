@@ -90,6 +90,12 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     if (!actor) throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
     return sql`SELECT e.classroom_id AS "classroomId", c.name AS "classroomName", e.student_entry_mode AS "entryMode", e.required_assignment_id AS "requiredAssignmentId", e.required_assignment_title AS "requiredAssignmentTitle", e.has_submission AS "hasSubmission", e.approved, e.entry_allowed AS "entryAllowed" FROM classroom.gallery_student_entry e JOIN classroom.classrooms c ON c.id=e.classroom_id JOIN classroom.gallery_worlds w ON w.classroom_id=e.classroom_id WHERE e.account_id=${actor.id} AND w.enabled ORDER BY c.name`;
   })
+  .get("/student/gallery-points", async ({ request }) => {
+    const actor = await readStudentActor(request);
+    if (!actor) throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
+    const [row] = await sql<{ balance: number }[]>`SELECT COUNT(*)::int AS balance FROM classroom.gallery_point_claims WHERE account_id=${actor.id}`;
+    return { balance: row.balance };
+  })
   .get("/classrooms/:classroomId/gallery/access", async ({ params, request }) => {
     const actor = await requireActor(request);
     await ownedClass(actor, params.classroomId);
