@@ -7,14 +7,14 @@ import ModelPreview from "./ModelPreview";
 import { loadModel, createModelObject, disposeModelObject } from "./model-view";
 import { galleryFileUrl, galleryTicketRequest } from "./gallery-api";
 import { galleryModelIdForHit } from "./gallery-picking";
-import { animateAvatarCharacter, avatarNameLabelY, createAvatarCharacter, defaultAvatarAppearance, disposeAvatarCharacter, type AvatarAppearance } from "./gallery-avatar";
+import { animateAvatarCharacter, avatarHipHeight, avatarNameLabelY, createAvatarCharacter, defaultAvatarAppearance, disposeAvatarCharacter, type AvatarAppearance } from "./gallery-avatar";
 import { correctionOffset, facingRotation, interpolateTrain, jumpHeight, reconcilePosition, touchDirection, walkingStep, type Move, type TrainSample } from "./gallery-motion";
 import { canvasAimPoint, wandAim } from "./gallery-aim";
 import { enterGalleryFullscreen, unlockGalleryOrientation } from "./gallery-fullscreen";
 import { blockPosition, exhibitPosition, trainStartStation, trainTrack } from "../../gallery-server/src/train-layout.mjs";
 import { canBoardTrain, stationWaitMs } from "../../gallery-server/src/train-rules.mjs";
 import { LANDING_HEIGHT, VEHICLE_BAY_Z, VEHICLE_ENTER_DISTANCE, vehicleKinds, vehicleSpecs, type VehicleKind } from "../../gallery-server/src/vehicles.mjs";
-import { knockMessages, vehicleModel, vehicleNames, type VehicleState } from "./gallery-vehicles";
+import { broomSeatHeight, knockMessages, vehicleModel, vehicleNames, type VehicleState } from "./gallery-vehicles";
 import { createPresentBlast, createPresentModel, createSantaModel, disposeSantaModel } from "./gallery-santa";
 import { depot, nearPlace, portal, rentalPads, shop } from "../../gallery-server/src/world-places.mjs";
 import { createActivityLandmarks, itemNames, shopItems, type ShopPrices, type Wallet } from "./gallery-activities";
@@ -1008,12 +1008,17 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         avatar.position.x += (target.x - avatar.position.x) * blend; avatar.position.z += (target.z - avatar.position.z) * blend;
         avatar.rotation.y += Math.atan2(Math.sin(target.rotation - avatar.rotation.y), Math.cos(target.rotation - avatar.rotation.y)) * blend;
         const height = driven ? 0 : jumpHeight((time - (self ? jumpTime : avatar.userData.jumpTime)) / 1000);
-        avatar.position.y = driven ? driven.group.position.y + 0.58 : avatar.userData.knocked ? 0 : height;
+        if (driven) {
+          const riderOffset = driven.state.kind === "broom" ? broomSeatHeight - avatarHipHeight : 0.58;
+          avatar.position.y = driven.group.position.y + riderOffset;
+        } else {
+          avatar.position.y = avatar.userData.knocked ? 0 : height;
+        }
         const speed = driven || seat >= 0 ? 0 : (self ? Math.hypot(step.dx, step.dz) : Math.hypot(avatar.position.x - previousX, avatar.position.z - previousZ)) / Math.max(dt, 0.001);
         avatar.userData.walking += (Math.min(1, speed / 4) - avatar.userData.walking) * (1 - Math.exp(-15 * dt));
         avatar.userData.walkPhase += Math.min(speed, 5) * dt * 2.4;
         const character = avatar.userData.character as THREE.Group | undefined;
-        if (character) animateAvatarCharacter(character, avatar.userData.walkPhase, avatar.userData.knocked ? 0 : avatar.userData.walking, height > 0, avatar.userData.knocked, self && wandRef.current && !driven, Boolean(driven));
+        if (character) animateAvatarCharacter(character, avatar.userData.walkPhase, avatar.userData.knocked ? 0 : avatar.userData.walking, height > 0, avatar.userData.knocked, self && wandRef.current && !driven, driven?.state.kind);
         if (avatar.userData.shield && avatar.userData.shieldExpires <= Date.now()) { avatar.remove(avatar.userData.shield); avatar.userData.shield.geometry.dispose(); (avatar.userData.shield.material as THREE.Material).dispose(); avatar.userData.shield = null; }
       }
       if (active && !drivingRef.current && time - lastSend > 100) {

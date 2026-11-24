@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+import type { VehicleKind } from "../../gallery-server/src/vehicles.mjs";
 
 export type AvatarAppearance = {
   skinColor: string;
@@ -20,6 +21,7 @@ export const defaultAvatarAppearance: AvatarAppearance = {
   hatStyle: "none", glassesStyle: "none", shoeStyle: "sneakers", hatColor: "#b84d4d", glassesColor: "#302721", shoeColor: "#303a4a",
 };
 export const avatarNameLabelY = 2.49;
+export const avatarHipHeight = 0.7;
 
 // Raising the front edge of the lower hair ring keeps the eyes clear while covering the back.
 type Section = [y: number, width: number, depth: number, forward?: number, frontLift?: number];
@@ -196,8 +198,8 @@ export function createAvatarCharacter(appearance: AvatarAppearance, withWand = f
     return pivot;
   };
   character.userData.limbs = [
-    limb("leftLeg", createLeg(appearance), -0.17, 0.7),
-    limb("rightLeg", createLeg(appearance), 0.17, 0.7),
+    limb("leftLeg", createLeg(appearance), -0.17, avatarHipHeight),
+    limb("rightLeg", createLeg(appearance), 0.17, avatarHipHeight),
     limb("leftArm", createArm(appearance, -1), -0.39, 1.28),
     limb("rightArm", createArm(appearance, 1), 0.39, 1.28),
   ];
@@ -212,18 +214,27 @@ export function createAvatarCharacter(appearance: AvatarAppearance, withWand = f
   return character;
 }
 
-export function animateAvatarCharacter(character: THREE.Group, phase: number, walking: number, airborne: boolean, knocked = false, aiming = false, driving = false) {
+export function animateAvatarCharacter(character: THREE.Group, phase: number, walking: number, airborne: boolean, knocked = false, aiming = false, vehicle?: VehicleKind) {
   const swing = Math.sin(phase) * 0.65 * walking;
   const [leftLeg, rightLeg, leftArm, rightArm] = character.userData.limbs as THREE.Group[];
+  character.rotation.x = 0;
   if (knocked) {
-    leftLeg.rotation.x = rightLeg.rotation.x = 0;
+    leftLeg.rotation.set(0, 0, 0); rightLeg.rotation.set(0, 0, 0);
     leftArm.rotation.set(-0.45, 0, -0.45); rightArm.rotation.set(-0.25, 0, 0.45);
     return;
   }
-  leftLeg.rotation.x = driving ? -1.15 : airborne ? -0.25 : swing;
-  rightLeg.rotation.x = driving ? -1.15 : airborne ? 0.25 : -swing;
-  leftArm.rotation.x = airborne || driving ? -0.9 : -swing;
-  rightArm.rotation.set(aiming ? -1.1 : airborne || driving ? -0.9 : swing, 0, aiming ? -0.35 : 0);
+  if (vehicle === "broom") {
+    character.rotation.x = 0.14;
+    leftLeg.rotation.set(-1.04, 0, -0.18);
+    rightLeg.rotation.set(-1.04, 0, 0.18);
+    leftArm.rotation.set(-0.38, 0, 0.43);
+    rightArm.rotation.set(-0.38, 0, -0.43);
+  } else {
+    leftLeg.rotation.set(vehicle ? -1.15 : airborne ? -0.25 : swing, 0, 0);
+    rightLeg.rotation.set(vehicle ? -1.15 : airborne ? 0.25 : -swing, 0, 0);
+    leftArm.rotation.set(airborne || vehicle ? -0.9 : -swing, 0, 0);
+    rightArm.rotation.set(aiming ? -1.1 : airborne || vehicle ? -0.9 : swing, 0, aiming ? -0.35 : 0);
+  }
   const wand = character.userData.wand as THREE.Group | undefined;
   if (wand) wand.visible = aiming;
 }

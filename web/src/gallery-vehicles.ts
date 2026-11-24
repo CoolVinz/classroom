@@ -4,6 +4,7 @@ import { vehicleSpecs, type VehicleKind } from "../../gallery-server/src/vehicle
 export type VehicleState = { id: string; kind: VehicleKind; rental: boolean; x: number; y: number; z: number; rotation: number; revision: number; driverId: string };
 export const vehicleNames: Record<VehicleKind, string> = { car: "รถยนต์", bike: "มอเตอร์ไซค์", helicopter: "เฮลิคอปเตอร์", broom: "ไม้กวาดบิน" };
 export const knockMessages: Record<string, string> = { train: "ถูกรถไฟชน", car: "ถูกรถยนต์ชน", bike: "ถูกมอเตอร์ไซค์ชน", helicopter: "ถูกเฮลิคอปเตอร์ชน", broom: "ถูกไม้กวาดบินชน", wand: "ถูกเวทมนตร์", santa: "โดนระเบิดของขวัญซานต้า" };
+export const broomSeatHeight = 0.55;
 
 export function vehicleModel(kind: VehicleKind) {
   const model = new THREE.Group();
@@ -36,7 +37,7 @@ export function vehicleModel(kind: VehicleKind) {
     box(dark, 0.88, 0.1, 0.15, 0, 1.2, 0.58);
     box(light, 0.22, 0.18, 0.16, 0, 0.98, 0.99);
   } else if (kind === "broom") {
-    box(dark, 0.12, 0.12, 2.45, 0, 0.49, 0.15);
+    box(dark, 0.12, 0.12, 2.45, 0, broomSeatHeight - 0.06, 0.15);
     box(light, 0.23, 0.24, 0.16, 0, 0.49, -0.51);
     const bristles = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.4, 0.92, 7), color);
     bristles.rotation.x = Math.PI / 2;
