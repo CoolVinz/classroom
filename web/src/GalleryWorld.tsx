@@ -22,7 +22,8 @@ type GalleryModel = { id: string; studentId: string; displayName: string; studen
 type VoteSummary = { limit: number; blockTotals: { studentId: string; votes: number }[]; usage: { assignmentId: string; assignmentTitle: string; used: number }[]; myVotes: { fileId: string; assignmentId: string; assignmentTitle: string; originalName: string; displayName: string; studentNumber: number | null; hidden: boolean; unavailable: boolean }[] };
 type TrainSettings = { mode: "auto" | "manual"; intervalSeconds: 60 | 120; startStudentId: string | null; stationWaitSeconds?: Record<string, number> };
 type TrainView = Omit<TrainSettings, "stationWaitSeconds"> & { active: boolean; x: number; z: number; rotation: number; phase: "waiting" | "boarding" | "moving" | "dwell"; stopId: string; nextStopId: string; departureAt: number; arrivalAt: number; seats: number; revision: number; layoutRoster: string };
-type Manifest = { enabled: boolean; classroomId: string; classroomName: string; blocks: { studentId: string; displayName: string; studentNumber: number | null; blockIndex: number; layoutIndex: number; archived: boolean }[]; models: GalleryModel[]; nextOffset: number | null; teacher: boolean; viewerStudentId: string | null; train: TrainSettings };
+type SantaSettings = { fuseSeconds: number; respawnSeconds: number };
+type Manifest = { enabled: boolean; classroomId: string; classroomName: string; blocks: { studentId: string; displayName: string; studentNumber: number | null; blockIndex: number; layoutIndex: number; archived: boolean }[]; models: GalleryModel[]; nextOffset: number | null; teacher: boolean; viewerStudentId: string | null; train: TrainSettings; santa: SantaSettings };
 type GalleryAccessStudent = { studentId: string; accountLinked: boolean; displayName: string; studentNumber: number | null; requiredAssignmentId: string | null; requiredAssignmentTitle: string | null; hasSubmission: boolean; approved: boolean; entryAllowed: boolean };
 type GalleryAccess = { mode: "submission" | "approval"; requiredAssignmentId: string | null; requiredAssignmentTitle: string | null; students: GalleryAccessStudent[] };
 type Avatar = AvatarAppearance & { displayName: string; role: string; x: number; z: number; rotation: number; sequence?: number; jump?: number; movementEpoch?: number; knocked?: boolean; knockCause?: string; respawnAt?: number; protectedUntil?: number; trainSeat?: number; vehicleId?: VehicleKind | "" };
@@ -72,6 +73,8 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   const [trainForm, setTrainForm] = useState<TrainSettings>({ mode: "auto", intervalSeconds: 120, startStudentId: null });
   const [trainMessage, setTrainMessage] = useState("");
   const [santaMessage, setSantaMessage] = useState("");
+  const [santaForm, setSantaForm] = useState<SantaSettings>({ fuseSeconds: 5, respawnSeconds: 10 });
+  const lastSavedSantaSettings = useRef<SantaSettings | null>(null);
   const [vehicles, setVehicles] = useState<VehicleAvailability | null>(null);
   const [driving, setDriving] = useState<VehicleKind | "">("");
   const [vehicleNearby, setVehicleNearby] = useState<VehicleKind | "">("");
@@ -172,7 +175,13 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       lastSavedTrainSettings.current = { ...manifest.train }; setTrainForm({ ...manifest.train });
     }
   }, [manifest?.train]);
-  useEffect(() => { lastSavedTrainSettings.current = null; setTrainView(null); setTrainSeat(-1); setDisplayPages({}); setSantaActive(false); setPointBalance(null); setNearestPresent(""); setGiftMessage(""); }, [classroomId]);
+  useEffect(() => {
+    if (!manifest?.santa) return;
+    if (!lastSavedSantaSettings.current || JSON.stringify(lastSavedSantaSettings.current) !== JSON.stringify(manifest.santa)) {
+      lastSavedSantaSettings.current = { ...manifest.santa }; setSantaForm({ ...manifest.santa });
+    }
+  }, [manifest?.santa]);
+  useEffect(() => { lastSavedTrainSettings.current = null; lastSavedSantaSettings.current = null; setTrainView(null); setTrainSeat(-1); setDisplayPages({}); setSantaActive(false); setPointBalance(null); setNearestPresent(""); setGiftMessage(""); setSantaForm({ fuseSeconds: 5, respawnSeconds: 10 }); }, [classroomId]);
   customizerOpenRef.current = customizerOpen;
   menuOpenRef.current = menuOpen;
   wandRef.current = wandMode;
@@ -1012,6 +1021,17 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     setSantaMessage("");
     room.send("santa-toggle", { enabled });
   }
+  async function saveSantaSettings() {
+    setLoading(true); setError("");
+    try {
+      const settings = { ...santaForm };
+      await api(apiPath(classroomId, "/santa"), { method: "PUT", body: JSON.stringify(settings) });
+      lastSavedSantaSettings.current = settings;
+      setSantaForm(settings);
+      setSantaMessage("บันทึกแล้ว · ใช้กับของขวัญระเบิดลูกใหม่"); await load();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "บันทึกการตั้งค่าระเบิดไม่สำเร็จ"); }
+    finally { setLoading(false); }
+  }
   function openNearestPresent() {
     if (!nearestPresent || !roomRef.current?.connection?.isOpen || openingPresent) return;
     setOpeningPresent(nearestPresent); roomRef.current.send("open-present", { id: nearestPresent });
@@ -1134,7 +1154,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         </section>}
         <div className="gallery-management"><strong>ตัวละคร</strong><div className="gallery-management-actions"><button className="button button-quiet" onClick={() => { setError(""); setDraftAppearance({ ...appearance }); setCustomizerOpen(true); setMenuOpen(false); }}>ปรับแต่งตัวละคร</button></div></div>
         {teacher && <div className="gallery-management"><strong>จัดการโลกเสมือน</strong><p>{enabled ? "เปิดสำหรับนักเรียน" : "หยุดสำหรับนักเรียน · ครูเข้าชมได้"}</p><div className="gallery-management-actions"><button className="button button-quiet" disabled={loading} onClick={() => void setWorld(!enabled)}>{enabled ? "หยุดโลกสำหรับนักเรียน" : "เปิดโลกสำหรับนักเรียน"}</button><button className="button button-quiet" aria-pressed={wandMode} onClick={() => { setWandMode((value) => !value); setSelected(null); setMenuOpen(false); }}>{wandMode ? "เก็บไม้กายสิทธิ์" : "ถือไม้กายสิทธิ์"}</button></div></div>}
-        {teacher && <section className="gallery-management"><strong>🎅 ซานต้าตัวแสบ</strong><p>{santaActive ? "กำลังกวาดตาดูทางเดิน · ของขวัญใหม่ทุก 8 วินาที" : "กิจกรรมปิดอยู่"}</p><div className="gallery-management-actions"><button className="button button-quiet" onClick={santaCommand}>{santaActive ? "หยุดกิจกรรมและเก็บของขวัญ" : "เริ่มกิจกรรมคริสต์มาส"}</button></div>{santaMessage && <small role="status">{santaMessage}</small>}</section>}
+        {teacher && <section className="gallery-management"><strong>🎅 ซานต้าตัวแสบ</strong><p>{santaActive ? "กำลังกวาดตาดูทางเดิน · ของขวัญใหม่ทุก 8 วินาที" : "กิจกรรมปิดอยู่"}</p><div className="gallery-management-actions"><button className="button button-quiet" onClick={santaCommand}>{santaActive ? "หยุดกิจกรรมและเก็บของขวัญ" : "เริ่มกิจกรรมคริสต์มาส"}</button></div><div className="gallery-access-mode"><label>นับถอยหลังก่อนระเบิด (วินาที)<input type="number" min={2} max={15} step={1} value={santaForm.fuseSeconds} onChange={(event) => setSantaForm({ ...santaForm, fuseSeconds: Number(event.target.value) })} /></label><label>เวลาคูลดาวน์ก่อนเกิดใหม่ (วินาที)<input type="number" min={3} max={60} step={1} value={santaForm.respawnSeconds} onChange={(event) => setSantaForm({ ...santaForm, respawnSeconds: Number(event.target.value) })} /></label><button className="button button-quiet" disabled={loading || santaForm.fuseSeconds < 2 || santaForm.fuseSeconds > 15 || santaForm.respawnSeconds < 3 || santaForm.respawnSeconds > 60} onClick={() => void saveSantaSettings()}>บันทึกการตั้งค่าระเบิด</button></div><small>นับถอยหลังปรับได้ 2–15 วินาที · คูลดาวน์เกิดใหม่ 3–60 วินาที</small>{santaMessage && <small role="status">{santaMessage}</small>}</section>}
         {teacher && <section className="gallery-management gallery-access">
           <strong>สิทธิ์เข้าโลกของนักเรียน</strong>
           <p>งานล่าสุด: {galleryAccess?.requiredAssignmentTitle ?? "ยังไม่มีงานที่เปิดอยู่"}</p>

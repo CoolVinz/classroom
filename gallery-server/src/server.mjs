@@ -9,7 +9,7 @@ import { databaseConfig } from "./database-config.mjs";
 import { distanceToNextStation, TRAIN_SPEED, trainTrack } from "./train-layout.mjs";
 import { canBoardTrain, firstDepartureAt, nextDepartureAt, stationWaitMs } from "./train-rules.mjs";
 import { advanceVehicle, hitsMovingBody, LANDING_HEIGHT, trainBodies, validVehicleInput, VEHICLE_BAY_Z, VEHICLE_ENTER_DISTANCE, vehicleKinds, vehicleSpecs } from "./vehicles.mjs";
-import { advanceSanta, bombFuseMs, canOpenPresent, maxPresents, presentDropMs, presentLifetimeMs, santaPath, insideBombRadius } from "./santa.mjs";
+import { advanceSanta, canOpenPresent, maxPresents, presentDropMs, presentLifetimeMs, santaPath, insideBombRadius } from "./santa.mjs";
 
 if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
 const pool = new pg.Pool(databaseConfig());
@@ -94,6 +94,7 @@ class ClassroomGallery extends Room {
   santaCommandTimes = new Map();
   openingGifts = new Set();
   santaLastTick = 0;
+  santaSettings = { fuseSeconds: 5, respawnSeconds: 10 };
   vehicleBounds = { minZ: -35 };
 
   async onAuth(_client, options) {
@@ -132,6 +133,7 @@ class ClassroomGallery extends Room {
     this.state.santa.nextDropAt = 0;
     this.santaLastTick = Date.now();
     await this.refreshTrainConfiguration(true).catch(() => {});
+    await this.refreshSantaSettings().catch(() => {});
     const readSignature = async () => {
       const { rows } = await pool.query(`SELECT
         (SELECT COUNT(*)::int FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id WHERE f.classroom_id=$1 AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$' AND s.archived_at IS NULL AND a.archived_at IS NULL) AS files,
@@ -167,7 +169,12 @@ class ClassroomGallery extends Room {
       }
     }, 15000);
     this.combatTimer = setInterval(() => { this.updateCombat(); this.updateTrain(); this.updateVehicles(); this.updateSanta(); }, 50);
-    this.trainSettingsTimer = setInterval(() => { void this.refreshTrainConfiguration().catch(() => {}); }, 5000);
+    this.trainSettingsTimer = setInterval(() => { void this.refreshTrainConfiguration().catch(() => {}); void this.refreshSantaSettings().catch(() => {}); }, 5000);
+  }
+
+  async refreshSantaSettings() {
+    const { rows } = await pool.query("SELECT santa_bomb_fuse_seconds AS \"fuseSeconds\", santa_respawn_seconds AS \"respawnSeconds\" FROM classroom.gallery_worlds WHERE classroom_id=$1", [this.classroomId]);
+    if (rows[0]) this.santaSettings = { fuseSeconds: Number(rows[0].fuseSeconds), respawnSeconds: Number(rows[0].respawnSeconds) };
   }
 
   async toggleSanta(client, message) {
@@ -223,7 +230,7 @@ class ClassroomGallery extends Room {
       } else {
         this.state.presents.delete(id);
         const blast = new Blast();
-        blast.id = randomUUID(); blast.x = present.x; blast.y = 0; blast.z = present.z; blast.detonateAt = Date.now() + bombFuseMs;
+        blast.id = randomUUID(); blast.x = present.x; blast.y = 0; blast.z = present.z; blast.detonateAt = Date.now() + this.santaSettings.fuseSeconds * 1000;
         this.state.blasts.set(blast.id, blast);
         this.broadcast("present-opened", { id, kind, x: present.x, z: present.z });
         client.send("gift-result", { kind, detonateAt: blast.detonateAt });
@@ -285,7 +292,7 @@ class ClassroomGallery extends Room {
         const jump = elapsed > 0 && elapsed < 0.75 ? Math.max(0, 6 * elapsed - 8 * elapsed * elapsed) : 0;
         const vehicle = this.state.vehicles.get(player.vehicleId);
         const vehicleHeight = vehicle ? vehicle.y + 0.58 : 0;
-        if (insideBombRadius(player, blast, jump + vehicleHeight)) this.knockAvatar(sessionId, player, now, "santa");
+        if (insideBombRadius(player, blast, jump + vehicleHeight)) this.knockAvatar(sessionId, player, now, "santa", this.santaSettings.respawnSeconds * 1000);
       }
       this.state.blasts.delete(id);
       this.broadcast("santa-explosion", { id, x: blast.x, y: blast.y, z: blast.z });
@@ -593,8 +600,8 @@ class ClassroomGallery extends Room {
     }
   }
 
-  knockAvatar(sessionId, player, now, cause) {
-    if (!knockPlayer(player, now, cause)) return false;
+  knockAvatar(sessionId, player, now, cause, cooldownMs) {
+    if (!knockPlayer(player, now, cause, cooldownMs)) return false;
     if (player.trainSeat >= 0) {
       this.trainSeats.delete(sessionId);
       player.trainSeat = -1;
@@ -710,7 +717,7 @@ class ClassroomGallery extends Room {
 }
 
 const gameServer = new Server({
-  express: (app) => app.get("/__gallery_protocol", (_request, response) => response.type("text").send("santa-v1")),
+  express: (app) => app.get("/__gallery_protocol", (_request, response) => response.type("text").send("santa-v2")),
 });
 gameServer.define("classroom", ClassroomGallery).filterBy(["classroomId"]);
 await gameServer.listen(Number(process.env.PORT ?? 2567));

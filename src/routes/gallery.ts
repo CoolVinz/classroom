@@ -140,7 +140,7 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     if (teacher) { await ownedClass(teacher, params.classroomId); await sql`INSERT INTO classroom.gallery_worlds(classroom_id,enabled) VALUES(${params.classroomId},false) ON CONFLICT DO NOTHING`; }
     else if (student) viewerStudentId = await studentClass(student.id, params.classroomId);
     else throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
-    const [world] = await sql<{ enabled: boolean; classroomName: string }[]>`SELECT w.enabled, c.name AS "classroomName" FROM classroom.gallery_worlds w JOIN classroom.classrooms c ON c.id=w.classroom_id WHERE w.classroom_id=${params.classroomId}`;
+    const [world] = await sql<{ enabled: boolean; classroomName: string; fuseSeconds: number; respawnSeconds: number }[]>`SELECT w.enabled, c.name AS "classroomName", w.santa_bomb_fuse_seconds AS "fuseSeconds", w.santa_respawn_seconds AS "respawnSeconds" FROM classroom.gallery_worlds w JOIN classroom.classrooms c ON c.id=w.classroom_id WHERE w.classroom_id=${params.classroomId}`;
     if (!world || (!teacher && !world.enabled)) throw new HttpError(404, "ยังไม่ได้เปิดโลกเสมือน");
     await ensureBlocks(params.classroomId);
     const offset = Math.max(0, Math.min(100000, Number(query.offset) || 0));
@@ -153,7 +153,7 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     ]);
     const [count] = await sql<{ count: number }[]>`SELECT COUNT(*)::int AS count FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id LEFT JOIN classroom.gallery_hidden_models h ON h.classroom_id=f.classroom_id AND h.file_id=f.id WHERE f.classroom_id=${params.classroomId} AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$' AND s.archived_at IS NULL AND a.archived_at IS NULL AND (${teacher !== null} OR h.file_id IS NULL)`;
     const [train] = await sql<{ mode: "auto" | "manual"; intervalSeconds: number; startStudentId: string | null; stationWaitSeconds: Record<string, number> }[]>`SELECT w.train_mode AS mode, w.train_interval_seconds AS "intervalSeconds", CASE WHEN s.id IS NULL THEN NULL ELSE s.id END AS "startStudentId", w.train_station_wait_seconds AS "stationWaitSeconds" FROM classroom.gallery_worlds w LEFT JOIN classroom.students s ON s.id=w.train_start_student_id AND s.classroom_id=w.classroom_id AND s.archived_at IS NULL AND s.student_number IS NOT NULL WHERE w.classroom_id=${params.classroomId}`;
-    return { classroomId: params.classroomId, classroomName: world.classroomName, enabled: world.enabled, blocks, models, nextOffset: offset + models.length < count.count ? offset + models.length : null, teacher: Boolean(teacher), viewerStudentId, train: { mode: train?.mode ?? "auto", intervalSeconds: train?.intervalSeconds ?? 120, startStudentId: train?.startStudentId ?? null, stationWaitSeconds: train?.stationWaitSeconds ?? {} } };
+    return { classroomId: params.classroomId, classroomName: world.classroomName, enabled: world.enabled, blocks, models, nextOffset: offset + models.length < count.count ? offset + models.length : null, teacher: Boolean(teacher), viewerStudentId, train: { mode: train?.mode ?? "auto", intervalSeconds: train?.intervalSeconds ?? 120, startStudentId: train?.startStudentId ?? null, stationWaitSeconds: train?.stationWaitSeconds ?? {} }, santa: { fuseSeconds: world.fuseSeconds, respawnSeconds: world.respawnSeconds } };
   })
   .get("/classrooms/:classroomId/gallery/votes", async ({ params, request }) => {
     const teacher = await readActor(request);
@@ -191,6 +191,19 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     await sql`INSERT INTO classroom.gallery_worlds(classroom_id,enabled) VALUES(${params.classroomId},${body.enabled}) ON CONFLICT(classroom_id) DO UPDATE SET enabled=EXCLUDED.enabled, updated_at=NOW()`;
     return { ok: true, enabled: body.enabled };
   }, { body: t.Object({ enabled: t.Boolean() }) })
+  .put("/classrooms/:classroomId/gallery/santa", async ({ params, body, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireActor(request);
+    await ownedClass(actor, params.classroomId);
+    const [settings] = await sql<{ fuseSeconds: number; respawnSeconds: number }[]>`
+      INSERT INTO classroom.gallery_worlds(classroom_id,enabled,santa_bomb_fuse_seconds,santa_respawn_seconds)
+      VALUES(${params.classroomId},false,${body.fuseSeconds},${body.respawnSeconds})
+      ON CONFLICT(classroom_id) DO UPDATE SET santa_bomb_fuse_seconds=EXCLUDED.santa_bomb_fuse_seconds,
+        santa_respawn_seconds=EXCLUDED.santa_respawn_seconds, updated_at=NOW()
+      RETURNING santa_bomb_fuse_seconds AS "fuseSeconds", santa_respawn_seconds AS "respawnSeconds"
+    `;
+    return { ok: true, ...settings };
+  }, { body: t.Object({ fuseSeconds: t.Integer({ minimum: 2, maximum: 15 }), respawnSeconds: t.Integer({ minimum: 3, maximum: 60 }) }) })
   .put("/classrooms/:classroomId/gallery/train", async ({ params, body, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);

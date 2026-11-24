@@ -28,9 +28,9 @@ export function playerHitFraction(from,to,player,jump=0) {
   const hits=[0.4,1.05,1.7].map((height)=>segmentHitFraction(from,to,{x:player.x,y:jump+height,z:player.z},0.55)).filter((value)=>value!==null);
   return hits.length ? Math.min(...hits) : null;
 }
-export function knockPlayer(player, now, cause = "wand") {
+export function knockPlayer(player, now, cause = "wand", cooldownMs = 10_000) {
   if ((cause === "wand" && player.role !== "student") || player.knocked || player.protectedUntil > now) return false;
-  player.knocked = true; player.respawnAt = now + 10_000; player.movementEpoch++;
+  player.knocked = true; player.respawnAt = now + cooldownMs; player.movementEpoch++;
   player.knockCause = cause;
   return true;
 }
