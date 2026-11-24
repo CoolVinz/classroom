@@ -1,7 +1,8 @@
 export const vehicleSpecs = {
   car: { speed: 12, bayX: 12, halfWidth: 1.05, halfLength: 1.85, height: 1.4 },
   bike: { speed: 15, bayX: 19, halfWidth: 0.45, halfLength: 1.15, height: 1.2 },
-  helicopter: { speed: 14, bayX: 27, halfWidth: 1.1, halfLength: 2.1, height: 1.6 },
+  helicopter: { speed: 14, bayX: 27, halfWidth: 1.1, halfLength: 2.1, height: 1.6, flying: true },
+  broom: { speed: 16, bayX: 34, halfWidth: 0.45, halfLength: 1.3, height: 1.15, flying: true },
 };
 export const vehicleKinds = Object.keys(vehicleSpecs);
 export const VEHICLE_BAY_Z = 11;
@@ -23,12 +24,11 @@ export function validVehicleInput(message) {
 
 export function advanceVehicle(vehicle, input, dt, bounds) {
   const spec = vehicleSpecs[vehicle.kind];
-  const flying = vehicle.kind === "helicopter";
   const rotation = vehicle.rotation - input.turn * dt * 1.9;
   const distance = input.throttle * dt * spec.speed;
   return {
     x: clamp(vehicle.x + Math.sin(rotation) * distance, -55, 55),
-    y: flying ? clamp(vehicle.y + input.lift * dt * 4, 0, MAX_FLIGHT_HEIGHT) : 0,
+    y: spec.flying ? clamp(vehicle.y + input.lift * dt * 4, 0, MAX_FLIGHT_HEIGHT) : 0,
     z: clamp(vehicle.z + Math.cos(rotation) * distance, bounds.minZ, 25),
     rotation: Math.atan2(Math.sin(rotation), Math.cos(rotation)),
   };

@@ -1,13 +1,13 @@
 import * as THREE from "three";
 import { vehicleSpecs, type VehicleKind } from "../../gallery-server/src/vehicles.mjs";
 
-export type VehicleState = { kind: VehicleKind; x: number; y: number; z: number; rotation: number; revision: number; driverId: string };
-export const vehicleNames: Record<VehicleKind, string> = { car: "รถยนต์", bike: "มอเตอร์ไซค์", helicopter: "เฮลิคอปเตอร์" };
-export const knockMessages: Record<string, string> = { train: "ถูกรถไฟชน", car: "ถูกรถยนต์ชน", bike: "ถูกมอเตอร์ไซค์ชน", helicopter: "ถูกเฮลิคอปเตอร์ชน", wand: "ถูกเวทมนตร์", santa: "โดนระเบิดของขวัญซานต้า" };
+export type VehicleState = { id: string; kind: VehicleKind; rental: boolean; x: number; y: number; z: number; rotation: number; revision: number; driverId: string };
+export const vehicleNames: Record<VehicleKind, string> = { car: "รถยนต์", bike: "มอเตอร์ไซค์", helicopter: "เฮลิคอปเตอร์", broom: "ไม้กวาดบิน" };
+export const knockMessages: Record<string, string> = { train: "ถูกรถไฟชน", car: "ถูกรถยนต์ชน", bike: "ถูกมอเตอร์ไซค์ชน", helicopter: "ถูกเฮลิคอปเตอร์ชน", broom: "ถูกไม้กวาดบินชน", wand: "ถูกเวทมนตร์", santa: "โดนระเบิดของขวัญซานต้า" };
 
 export function vehicleModel(kind: VehicleKind) {
   const model = new THREE.Group();
-  const color = new THREE.MeshStandardMaterial({ color: { car: 0xd58238, bike: 0x49a78d, helicopter: 0x477cad }[kind], flatShading: true });
+  const color = new THREE.MeshStandardMaterial({ color: { car: 0xd58238, bike: 0x49a78d, helicopter: 0x477cad, broom: 0xaa6539 }[kind], flatShading: true });
   const dark = new THREE.MeshStandardMaterial({ color: 0x253e43, roughness: 0.8 });
   const light = new THREE.MeshStandardMaterial({ color: 0xffedb9, emissive: 0x473e17 });
   const spec = vehicleSpecs[kind];
@@ -35,6 +35,13 @@ export function vehicleModel(kind: VehicleKind) {
     box(dark, 0.42, 0.12, 0.55, 0, 0.93, -0.3);
     box(dark, 0.88, 0.1, 0.15, 0, 1.2, 0.58);
     box(light, 0.22, 0.18, 0.16, 0, 0.98, 0.99);
+  } else if (kind === "broom") {
+    box(dark, 0.12, 0.12, 2.45, 0, 0.49, 0.15);
+    box(light, 0.23, 0.24, 0.16, 0, 0.49, -0.51);
+    const bristles = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.4, 0.92, 7), color);
+    bristles.rotation.x = Math.PI / 2;
+    bristles.position.set(0, 0.42, -0.98);
+    model.add(bristles);
   } else {
     box(color, 2.12, 0.55, 2.45, 0, 0.85, 0.26);
     box(dark, 1.9, 0.48, 0.31, 0, 1.18, 1.45);

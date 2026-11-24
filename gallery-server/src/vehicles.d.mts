@@ -1,5 +1,5 @@
-export type VehicleKind = "car" | "bike" | "helicopter";
-export const vehicleSpecs: Record<VehicleKind, { speed: number; bayX: number; halfWidth: number; halfLength: number; height: number }>;
+export type VehicleKind = "car" | "bike" | "helicopter" | "broom";
+export const vehicleSpecs: Record<VehicleKind, { speed: number; bayX: number; halfWidth: number; halfLength: number; height: number; flying?: boolean }>;
 export const vehicleKinds: VehicleKind[];
 export const VEHICLE_BAY_Z: number;
 export const MAX_FLIGHT_HEIGHT: number;

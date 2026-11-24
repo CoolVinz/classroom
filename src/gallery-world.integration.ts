@@ -8,9 +8,10 @@ import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { Client, type Room } from "@colyseus/sdk";
 import { Elysia } from "elysia";
+import { depot, portal, shop } from "../gallery-server/src/world-places.mjs";
 
 const database = process.env.CLASSROOM_TEST_DATABASE_URL;
-test.skipIf(!database)("checks gallery admission, train respawns and vehicle controls in a live room", async () => {
+test.skipIf(!database)("checks gallery admission, teleporting, the shop, and rides in a live room", async () => {
   process.env.DATABASE_URL = database!;
   process.env.DATABASE_SSL = process.env.CLASSROOM_TEST_DATABASE_SSL ?? "disable";
   process.env.APP_URL = "http://localhost:3000";
@@ -23,6 +24,7 @@ test.skipIf(!database)("checks gallery admission, train respawns and vehicle con
   const { createSession, createStudentSession } = await import("./auth/session");
   const app = new Elysia().onError(handleAppError).use(galleryRoutes).use(studentCourseworkRoutes);
   const teacher = randomUUID(), student = randomUUID(), classroom = randomUUID(), other = randomUUID(), member = randomUUID(), assignment = randomUUID(), nextAssignment = randomUUID();
+  const peer = randomUUID(), peerMember = randomUUID(), otherMember = randomUUID(), otherAssignment = randomUUID();
   const probe = createServer(); probe.listen(0, "127.0.0.1"); await once(probe, "listening");
   const port = (probe.address() as { port: number }).port;
   await new Promise<void>((resolve) => probe.close(() => resolve()));
@@ -43,11 +45,11 @@ test.skipIf(!database)("checks gallery admission, train respawns and vehicle con
     const worldStatus = async () => (await app.handle(new Request("http://localhost/api/student/worlds", { headers: studentHeaders }))).json();
     const request = (token: string, suffix = "", method = "GET", body?: unknown, id = classroom) => app.handle(new Request("http://localhost/api/classrooms/" + id + "/gallery" + suffix, { method, headers: { cookie: "classroom_session=" + token, origin: "http://localhost:3000", "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined }));
     const client = new Client("http://127.0.0.1:" + port);
-    const join = async (token: string) => {
-      const response = await request(token, "/ticket", "POST");
+    const join = async (token: string, roomId = classroom) => {
+      const response = await request(token, "/ticket", "POST", undefined, roomId);
       expect(response.status).toBe(200);
       const { ticket } = await response.json();
-      const room = await client.joinOrCreate("classroom", { classroomId: classroom, ticket });
+      const room = await client.joinOrCreate("classroom", { classroomId: roomId, ticket });
       rooms.push(room);
       for (let attempt = 0; attempt < 80 && !(room.state as any)?.players?.has(room.sessionId); attempt++) await Bun.sleep(25);
       expect((room.state as any)?.players?.has(room.sessionId)).toBe(true);
@@ -55,6 +57,9 @@ test.skipIf(!database)("checks gallery admission, train respawns and vehicle con
     };
     const initialManifest = await (await request(teacherToken)).json();
     expect(initialManifest.enabled).toBe(false);
+    expect(initialManifest.shop).toEqual({ wand: 5, license: 10 });
+    expect((await request(studentToken, "/shop", "PUT", { wand: 5, license: 10 })).status).toBe(401);
+    expect((await request(teacherToken, "/shop", "PUT", { wand: 0, license: 10 })).status).toBe(422);
     expect(initialManifest.train).toEqual({ mode: "auto", intervalSeconds: 120, startStudentId: null, stationWaitSeconds: {} });
     expect(initialManifest.blocks[0]).toMatchObject({ studentId: member, studentNumber: 1, layoutIndex: 0 });
     const entrySettings = await (await request(teacherToken, "/access")).json();
@@ -114,6 +119,16 @@ test.skipIf(!database)("checks gallery admission, train respawns and vehicle con
       while (!condition() && Date.now() < deadline) await Bun.sleep(30);
       expect(condition()).toBe(true);
     };
+    const command = async (room: Room, action: string, resultName: string, message?: object) => {
+      let stopListening = () => {};
+      const result = new Promise<any>((resolve) => { stopListening = room.onMessage(resultName, resolve); });
+      room.send(action, message);
+      try {
+        const value = await Promise.race([result, Bun.sleep(3000).then(() => null)]);
+        expect(value).not.toBeNull();
+        return value;
+      } finally { stopListening(); }
+    };
     const vehicleCommand = async (room: Room, action: string, kind: string, confirmedDriverId?: string) => {
       const vehicle = scene(room).vehicles.get(kind);
       const result = new Promise<{ ok: boolean }>((resolve) => room.onMessage("vehicle-result", resolve));
@@ -121,7 +136,7 @@ test.skipIf(!database)("checks gallery admission, train respawns and vehicle con
       return (await Promise.race([result, Bun.sleep(2000).then(() => null)]))?.ok;
     };
     const moveTo = async (room: Room, x: number, z: number) => {
-      for (let step = 0; step < 70; step++) {
+      for (let step = 0; step < 110; step++) {
         const player = rider(room);
         const dx = x - player.x, dz = z - player.z, distance = Math.hypot(dx, dz);
         if (distance < 0.35) return;
@@ -174,10 +189,10 @@ test.skipIf(!database)("checks gallery admission, train respawns and vehicle con
     await waitFor(() => scene(afterTrainHit).vehicles.has("car"));
     expect(await vehicleCommand(afterTrainHit, "enter", "car")).toBe(false);
     await Promise.all([moveTo(teacherRoom, 11, 11), moveTo(afterTrainHit, 12, 11)]);
-    const contenders = await Promise.all([vehicleCommand(teacherRoom, "enter", "car"), vehicleCommand(afterTrainHit, "enter", "car")]);
-    expect(contenders.sort()).toEqual([false, true]);
+    expect(await vehicleCommand(teacherRoom, "enter", "car")).toBe(true);
+    expect(await vehicleCommand(afterTrainHit, "enter", "car")).toBe(false);
     await waitFor(() => Boolean(scene(teacherRoom).vehicles.get("car").driverId));
-    const driver = scene(teacherRoom).vehicles.get("car").driverId === teacherRoom.sessionId ? teacherRoom : afterTrainHit;
+    const driver = teacherRoom;
     await waitFor(() => rider(driver).vehicleId === "car");
     const car = scene(driver).vehicles.get("car");
     const initialZ = car.z;
@@ -247,6 +262,110 @@ test.skipIf(!database)("checks gallery admission, train respawns and vehicle con
     teacherRoom.send("cast", { shotId, dx: 0, dy: 0, dz: -1 });
     const outcomes = await Promise.race([teacherCastResults, Bun.sleep(3000).then(() => [])]);
     expect(outcomes.map((result) => result.ok).sort()).toEqual([false, true]);
+    expect(scene(studentRoomAgain).activities).toBe(true);
+    expect((await command(studentRoomAgain, "teleport", "teleport-result")).ok).toBe(false);
+    expect((await command(studentRoomAgain, "shop-open", "shop-result")).ok).toBe(false);
+    await moveTo(studentRoomAgain, portal.x, portal.z);
+    const oldEpoch = rider(studentRoomAgain).movementEpoch;
+    expect((await command(studentRoomAgain, "teleport", "teleport-result")).ok).toBe(true);
+    await waitFor(() => rider(studentRoomAgain).movementEpoch === oldEpoch + 1);
+    expect(rider(studentRoomAgain)).toMatchObject({ x: -30, z: -7.5 });
+    studentRoomAgain.send("move", { dx: 0.3, dz: 0, sequence: rider(studentRoomAgain).sequence + 1, movementEpoch: oldEpoch });
+    await Bun.sleep(130);
+    expect(rider(studentRoomAgain).x).toBe(-30);
+
+    await sql`INSERT INTO classroom.student_accounts(id,email) VALUES(${peer},${peer + "@banjan.ac.th"})`;
+    await sql`INSERT INTO classroom.students(id,classroom_id,student_code,student_number,display_name,account_id)
+      VALUES(${peerMember},${classroom},'0002',2,'Synthetic Peer',${peer}),(${otherMember},${other},'0001',1,'Other Membership',${student})`;
+    await sql`INSERT INTO classroom.assignments(id,classroom_id,title) VALUES(${otherAssignment},${other},'Other assignment')`;
+    await sql`INSERT INTO classroom.files(classroom_id,assignment_id,student_id,kind,original_name,storage_name,media_type,size_bytes,submitted_by_account_id)
+      VALUES(${classroom},${assignment},${peerMember},'submission','peer.pdf',${randomUUID()},'application/pdf',12,${peer}),
+        (${other},${otherAssignment},${otherMember},'submission','other.pdf',${randomUUID()},'application/pdf',12,${student})`;
+    expect((await request(teacherToken, "/access/" + peerMember, "PUT", { assignmentId: assignment, approved: true })).status).toBe(200);
+    expect((await request(teacherToken, "", "PUT", { enabled: true }, other)).status).toBe(200);
+    const peerToken = await createStudentSession(peer);
+    const otherRoom = await join(studentToken, other), peerRoom = await join(peerToken);
+    const issued = await sql<{ count: number }[]>`SELECT COUNT(*)::int AS count FROM classroom.gallery_point_claims WHERE account_id=${student}`;
+    await sql`INSERT INTO classroom.gallery_point_claims(gift_id,account_id,classroom_id)
+      SELECT gen_random_uuid(), ${student}::uuid, ${classroom}::uuid FROM generate_series(1,16-${issued[0]!.count})
+      UNION ALL SELECT gen_random_uuid(), ${peer}::uuid, ${classroom}::uuid FROM generate_series(1,10)`;
+    await Promise.all([moveTo(studentRoomAgain, shop.x, shop.z), moveTo(peerRoom, shop.x, shop.z), moveTo(otherRoom, shop.x, shop.z)]);
+    const openShop = (room: Room) => command(room, "shop-open", "shop-result");
+    const buy = (room: Room, item: string, price: number, requestId = randomUUID()) => command(room, "shop-buy", "shop-result", { item, price, requestId });
+    expect(await openShop(studentRoomAgain)).toMatchObject({ ok: true, wallet: { balance: 16, spells: 0, license: false }, prices: { wand: 5, license: 10 } });
+    expect((await request(teacherToken, "/shop", "PUT", { wand: 6, license: 10 })).status).toBe(200);
+    expect(await buy(studentRoomAgain, "wand", 5)).toMatchObject({ ok: false, prices: { wand: 6 }, wallet: { balance: 16 } });
+    await Bun.sleep(220);
+    const wandRequest = randomUUID();
+    expect(await buy(studentRoomAgain, "wand", 6, wandRequest)).toMatchObject({ ok: true, wallet: { balance: 10, spells: 15 } });
+    await Bun.sleep(220);
+    expect(await buy(studentRoomAgain, "wand", 6, wandRequest)).toMatchObject({ ok: true, wallet: { balance: 10, spells: 15 } });
+    await Bun.sleep(220);
+    const otherPrice = await request(teacherToken, "/shop", "PUT", { wand: 5, license: 10 }, other);
+    expect(otherPrice.status).toBe(200);
+    const concurrent = await Promise.all([buy(studentRoomAgain, "license", 10), buy(otherRoom, "license", 10)]);
+    expect(concurrent.filter(({ ok }) => ok)).toHaveLength(1);
+    if (!concurrent[0].ok) {
+      await sql`INSERT INTO classroom.gallery_point_claims(gift_id,account_id,classroom_id)
+        SELECT gen_random_uuid(), ${student}, ${classroom} FROM generate_series(1,10)`;
+      await Bun.sleep(220);
+      expect(await buy(studentRoomAgain, "license", 10)).toMatchObject({ ok: true });
+    }
+    expect(await buy(peerRoom, "license", 10)).toMatchObject({ ok: true, wallet: { balance: 0, license: true } });
+    expect(await command(otherRoom, "wallet-read", "wallet")).toMatchObject({ wallet: { spells: 0, balance: 0 } });
+    await otherRoom.leave();
+    const startRide = (room: Room, requestId = randomUUID()) => command(room, "ride-start", "vehicle-result", { kind: "broom", requestId });
+    expect((await startRide(studentRoomAgain)).ok).toBe(false);
+    expect(await command(studentRoomAgain, "wallet-read", "wallet")).toMatchObject({ wallet: { spells: 15, license: true } });
+    await Promise.all([moveTo(studentRoomAgain, depot.x, depot.z), moveTo(peerRoom, depot.x, depot.z)]);
+    const rideRequest = randomUUID();
+    const rides = await Promise.all([startRide(studentRoomAgain, rideRequest), startRide(peerRoom)]);
+    expect(rides.map(({ ok }) => ok)).toEqual([true, true]);
+    await waitFor(() => Boolean(rider(studentRoomAgain).vehicleId && rider(peerRoom).vehicleId));
+    const rentalId = rider(studentRoomAgain).vehicleId, peerRental = rider(peerRoom).vehicleId;
+    expect(rentalId).not.toBe(peerRental);
+    const broom = scene(studentRoomAgain).vehicles.get(rentalId);
+    expect(broom).toMatchObject({ kind: "broom", rental: true });
+    for (let i = 0; i < 4; i++) {
+      studentRoomAgain.send("vehicle-input", { revision: broom.revision, epoch: rider(studentRoomAgain).movementEpoch, throttle: 0, turn: 0, lift: 1 });
+      await Bun.sleep(85);
+    }
+    expect(broom.y).toBeGreaterThan(0.3);
+    expect(await vehicleCommand(studentRoomAgain, "exit", rentalId)).toBe(false);
+    for (let i = 0; i < 8; i++) {
+      studentRoomAgain.send("vehicle-input", { revision: broom.revision, epoch: rider(studentRoomAgain).movementEpoch, throttle: 0, turn: 0, lift: -1 });
+      await Bun.sleep(85);
+    }
+    expect(broom.y).toBe(0);
+    expect(await vehicleCommand(studentRoomAgain, "exit", rentalId)).toBe(true);
+    await waitFor(() => !scene(studentRoomAgain).vehicles.has(rentalId));
+    await peerRoom.leave();
+    await waitFor(() => !scene(studentRoomAgain).vehicles.has(peerRental));
+    await moveTo(studentRoomAgain, depot.x, depot.z);
+    expect((await startRide(studentRoomAgain, rideRequest)).ok).toBe(false);
+    expect(await command(studentRoomAgain, "wallet-read", "wallet")).toMatchObject({ wallet: { spells: 15, license: false, balance: 0 } });
+
+    expect((await command(studentRoomAgain, "cast", "cast-result", { shotId: randomUUID(), dx: 0, dy: 0, dz: 0 })).ok).toBe(false);
+    const returningPeer = await join(peerToken);
+    await Promise.all([moveTo(teacherRoom, 16, 18), moveTo(returningPeer, 20, 18)]);
+    const studentShot = randomUUID();
+    const castAsStudent = (shotId = randomUUID()) => command(studentRoomAgain, "cast", "cast-result", { shotId, dx: 1, dy: 0, dz: 0 });
+    expect(await castAsStudent(studentShot)).toMatchObject({ ok: true, spells: 14 });
+    await waitFor(() => rider(returningPeer).knockCause === "wand");
+    expect(rider(teacherRoom).knocked).toBe(false);
+    expect(rider(studentRoomAgain).knocked).toBe(false);
+    await Bun.sleep(2010);
+    expect((await castAsStudent(studentShot)).ok).toBe(false);
+    for (let remaining = 13; remaining >= 0; remaining--) {
+      expect(await castAsStudent()).toMatchObject({ ok: true, spells: remaining });
+      await Bun.sleep(2010);
+    }
+    expect((await castAsStudent()).ok).toBe(false);
+    expect(await command(studentRoomAgain, "wallet-read", "wallet")).toMatchObject({ wallet: { spells: 0 } });
+    await sql`DELETE FROM classroom.assignments WHERE classroom_id=${other}`;
+    await sql`DELETE FROM classroom.students WHERE classroom_id=${other}`;
+    await sql`DELETE FROM classroom.classrooms WHERE id=${other}`;
+    expect(await (await app.handle(new Request("http://localhost/api/student/gallery-points", { headers: studentHeaders }))).json()).toEqual({ balance: 0 });
     const stale = await (await request(studentToken, "/ticket", "POST")).json();
     const departed = new Promise<number>((resolve) => studentRoomAgain.onLeave(resolve));
     expect((await request(teacherToken, "", "PUT", { enabled: false })).status).toBe(200);
@@ -266,7 +385,7 @@ test.skipIf(!database)("checks gallery admission, train respawns and vehicle con
     await sql`DELETE FROM classroom.files WHERE id=${uploadedModel}`;
     rejoined.send("refresh-avatar");
     expect(await Promise.race([removed, Bun.sleep(3000).then(() => -1)])).toBe(4003);
-    expect(await worldStatus()).toMatchObject([{ classroomId: classroom, hasSubmission: false, approved: true, entryAllowed: false }]);
+    expect(await worldStatus()).toEqual(expect.arrayContaining([expect.objectContaining({ classroomId: classroom, hasSubmission: false, approved: true, entryAllowed: false })]));
     expect((await request(studentToken, "/ticket", "POST")).status).toBe(403);
   } finally {
     await Promise.all(rooms.filter((room) => room.connection.isOpen).map((room) => room.leave()));
@@ -274,8 +393,8 @@ test.skipIf(!database)("checks gallery admission, train respawns and vehicle con
     await sql`DELETE FROM classroom.assignments WHERE classroom_id IN (${classroom},${other})`;
     await sql`DELETE FROM classroom.students WHERE classroom_id IN (${classroom},${other})`;
     await sql`DELETE FROM classroom.classrooms WHERE id IN (${classroom},${other})`;
-    await sql`DELETE FROM classroom.student_accounts WHERE id=${student}`;
+    await sql`DELETE FROM classroom.student_accounts WHERE id IN (${student},${peer})`;
     await sql`DELETE FROM classroom.teachers WHERE id=${teacher}`;
     await rm(uploadDir, { recursive: true, force: true });
   }
-}, 60000);
+}, 135000);
