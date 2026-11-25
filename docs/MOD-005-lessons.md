@@ -13,6 +13,8 @@ Teachers create reusable lesson pages with ordered text, image, and YouTube bloc
 - Teachers create and edit a private draft, preview it, and publish the saved content. Publishing saves the current editor state and switches the public snapshot in one database transaction.
 - Draft changes do not replace the current public snapshot. Teachers can unpublish a page, which makes its reader and images unavailable; publishing it again reuses its link.
 - The editor mode cannot change after creation. Custom lessons have HTML, CSS, and JavaScript source tabs, an explicit run/restart/stop preview, and a 1 MiB combined UTF-8 source limit. Full HTML documents and optional separate CSS/JavaScript are supported.
+- **สร้างชุดบทเรียนด้วย AI** copies a prompt and imports one `classroom-lesson-pack` version 1 object. Its `lesson` has `title`, `html`, optional `css`, `javascript`, and `framework` (`none` or `bootstrap`). Its `quiz` and `worksheet` use their standalone JSON formats. The complete paste is limited to 1 MiB of UTF-8 and can be plain JSON or one Markdown JSON fence.
+- Lesson pack review shows code as text. After confirmation, one transaction creates three private drafts and adds the new quiz button to the lesson draft. Review the code using **Run Preview** in the editor. Publish and assign content using the existing classroom workflows, then attach the worksheet from its classroom round.
 - Custom-code lessons offer None (default) or Bootstrap 5.3.9 CSS + JavaScript. The optional `framework` code-block field is saved with draft/published JSON snapshots; older snapshots without it use None. Preview and public readers inject the same pinned jsDelivr assets with verified SRI, before lesson code, under the existing CSP. Teachers should not import Bootstrap again when selected; their separate CSS is applied afterward. No migration or installed dependency is required. CDN access is required; Tailwind/daisyUI are deferred.
 - Published title and content snapshots stay together. Editing a custom lesson does not change its public title or code before publish.
 - Uploaded pictures can be inserted into code with `lesson-image://<uuid>` markers. The server derives and validates referenced images; both saved draft and public snapshots retain their image files.
@@ -44,6 +46,7 @@ Public reader and content blocks: web/src/PublicLessonPage.tsx, web/src/LessonCo
 Sandbox document and image markers: web/src/code-lesson.ts
 Attendance on public lesson pages: web/src/StudentAttendance.tsx
 Teacher, student, and legacy public APIs: src/routes/lesson-pages.ts
+AI lesson pack: web/src/AiImportPanel.tsx, src/lesson-pack-import.ts, POST /api/lesson-packs/import
 Storage quota, startup recovery, and image cleanup: src/file-storage.ts
 Migrations: src/db/migrations/010_lesson_pages.sql, src/db/migrations/011_lesson_code.sql, src/db/migrations/012_quiz_builder.sql, src/db/migrations/013_recoverable_trash.sql, src/db/migrations/027_classroom_lessons_worksheets.sql
 Frame policy: src/content-security-policy.ts, src/server.ts

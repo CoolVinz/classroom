@@ -50,6 +50,7 @@ describe("student submission API", () => {
 
     const { sql } = await import("./db/client");
     const { createSession, createStudentSession } = await import("./auth/session");
+    const { aiImportRoutes } = await import("./routes/ai-imports");
     const { worksheetRoutes, studentWorksheetRoutes } = await import("./routes/worksheets");
     const { galleryRoutes } = await import("./routes/gallery");
     const [{ authRoutes }, { studentAuthRoutes }, { classroomRoutes }, { courseworkRoutes }, { studentCourseworkRoutes }, { attendanceScheduleRoutes }, { studentAttendanceRoutes }, { lessonPageApiRoutes }, { quizRoutes, studentQuizRoutes }, { gradebookRoutes }, { groupSetRoutes }, { handleAppError }] = await Promise.all([
@@ -61,7 +62,7 @@ describe("student submission API", () => {
       import("./routes/group-sets"), import("./error-handler"),
     ]);
     const { ensureUploadRoot, cleanupUnusedLessonImages } = await import("./file-storage");
-    const app = new Elysia().onError(handleAppError).use(authRoutes).use(studentAuthRoutes).use(classroomRoutes).use(attendanceScheduleRoutes).use(courseworkRoutes).use(studentCourseworkRoutes).use(studentAttendanceRoutes).use(quizRoutes).use(studentQuizRoutes).use(gradebookRoutes).use(groupSetRoutes).use(lessonPageApiRoutes).use(worksheetRoutes).use(studentWorksheetRoutes).use(galleryRoutes);
+    const app = new Elysia().onError(handleAppError).use(authRoutes).use(studentAuthRoutes).use(classroomRoutes).use(attendanceScheduleRoutes).use(courseworkRoutes).use(studentCourseworkRoutes).use(studentAttendanceRoutes).use(quizRoutes).use(aiImportRoutes).use(studentQuizRoutes).use(gradebookRoutes).use(groupSetRoutes).use(lessonPageApiRoutes).use(worksheetRoutes).use(studentWorksheetRoutes).use(galleryRoutes);
     const teacherId = randomUUID(); const accountId = randomUUID();
     const roomA = randomUUID(); const roomB = randomUUID(); const emptyRoom = randomUUID();
     const studentA = randomUUID(); const studentB = randomUUID(); const studentC = randomUUID(); const studentD = randomUUID();
@@ -295,6 +296,61 @@ describe("student submission API", () => {
       expect((await app.handle(new Request(`http://localhost/api/quizzes/${aiDraft.id}`, { headers: { cookie: `classroom_session=${teacherToken}` } }))).status).toBe(200);
       expect((await app.handle(new Request("http://localhost/api/quizzes/import", { method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify({ json: "{}" }) }))).status).toBe(422);
       expect((await app.handle(new Request("http://localhost/api/quizzes/import", { method: "POST", headers: { ...studentHeaders, "content-type": "application/json" }, body: JSON.stringify({ json: "{}" }) }))).status).toBe(401);
+
+      const { aiImportTemplate } = await import("./lesson-pack-import");
+      const packTemplate = aiImportTemplate("pack", "โมเดลสามมิติ", "ม.3");
+      const packInput = JSON.parse(packTemplate.slice(packTemplate.lastIndexOf("\n\n{") + 2));
+      const requestAiDraft = (path: string, json: unknown, headers: HeadersInit = teacherHeaders) => {
+        const requestHeaders = new Headers(headers);
+        requestHeaders.set("content-type", "application/json");
+        return app.handle(new Request(`http://localhost/api/${path}/import`, {
+          method: "POST", headers: requestHeaders, body: JSON.stringify({ json: JSON.stringify(json) }),
+        }));
+      };
+      expect((await requestAiDraft("worksheets", packInput.worksheet, studentHeaders)).status).toBe(401);
+      expect((await requestAiDraft("worksheets", { ...packInput.worksheet, questions: [] })).status).toBe(422);
+      const worksheetImport = await requestAiDraft("worksheets", packInput.worksheet);
+      expect(worksheetImport.status).toBe(200);
+      const importedWorksheetId = (await worksheetImport.json()).id;
+      expect(await app.handle(new Request(`http://localhost/api/worksheets/${importedWorksheetId}`, { headers: teacherHeaders })).then((response) => response.json()))
+        .toMatchObject({ title: packInput.worksheet.title, publishedTitle: null, rounds: [], questions: [
+          { type: "choice", correctChoice: 0 }, { type: "boolean", correctChoice: 0 }, { type: "blank", acceptedAnswers: ["Move", "ย้าย"] },
+        ] });
+      expect((await requestAiDraft("lesson-packs", packInput, studentHeaders)).status).toBe(401);
+      expect((await requestAiDraft("lesson-packs", packInput, { cookie: `classroom_session=${teacherToken}`, origin: "https://example.invalid" })).status).toBe(403);
+      expect(await requestAiDraft("lesson-packs", { ...packInput, worksheet: { ...packInput.worksheet, questions: [] } }).then((response) => response.json()))
+        .toMatchObject({ error: expect.stringContaining("worksheet.questions") });
+      await sql.unsafe(`CREATE FUNCTION classroom.reject_test_pack() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.title = 'Synthetic failed lesson pack' THEN RAISE EXCEPTION 'forced pack insert failure'; END IF; RETURN NEW; END $$`).simple();
+      try {
+        await sql.unsafe(`CREATE TRIGGER reject_test_pack BEFORE INSERT ON classroom.lesson_pages FOR EACH ROW EXECUTE FUNCTION classroom.reject_test_pack()`).simple();
+        const failure = await requestAiDraft("lesson-packs", {
+          ...packInput, lesson: { ...packInput.lesson, title: "Synthetic failed lesson pack" },
+          quiz: { ...packInput.quiz, title: "Synthetic failed pack quiz" },
+          worksheet: { ...packInput.worksheet, title: "Synthetic failed pack worksheet" },
+        });
+        expect(failure.status).toBe(500);
+        expect(await sql`SELECT id FROM classroom.quizzes WHERE owner_id = ${teacherId} AND title = 'Synthetic failed pack quiz'`).toHaveLength(0);
+        expect(await sql`SELECT id FROM classroom.worksheets WHERE owner_id = ${teacherId} AND title = 'Synthetic failed pack worksheet'`).toHaveLength(0);
+      } finally {
+        await sql.unsafe("DROP TRIGGER IF EXISTS reject_test_pack ON classroom.lesson_pages; DROP FUNCTION classroom.reject_test_pack()").simple();
+      }
+      const packImport = await requestAiDraft("lesson-packs", packInput);
+      expect(packImport.status).toBe(200);
+      const importedPack = await packImport.json() as { lessonId: string; quizId: string; worksheetId: string };
+      lessonPageIds.push(importedPack.lessonId); quizIds.push(importedPack.quizId);
+      expect(importedPack.worksheetId).not.toBe(importedWorksheetId);
+      const readImported = (path: string, headers: HeadersInit = teacherHeaders) => app.handle(new Request(`http://localhost/api/${path}`, { headers }));
+      expect(await readImported(`lesson-pages/${importedPack.lessonId}`).then((response) => response.json())).toMatchObject({
+        editorMode: "code", publishedAt: null,
+        blocks: [{ framework: "bootstrap", html: packInput.lesson.html }],
+        quizLinks: [{ quizId: importedPack.quizId, label: "ทำแบบทดสอบ" }],
+      });
+      expect(await readImported(`quizzes/${importedPack.quizId}`).then((response) => response.json())).toMatchObject({ publishedAt: null });
+      expect(await readImported(`worksheets/${importedPack.worksheetId}`).then((response) => response.json())).toMatchObject({ publishedTitle: null, rounds: [] });
+      expect((await readImported(`public/lesson-pages/${importedPack.lessonId}`, {})).status).toBe(404);
+      expect((await readImported(`student/classrooms/${roomA}/lesson-pages/${importedPack.lessonId}`, studentHeaders)).status).toBe(404);
+      expect((await readImported(`worksheets/${importedPack.worksheetId}`, { cookie: `classroom_session=${otherTeacherToken}` })).status).toBe(404);
 
       const quizId = randomUUID(); const questionId = randomUUID(); const correctChoiceId = randomUUID(); const wrongChoiceId = randomUUID();
       const quizTitle = "Quiz snapshot";

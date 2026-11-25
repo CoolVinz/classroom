@@ -1,3 +1,4 @@
+import { AiImportPanel } from "./AiImportPanel";
 import { LessonClassAssignments } from "./LessonClassAssignments";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
@@ -42,7 +43,11 @@ export function LessonLibrary({ onError, onDirtyChange }: { onError: (message: s
 
   const load = useCallback(async (trashed = false) => setLessons(await api<LessonRow[]>(`/lesson-pages${trashed ? "?trashed=true" : ""}`)), []);
   useEffect(() => { void load(showTrash).catch((error) => onError(error instanceof Error ? error.message : "โหลดบทเรียนไม่สำเร็จ")); }, [load, onError, showTrash]);
-  useEffect(() => { void Promise.all([api<QuizOption[]>("/quizzes"), api<QuizOption[]>("/quizzes?trashed=true")]).then(([active, trash]) => setQuizzes([...active, ...trash.map((quiz) => ({ ...quiz, trashed: true }))])).catch(() => {}); }, []);
+  const loadQuizOptions = useCallback(async () => {
+    const [active, trash] = await Promise.all([api<QuizOption[]>("/quizzes"), api<QuizOption[]>("/quizzes?trashed=true")]);
+    setQuizzes([...active, ...trash.map((quiz) => ({ ...quiz, trashed: true }))]);
+  }, []);
+  useEffect(() => { void loadQuizOptions().catch(() => {}); }, [loadQuizOptions]);
 
   async function trashLesson(id: string, name: string, expectedRevision: number, discardEdits = false) {
     if (!window.confirm(`ย้าย “${name}” ไปถังขยะหรือไม่? หน้าสาธารณะและภาพจะหยุดเปิดใช้งาน${discardEdits ? " และการแก้ไขที่ยังไม่บันทึกจะหายไป" : ""}`)) return;
@@ -136,6 +141,11 @@ export function LessonLibrary({ onError, onDirtyChange }: { onError: (message: s
     <header className="page-heading"><div><p className="eyebrow">เนื้อหาสำหรับนักเรียน</p><h1>บทเรียน</h1><p className="muted page-description">สร้างบทเรียนแล้วส่งลิงก์ให้นักเรียนเปิดอ่าน</p></div></header>
     <div className="lesson-library-toolbar"><button className="button button-quiet" onClick={() => setShowTrash((value) => !value)}>{showTrash ? "← บทเรียนทั้งหมด" : "ถังขยะ"}</button></div>
     {!showTrash && <form className="lesson-create" onSubmit={create}><label>ชื่อบทเรียน<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={120} placeholder="เช่น การสร้างโมเดล 3 มิติ" required /></label><label>รูปแบบบทเรียน<select value={creationMode} onChange={(event) => setCreationMode(event.target.value as "blocks" | "code")}><option value="blocks">ตัวสร้างบล็อก</option><option value="code">HTML / CSS / JavaScript</option></select></label><button className="button button-primary" disabled={busy}>＋ สร้างบทเรียน</button></form>}
+    {!showTrash && <AiImportPanel kind="pack" onImported={(id) => {
+      void load().catch((error) => onError(error.message));
+      void loadQuizOptions().catch((error) => onError(error.message));
+      void open(id);
+    }} />}
     <h2>{showTrash ? "ถังขยะบทเรียน" : "บทเรียนของฉัน"}</h2>
     {lessons.length ? <div className="lesson-list">{lessons.map((item) => <div className="lesson-library-row" key={item.id}><button className="lesson-list-item" disabled={showTrash} onClick={() => void open(item.id)}><span><strong>{item.title}</strong><small>{item.publishedAt ? "เผยแพร่แล้ว" : "ฉบับร่าง"} · {item.editorMode === "code" ? "HTML / CSS / JavaScript" : "ตัวสร้างบล็อก"} · แก้ไข {new Intl.DateTimeFormat("th-TH", { dateStyle: "medium" }).format(new Date(item.updatedAt))}</small></span><b>{showTrash ? "อยู่ในถังขยะ" : "แก้ไข ↗"}</b></button>{showTrash ? <div className="lesson-actions"><button className="button button-quiet" onClick={() => void restoreLesson(item)}>กู้คืน</button><button className="button button-danger" onClick={() => void deleteLesson(item)}>ลบถาวร</button></div> : <button className="button button-quiet" onClick={() => void trashLesson(item.id, item.title, item.draftRevision)}>ย้ายไปถังขยะ</button>}</div>)}</div> : <div className="panel lesson-empty"><h2>{showTrash ? "ถังขยะว่าง" : "ยังไม่มีบทเรียน"}</h2><p className="muted">{showTrash ? "บทเรียนที่ย้ายไปถังขยะจะแสดงที่นี่" : "เพิ่มข้อความ รูปภาพ และวิดีโอ YouTube ได้ในแต่ละบทเรียน"}</p></div>}
   </section>;

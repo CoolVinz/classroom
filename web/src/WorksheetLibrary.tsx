@@ -1,3 +1,4 @@
+import { AiImportPanel } from "./AiImportPanel";
 import { useEffect, useState } from "react";
 import type { WorksheetAnswers, WorksheetQuestion, WorksheetQuestionType } from "../../src/worksheet-core";
 import { api } from "./api";
@@ -70,6 +71,7 @@ export function WorksheetLibrary({ classrooms, onError, onDirtyChange }: { class
       const created = await api<{ id: string }>("/worksheets", { method: "POST", body: JSON.stringify({ title: createTitle }) });
       setCreateTitle(""); await open(created.id);
     }); }}><label>ชื่อใบงาน<input required maxLength={120} value={createTitle} onChange={(event) => setCreateTitle(event.target.value)} /></label><button className="button button-primary" disabled={busy || !createTitle.trim()}>สร้างใบงาน</button></form>
+    <AiImportPanel kind="worksheet" onImported={(id) => void action(() => open(id))} />
     <div className="lesson-list">{library ? library.length ? library.map((item) => <button key={item.id} className="lesson-list-item" disabled={busy} onClick={() => void action(() => open(item.id))}><span><strong>{item.title}</strong><small>{item.publishedTitle ? "เผยแพร่แล้ว" : "ฉบับร่าง"}</small></span></button>) : <p className="muted">ยังไม่มีใบงาน</p> : <button className="text-button" onClick={() => void reloadLibrary()}>โหลดรายการใบงาน</button>}</div>
   </section>;
 

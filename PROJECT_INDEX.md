@@ -30,7 +30,7 @@ Project-document rows are rated LOW/LOW; module rows below describe implementati
 | MOD-006 | Quiz builder | [docs/MOD-006-quizzes.md](docs/MOD-006-quizzes.md) | Reusable quizzes, immutable classroom rounds, private attempts, automatic scoring, and released solutions | `quizzes, attempts, scoring, timers, images, privacy` | HIGH | HIGH | MOD-001, MOD-002, MOD-005, MOD-008, DAT-001, OPS-001 |
 | MOD-007 | Virtual classroom gallery | [docs/MOD-007-virtual-gallery.md](docs/MOD-007-virtual-gallery.md) | Colyseus world, student displays, train, rides, teleport, and point shop | `gallery, Colyseus, Three.js, vehicles, Santa, gifts, virtual-points, shop, avatars` | HIGH | HIGH | MOD-001, MOD-002, MOD-003, MOD-004, DAT-001, OPS-001 |
 | MOD-008 | Class gradebook | [docs/MOD-008-gradebook.md](docs/MOD-008-gradebook.md) | Class roster grade grid for published assignment marks, completed quizzes, worksheets, and manual score columns | `gradebook, class-scores, manual-marks, totals, Excel` | HIGH | HIGH | MOD-002, MOD-004, MOD-006, MOD-009, DAT-001 |
-| MOD-009 | Worksheet activities | [docs/MOD-009-worksheets.md](docs/MOD-009-worksheets.md) | Classroom worksheets with resumable answers, lesson embedding, and automatic grading | `worksheets, lesson-activities, typed-answers, scores` | HIGH | HIGH | MOD-002, MOD-005, MOD-008, DAT-001 |
+| MOD-009 | Worksheet activities | [docs/MOD-009-worksheets.md](docs/MOD-009-worksheets.md) | Classroom worksheets with AI draft import, resumable answers, lesson embedding, and automatic grading | `worksheets, AI-import, lesson-activities, typed-answers, scores` | HIGH | HIGH | MOD-002, MOD-005, MOD-008, DAT-001 |
 
 ## Retrieval
 

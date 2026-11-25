@@ -37,3 +37,17 @@
 .worksheet-option { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .worksheet-option .text-button { flex-shrink: 0; }
 .worksheet-score { font-size: 1.2rem; font-weight: 700; }
+
+.ai-import-panel { display: block; }
+.ai-import-panel > summary { font-weight: 700; cursor: pointer; }
+.ai-import-panel[open] > summary, .ai-import-panel > :not(summary) { margin-bottom: 12px; }
+.ai-import-review { display: grid; gap: 10px; min-width: 0; overflow-wrap: anywhere; }
+.ai-import-review button { justify-self: start; }
+.ai-import-review pre {
+  max-height: 260px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  white-space: pre-wrap;
+}

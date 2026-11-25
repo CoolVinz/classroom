@@ -36,7 +36,7 @@ Teacher class score grid: web/src/ClassGradebook.tsx
 Student round selector, attempts, timer, autosave, and lesson entry: web/src/StudentQuizPage.tsx, web/src/StudentPortal.tsx
 Teacher/student APIs, snapshots, locking, deadlines, scoring, and image access: src/routes/quizzes.ts
 Content validation, scoring, privacy projection: src/quiz-core.ts, src/quiz-core.test.ts
-AI quiz import/export format and validation: src/quiz-import.ts, src/quiz-import.test.ts, POST /api/quizzes/import
+AI quiz import/export format and validation: src/quiz-import.ts, src/quiz-import.test.ts, src/routes/ai-imports.ts
 Lesson draft/published quiz links: src/routes/lesson-pages.ts, web/src/LessonLibrary.tsx, web/src/PublicLessonPage.tsx
 Storage quotas, reconciliation, and image retention: src/file-storage.ts
 Schema: src/db/migrations/012_quiz_builder.sql, src/db/migrations/013_recoverable_trash.sql
