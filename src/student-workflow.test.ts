@@ -1052,8 +1052,9 @@ describe("student submission API", () => {
       await sql`DELETE FROM classroom.lesson_page_images WHERE id = ${restrictedImage.id}`;
       await rm(resolve(uploadDir, restrictedImage.id));
 
-      const wioPackTemplate = aiImportTemplate("wio", "ไฟ LED", "ม.3");
+      const wioPackTemplate = aiImportTemplate("wio", "มาตรวัดแสง", "ม.3");
       const wioPackInput = JSON.parse(wioPackTemplate.slice(wioPackTemplate.lastIndexOf("\n\n{") + 2));
+      wioPackInput.lab.preset = "light-meter";
       const importedWioResponse = await requestAiDraft("lesson-packs", wioPackInput);
       expect(importedWioResponse.status).toBe(200);
       const importedWio = await importedWioResponse.json() as { lessonId: string; quizId: string | null; worksheetId: string | null };
@@ -1065,7 +1066,7 @@ describe("student submission API", () => {
       const wioStudentA = `/student/classrooms/${roomA}` + wioPath;
       const wioStudentB = `/student/classrooms/${roomB}` + wioPath;
       const wioDraft = await (await learningRequest(wioPath)).json() as { title: string; blocks: unknown[]; wioLab: Record<string, unknown> };
-      expect(wioDraft.wioLab).toMatchObject({ preset: "blink", maxScore: 10 });
+      expect(wioDraft.wioLab).toMatchObject({ preset: "light-meter", maxScore: 10 });
       expect((await learningRequest(wioClassA, "PUT")).status).toBe(422);
       expect((await learningRequest(wioStudentA, "GET", studentHeaders)).status).toBe(404);
       expect(await sql`SELECT id FROM classroom.assignments WHERE title = ${wioDraft.wioLab.title as string} AND classroom_id = ${roomA}`).toHaveLength(0);
@@ -1083,7 +1084,7 @@ describe("student submission API", () => {
       expect(await assignmentsFromLesson[1].json()).toMatchObject(autoLinked);
       expect([...(await sql`SELECT id FROM classroom.assignments WHERE title = 'Synthetic published Wio lab' AND classroom_id = ${roomA}`)]).toEqual([{ id: autoLinked.assignmentId }]);
       expect(await (await learningRequest(wioStudentA, "GET", studentHeaders)).json()).toMatchObject({
-        wioLab: { assignmentId: autoLinked.assignmentId, title: labSettings.title, preset: "blink" },
+        wioLab: { assignmentId: autoLinked.assignmentId, title: labSettings.title, preset: "light-meter" },
       });
       expect((await learningRequest(wioStudentB, "GET", studentHeaders)).status).toBe(404);
       expect((await learningRequest("/public" + wioPath, "GET", {})).status).toBe(404);
@@ -1103,7 +1104,7 @@ describe("student submission API", () => {
       expect((await learningRequest(blockLab, "PUT", teacherHeaders, { assignmentId: otherLab.id, expectedAssignmentId: null })).status).toBe(404);
       const otherTeacherWio = { ...teacherHeaders, cookie: `classroom_session=${otherTeacherToken}` };
       expect((await learningRequest(blockLab, "PUT", otherTeacherWio, { assignmentId: autoLinked.assignmentId, expectedAssignmentId: null })).status).toBe(404);
-      const newBlockLab = { create: { preset: "lcd", title: "LCD lesson work", instructions: "แสดงข้อความ", maxScore: 5 }, expectedAssignmentId: null };
+      const newBlockLab = { create: { preset: "switch-menu", title: "LCD lesson menu", instructions: "ใช้สวิตช์ห้าทิศทาง", maxScore: 5 }, expectedAssignmentId: null };
       const created = await Promise.all([learningRequest(blockLab, "PUT", teacherHeaders, newBlockLab), learningRequest(blockLab, "PUT", teacherHeaders, newBlockLab)]);
       expect(created.map((response) => response.status).sort()).toEqual([200, 409]);
       const manualLab = await created.find((response) => response.ok)!.json() as { assignmentId: string };
@@ -1139,19 +1140,19 @@ describe("student submission API", () => {
         body: JSON.stringify({ title: "Wio Terminal practice", wioLab, maxScore: 10 }),
       }));
       expect((await wioCreate("invalid")).status).toBe(422);
-      const labResponse = await wioCreate("blink");
+      const labResponse = await wioCreate("counter");
       expect(labResponse.status).toBe(200);
       const lab = await labResponse.json() as { id: string; wioLab: string };
-      expect(lab.wioLab).toBe("blink");
+      expect(lab.wioLab).toBe("counter");
 
       const patchLab = (body: unknown, headers = teacherHeaders) => app.handle(new Request(assignmentUrl + "/" + lab.id, {
         method: "PATCH", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify(body),
       }));
-      expect((await patchLab({ wioLab: "buttons" }, { ...teacherHeaders, cookie: `classroom_session=${otherTeacherToken}` })).status).toBe(404);
-      expect((await patchLab({ wioLab: "buttons" })).status).toBe(200);
-      expect((await patchLab({ instructions: "ไฟติดเมื่อกด A" })).status).toBe(200);
+      expect((await patchLab({ wioLab: "buzzer" }, { ...teacherHeaders, cookie: `classroom_session=${otherTeacherToken}` })).status).toBe(404);
+      expect((await patchLab({ wioLab: "buzzer" })).status).toBe(200);
+      expect((await patchLab({ instructions: "ให้บัซเซอร์ดังเมื่อกด A" })).status).toBe(200);
       const labList = await app.handle(new Request("http://localhost/api/student/assignments", { headers: studentHeaders }));
-      expect(await labList.json()).toEqual(expect.arrayContaining([expect.objectContaining({ assignmentId: lab.id, wioLab: "buttons" })]));
+      expect(await labList.json()).toEqual(expect.arrayContaining([expect.objectContaining({ assignmentId: lab.id, wioLab: "buzzer" })]));
 
       const sketch = "// ไฟ LED\nvoid setup() {}\nvoid loop() {}";
       const submitIno = (room: string, assignment: string, bytes: BlobPart = sketch, headers = studentHeaders) => {

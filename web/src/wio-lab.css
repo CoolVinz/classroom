@@ -56,7 +56,7 @@
   box-shadow: inset 0 -4px 0 #182a30;
 }
 .wio-device-keys { display: flex; justify-content: center; gap: .6rem; }
-.wio-device-keys button {
+.wio-device-keys button, .wio-switch button {
   min-width: 44px;
   min-height: 44px;
   border: 1px solid #a7b4ba;
@@ -68,7 +68,7 @@
   touch-action: none;
   user-select: none;
 }
-.wio-device-keys button[data-pressed=true] { background: #8ce7c8; }
+.wio-device-keys button[data-pressed=true], .wio-switch button[data-pressed=true] { background: #8ce7c8; }
 .wio-display {
   margin: .45rem 0;
   display: grid;
@@ -83,6 +83,15 @@
 .wio-device-bottom span { display: flex; align-items: center; gap: .3rem; white-space: nowrap; }
 .wio-led { width: .65rem; height: .65rem; border-radius: 50%; background: #49565b; }
 .wio-led.on { background: #84faac; box-shadow: 0 0 .7rem #84faac; }
+.wio-device-controls { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .65rem; margin: .6rem 0 .2rem; }
+.wio-switch { display: grid; grid-template-columns: repeat(3, 44px); gap: .2rem; }
+.wio-switch button { border-radius: .5rem; }
+.wio-switch [data-key=up] { grid-column: 2; }
+.wio-switch [data-key=left] { grid-column: 1; }
+.wio-switch [data-key=down] { grid-column: 2; }
+.wio-buzzer { display: grid; gap: .3rem; justify-items: start; font-size: .82rem; }
+.wio-buzzer [data-active=true] { color: #ffffa6; font-weight: 750; }
+.wio-buzzer button { padding: .4rem .6rem; min-height: 44px; }
 .wio-light { display: grid; grid-template-columns: 1fr auto; gap: .25rem; }
 .wio-light input { grid-column: span 2; width: 100%; accent-color: #186d59; }
 .wio-light output { font-variant-numeric: tabular-nums; }

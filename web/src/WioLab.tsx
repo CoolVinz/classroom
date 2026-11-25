@@ -21,13 +21,86 @@ function Display({ board }: { board: BoardSnapshot }) {
     ctx.fillStyle = rgb565(board.background);
     ctx.fillRect(0, 0, board.width, board.height);
     ctx.textBaseline = "top";
-    for (const { x, y, size, color, char } of board.text) {
-      ctx.font = `${8 * size}px monospace`;
-      ctx.fillStyle = rgb565(color);
-      ctx.fillText(char, x, y, 6 * size);
+    for (const item of board.draws) {
+      ctx.fillStyle = rgb565(item.color);
+      if (item.kind === "rect") ctx.fillRect(item.x, item.y, item.width, item.height);
+      else {
+        ctx.font = `${8 * item.size}px monospace`;
+        ctx.fillText(item.char, item.x, item.y, 6 * item.size);
+      }
     }
   }, [board]);
   return <canvas ref={canvas} width={board.width} height={board.height} aria-label="จอ LCD จำลอง" />;
+}
+
+const switchKeys: Readonly<Partial<Record<string, BoardButton>>> = {
+  ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right",
+};
+const switchButtons = [
+  ["up", "ขึ้น", "↑"], ["left", "ซ้าย", "←"], ["center", "ตรงกลาง", "●"],
+  ["right", "ขวา", "→"], ["down", "ลง", "↓"],
+] as const;
+
+type BuzzerAudio = { context: AudioContext; volume: GainNode };
+
+function useBuzzerSound(on: boolean) {
+  const audio = useRef<BuzzerAudio | null>(null);
+  const [enabled, setEnabled] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  function release() {
+    const current = audio.current;
+    audio.current = null;
+    if (current) {
+      current.volume.gain.setValueAtTime(0, current.context.currentTime);
+      void current.context.close().catch(() => {});
+    }
+  }
+
+  useEffect(() => release, []);
+  useEffect(() => {
+    function syncSound() {
+      const current = audio.current;
+      if (current) current.volume.gain.setValueAtTime(on && enabled && !document.hidden ? 0.05 : 0, current.context.currentTime);
+    }
+    syncSound();
+    document.addEventListener("visibilitychange", syncSound);
+    return () => document.removeEventListener("visibilitychange", syncSound);
+  }, [enabled, on]);
+
+  async function toggle() {
+    if (audio.current) {
+      release();
+      setEnabled(false);
+      return;
+    }
+
+    setFailed(false);
+    let context: AudioContext | undefined;
+    try {
+      context = new AudioContext();
+      const volume = context.createGain();
+      const oscillator = context.createOscillator();
+      volume.gain.value = 0;
+      oscillator.frequency.value = 440;
+      oscillator.connect(volume);
+      volume.connect(context.destination);
+      oscillator.start();
+      audio.current = { context, volume };
+      setEnabled(true);
+      await context.resume();
+    } catch {
+      if (context && context.state === "closed") return;
+      if (audio.current?.context === context) release();
+      else if (context) void context.close().catch(() => {});
+      if (!audio.current) {
+        setEnabled(false);
+        setFailed(true);
+      }
+    }
+  }
+
+  return { enabled, failed, toggle };
 }
 
 export default function WioLab({ lab, draftKey, disabled, submit }: {
@@ -38,6 +111,8 @@ export default function WioLab({ lab, draftKey, disabled, submit }: {
   const [draftSaved, setDraftSaved] = useState(true);
   const [board, setBoard] = useState(blankBoard);
   const [mode, setMode] = useState<"idle" | "run" | "check">("idle");
+  const buzzerOn = mode === "run" && board.buzzer;
+  const sound = useBuzzerSound(buzzerOn);
   const [notice, setNotice] = useState<{ text: string; error?: boolean }>();
   const [sending, setSending] = useState(false);
   const [light, setLight] = useState(defaultBoardInput.light);
@@ -118,10 +193,36 @@ export default function WioLab({ lab, draftKey, disabled, submit }: {
   }
 
   function updateButton(button: BoardButton, down: boolean) {
+    if (!!input.current.buttons[button] === down) return;
     if (down && mode === "run") tapped.current[button] = true;
     const buttons = { ...input.current.buttons, [button]: down };
     input.current = { ...input.current, buttons };
     setPressed(buttons);
+  }
+
+  function boardButton(button: BoardButton, label: string, glyph: string) {
+    return <button key={button} type="button" aria-label={label} aria-pressed={!!pressed[button]}
+      data-key={button} data-pressed={!!pressed[button]}
+      onPointerDown={(event) => {
+        if (event.button !== 0) return;
+        event.currentTarget.setPointerCapture(event.pointerId);
+        updateButton(button, true);
+      }}
+      onPointerUp={() => updateButton(button, false)}
+      onPointerCancel={() => updateButton(button, false)}
+      onLostPointerCapture={() => updateButton(button, false)}
+      onKeyDown={(event) => {
+        if (event.key !== " " && event.key !== "Enter") return;
+        event.preventDefault();
+        if (!event.repeat) updateButton(button, true);
+      }}
+      onKeyUp={(event) => {
+        if (event.key !== " " && event.key !== "Enter") return;
+        event.preventDefault();
+        updateButton(button, false);
+      }}
+      onClick={(event) => { if (event.detail === 0 && mode === "run") tapped.current[button] = true; }}
+      onBlur={() => updateButton(button, false)}>{glyph}</button>;
   }
 
   function changeSource(next: string) {
@@ -165,21 +266,36 @@ export default function WioLab({ lab, draftKey, disabled, submit }: {
       </div>
       <div className="wio-peripherals">
         <div className="wio-device">
-          <div className="wio-device-keys">{(["A", "B", "C"] as const).map((button) =>
-            <button key={button} type="button" aria-label={`ปุ่ม ${button}`} aria-pressed={!!pressed[button]} data-pressed={!!pressed[button]}
-              onPointerDown={(event) => {
-                if (event.button !== 0) return;
-                event.currentTarget.setPointerCapture(event.pointerId);
-                updateButton(button, true);
-              }}
-              onPointerUp={() => updateButton(button, false)}
-              onPointerCancel={() => updateButton(button, false)}
-              onLostPointerCapture={() => updateButton(button, false)}
-              onKeyDown={(event) => { if (event.key === " " || event.key === "Enter") updateButton(button, true); }}
-              onKeyUp={(event) => { if (event.key === " " || event.key === "Enter") updateButton(button, false); }}
-              onBlur={() => updateButton(button, false)}>{button}</button>)}</div>
+          <div className="wio-device-keys">{(["A", "B", "C"] as const).map((button) => boardButton(button, `ปุ่ม ${button}`, button))}</div>
           <div className="wio-display"><Display board={board} /></div>
           <div className="wio-device-bottom"><b>Wio Terminal</b><span><i className={board.led ? "wio-led on" : "wio-led"} />LED {board.led ? "ON" : "OFF"}</span></div>
+          <div className="wio-device-controls">
+            <div className="wio-switch" role="group" aria-label="สวิตช์ห้าทิศทาง"
+              onKeyDown={(event) => {
+                const button = switchKeys[event.key];
+                if (!button) return;
+                event.preventDefault();
+                if (!event.repeat) updateButton(button, true);
+              }}
+              onKeyUp={(event) => {
+                const button = switchKeys[event.key];
+                if (!button) return;
+                event.preventDefault();
+                updateButton(button, false);
+              }}
+              onBlur={(event) => {
+                if (event.currentTarget.contains(event.relatedTarget)) return;
+                for (const [button] of switchButtons) updateButton(button, false);
+              }}>
+              {switchButtons.map(([button, label, glyph]) => boardButton(button, `สวิตช์ ${label}`, glyph))}
+            </div>
+            <div className="wio-buzzer">
+              <span data-active={buzzerOn}>บัซเซอร์ {buzzerOn ? "ดัง" : "เงียบ"}</span>
+              <button type="button" className="button button-quiet" aria-pressed={sound.enabled}
+                onClick={() => void sound.toggle()}>{sound.enabled ? "ปิดเสียง" : "เปิดเสียง"}</button>
+              {sound.failed && <small role="status">เบราว์เซอร์เปิดเสียงไม่ได้</small>}
+            </div>
+          </div>
         </div>
         <label className="wio-light">แสง (WIO_LIGHT) <output>{light}</output>
           <input type="range" min={0} max={1023} value={light} onChange={(event) => {
@@ -207,6 +323,7 @@ export default function WioLab({ lab, draftKey, disabled, submit }: {
     <details className="wio-help">
       <summary>คำสั่งที่รองรับและการส่งงาน</summary>
       <p>ตัวจำลองฝึกพื้นฐาน Arduino ใช้ <code>setup()</code>, <code>loop()</code>, ตัวแปร <code>int</code> / <code>bool</code>, <code>if</code> / <code>else</code>, <code>while</code>, <code>delay()</code>, GPIO, Serial และคำสั่ง LCD พื้นฐานของ <code>TFT_eSPI</code></p>
+      <p>เมื่อโฟกัสสวิตช์ห้าทิศทาง ใช้ปุ่มลูกศรเพื่อเปลี่ยนทิศ และใช้ Enter หรือ Space กดปุ่มที่เลือกอยู่ เปิดเสียงบัซเซอร์ได้จากแผงควบคุม</p>
       <p>การตรวจฝึกไม่คิดคะแนน กดส่งได้แม้ยังตรวจไม่ผ่าน ทุกครั้งที่ส่งจะเก็บเป็นไฟล์ใหม่ ดาวน์โหลดไปลองคอมไพล์และทดสอบกับบอร์ดจริงได้</p>
     </details>
   </section>;

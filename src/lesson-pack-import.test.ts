@@ -86,3 +86,13 @@ test("rejects invalid Wio lab fields and unrelated classroom instructions in the
   }
   expect(() => parseLessonPackImportText(JSON.stringify({ ...sample, lab: null }))).toThrow("expected an object");
 });
+
+test("the Wio AI prompt and paste validator accept every built-in project", () => {
+  const prompt = aiImportTemplate("wio", "", "");
+  const sample = JSON.parse(example("wio"));
+  for (const preset of ["counter", "light-meter", "switch-menu", "buzzer"] as const) {
+    expect(prompt).toContain(`- ${preset}: `);
+    const pack = parseLessonPackImportText(JSON.stringify({ ...sample, lab: { ...sample.lab, preset } }));
+    expect(pack.lab?.preset).toBe(preset);
+  }
+});

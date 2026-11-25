@@ -1,4 +1,4 @@
-export const wioLabIds = ["blink", "buttons", "lcd", "light"] as const;
+export const wioLabIds = ["blink", "buttons", "lcd", "light", "counter", "light-meter", "switch-menu", "buzzer"] as const;
 export type WioLabId = typeof wioLabIds[number];
 export type WioLabSettings = { preset: WioLabId; title: string; instructions: string; maxScore: number };
 export const wioMaxScore = 9_999_999_999.99;
@@ -73,6 +73,95 @@ void loop() {
   // TODO: Compare brightness with 300, then set the LED.
   Serial.println(brightness);
   delay(50);
+}
+`,
+  },
+  counter: {
+    title: "ตัวนับบนจอ LCD",
+    instructions: "เริ่มที่ Count: 0 กด A เพื่อเพิ่ม 1 กด B เพื่อลด 1 (ต่ำสุด 0) และกด C เพื่อรีเซ็ต กดค้างให้นับครั้งเดียว จอแสดง Count: ตามด้วยตัวเลข",
+    starter: `#include <TFT_eSPI.h>
+TFT_eSPI tft;
+int count = 0;
+bool wasA = false;
+bool wasB = false;
+bool wasC = false;
+
+void setup() {
+  pinMode(WIO_KEY_A, INPUT_PULLUP);
+  pinMode(WIO_KEY_B, INPUT_PULLUP);
+  pinMode(WIO_KEY_C, INPUT_PULLUP);
+  tft.begin();
+  tft.setRotation(3);
+  tft.setTextSize(2);
+}
+
+void loop() {
+  // TODO: Compare each button with its previous state.
+  // TODO: Update count and print "Count: " followed by the number.
+  delay(25);
+}
+`,
+  },
+  "light-meter": {
+    title: "มาตรวัดแสงบนจอ LCD",
+    instructions: "แสดง Light: ตามด้วยค่าจาก WIO_LIGHT (0–1023) และใช้ tft.fillRect() วาดแถบสีเขียวที่ (24, 56) สูง 16 พิกเซล ความกว้างคือค่าแสง × 200 ÷ 1023 ล้างแถบเดิมเมื่อค่าแสงเปลี่ยน",
+    starter: `#include <TFT_eSPI.h>
+TFT_eSPI tft;
+
+void setup() {
+  pinMode(WIO_LIGHT, INPUT);
+  tft.begin();
+  tft.setRotation(3);
+  tft.setTextSize(2);
+}
+
+void loop() {
+  int reading = analogRead(WIO_LIGHT);
+  // TODO: Clear the screen and print "Light: " followed by reading.
+  // TODO: Draw the green bar in proportion to reading.
+  delay(50);
+}
+`,
+  },
+  "switch-menu": {
+    title: "เมนูด้วยสวิตช์ห้าทิศทาง",
+    instructions: "เริ่มที่ Menu: LED ใช้ขึ้น/ลงวนระหว่าง LED, Light และ Buzzer กดขวาหรือตรงกลางเพื่อแสดง Selected: ตามด้วยชื่อรายการ กดซ้ายกลับไปที่รายการเดิม กดค้างให้เลื่อนครั้งเดียว",
+    starter: `#include <TFT_eSPI.h>
+TFT_eSPI tft;
+int option = 0;
+bool selected = false;
+
+void setup() {
+  pinMode(WIO_5S_UP, INPUT_PULLUP);
+  pinMode(WIO_5S_DOWN, INPUT_PULLUP);
+  pinMode(WIO_5S_LEFT, INPUT_PULLUP);
+  pinMode(WIO_5S_RIGHT, INPUT_PULLUP);
+  pinMode(WIO_5S_PRESS, INPUT_PULLUP);
+  tft.begin();
+  tft.setRotation(3);
+  tft.setTextSize(2);
+}
+
+void loop() {
+  // TODO: Track switch presses and update the menu.
+  // TODO: Print "Menu: " or "Selected: " followed by the item.
+  delay(25);
+}
+`,
+  },
+  buzzer: {
+    title: "กดปุ่มให้บัซเซอร์ดัง",
+    instructions: "กด A ให้ WIO_BUZZER ดัง 200 มิลลิวินาทีด้วย analogWrite(WIO_BUZZER, 128) แล้วปิดด้วยค่า 0 กดค้างให้ดังครั้งเดียว ปล่อยแล้วกดใหม่เพื่อให้ดังอีกครั้ง",
+    starter: `bool wasA = false;
+
+void setup() {
+  pinMode(WIO_KEY_A, INPUT_PULLUP);
+  pinMode(WIO_BUZZER, OUTPUT);
+}
+
+void loop() {
+  // TODO: Detect a new A press and play one short beep.
+  delay(25);
 }
 `,
   },

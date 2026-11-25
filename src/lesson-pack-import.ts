@@ -1,7 +1,7 @@
 import { importFields, importObject, importString, maxAiImportBytes, readImportJson } from "./ai-import-json";
 import { parseQuizImport, quizImportExample } from "./quiz-import";
 import { normalizeWorksheetQuestions } from "./worksheet-core";
-import { isWioLabId, validWioMaxScore, wioLabs, type WioLabSettings } from "./wio-labs";
+import { isWioLabId, validWioMaxScore, wioLabIds, wioLabs, type WioLabSettings } from "./wio-labs";
 
 export function parseWorksheetImportText(source: string) {
   return parseWorksheetImport(readImportJson(source), "worksheet");
@@ -70,7 +70,7 @@ function parseWorksheetImport(value: unknown, path: string) {
 function parseLabImport(value: unknown): WioLabSettings {
   const lab = importObject(value, "lab");
   importFields(lab, ["preset", "title", "instructions"], "lab", ["maxScore"]);
-  if (!isWioLabId(lab.preset)) throw new Error("lab.preset: use blink, buttons, lcd, or light");
+  if (!isWioLabId(lab.preset)) throw new Error(`lab.preset: use ${wioLabIds.join(", ")}`);
   const maxScore = lab.maxScore === undefined ? 100 : lab.maxScore;
   if (!validWioMaxScore(maxScore)) throw new Error("lab.maxScore: use a positive score with at most two decimal places");
   const title = importTitle(lab.title, "lab.title");
@@ -126,7 +126,7 @@ export function aiImportTemplate(kind: "worksheet" | "pack" | "wio", topic: stri
     lab: { preset: "blink", title: wioLabs.blink.title, instructions: wioLabs.blink.instructions, maxScore: 10 },
   };
   const task = kind === "wio"
-    ? "สร้างบทเรียนภาษาไทยพร้อมห้องปฏิบัติการ Wio Terminal ใช้ HTML ใน lesson.html และ framework เป็น bootstrap หรือ none เลือก lab.preset ให้ตรงกับเรื่อง: blink (LED ติด/ดับทุก 500 ms), buttons (A เปิด LED, B ปิด), lcd (แสดง Hello Wio), light (LED ติดเมื่อค่าแสงต่ำกว่า 300) เขียนคำชี้แจงให้ตรงกับการตรวจของ Classroom โปรแกรมจำลองมีโค้ดเริ่มต้นให้แล้ว ห้ามฝังตัวจำลองหรือเฉลยลงในบทเรียน maxScore เป็นคะแนนเต็มบวกที่มีทศนิยมไม่เกิน 2 ตำแหน่ง"
+    ? `สร้างบทเรียนภาษาไทยพร้อมห้องปฏิบัติการ Wio Terminal ใช้ HTML ใน lesson.html และ framework เป็น bootstrap หรือ none เลือก lab.preset จากรายการนี้ แล้วเขียนคำชี้แจงให้ตรงกับการตรวจของ Classroom โปรแกรมจำลองมีโค้ดเริ่มต้นให้แล้ว ห้ามฝังตัวจำลองหรือเฉลยลงในบทเรียน maxScore เป็นคะแนนเต็มบวกที่มีทศนิยมไม่เกิน 2 ตำแหน่ง\n${wioLabIds.map((id) => `- ${id}: ${wioLabs[id].instructions}`).join("\n")}`
     : kind === "pack"
     ? `สร้างชุดบทเรียนภาษาไทยที่มีบทเรียน แบบทดสอบ และใบงานในหัวข้อเดียวกัน บทเรียนใช้ HTML ฉบับเต็มใน html พร้อม Bootstrap ที่ Classroom โหลดให้อยู่แล้ว เพิ่ม CSS ใน css และ JavaScript ใน javascript ได้เมื่อจำเป็น ห้ามเรียก API หรือใช้ไฟล์ภายนอก เก็บเฉลยจริงไว้ใน quiz และ worksheet เท่านั้น ใช้แบบทดสอบ 1–100 ข้อ แบบ multiple-choice และ true-false ตามตัวอย่าง ใส่ explanation สั้น ๆ ให้ครบทุกข้อ ${worksheetRules}`
     : `สร้างใบงานภาษาไทย ${worksheetRules}`;

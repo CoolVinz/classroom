@@ -45,7 +45,7 @@ test("checks visible LCD text and rejects erased, invisible and off-screen text"
   const board = createBoard(source);
   board.advance(0);
   expect(board.snapshot()).toMatchObject({ width: 320, height: 240 });
-  expect(board.snapshot().text.map((stamp) => stamp.char).join("")).toBe("Hello Wio");
+  expect(board.snapshot().draws.map((item) => item.kind === "glyph" ? item.char : "").join("")).toBe("Hello Wio");
 });
 
 test("checks the light threshold at 299 and 300 and reports bounded serial output", () => {
@@ -88,4 +88,45 @@ test("reports source lines for unsupported syntax, hardware calls, and tight loo
   expect(() => createBoard("void setup() {}\nvoid loop() { while (true) {} }").advance(0)).toThrow("บรรทัด 2");
   expect(() => createBoard("ก".repeat(6000))).toThrow("16 KiB");
   expect(() => createBoard("void setup(){}\nvoid loop(){ if(" + "(".repeat(50) + "1" + ")".repeat(50) + "){} }")).toThrow("บรรทัด 2");
+});
+
+test("counter ignores held inputs, stops at zero, and requires an exact visible count", () => {
+  const source = solution("counter");
+  expect(checkSketch("counter", source.replace("a && !wasA", "a")).passed).toBe(false);
+  expect(checkSketch("counter", source.replace(" && count > 0", "")).passed).toBe(false);
+  expect(checkSketch("counter", source.replace("tft.println(count)", "tft.println(count * 10)")).passed).toBe(false);
+});
+
+test("light meter follows both the sensor value and the bar after falling light", () => {
+  const source = solution("light-meter");
+  expect(checkSketch("light-meter", source.replace("reading * 200 / 1023", "200")).passed).toBe(false);
+  expect(checkSketch("light-meter", source.replace("tft.fillScreen(TFT_BLACK);", "")).passed).toBe(false);
+  const board = createBoard(source);
+  board.advance(50, { light: 1023, buttons: {} });
+  expect(board.snapshot().draws).toContainEqual({ kind: "rect", color: 0x07e0, x: 24, y: 56, width: 200, height: 16 });
+  board.advance(50, { light: 0, buttons: {} });
+  expect(board.snapshot().draws.some((item) => item.kind === "rect")).toBe(false);
+});
+
+test("clips LCD rectangles and checks the visible result in drawing order", () => {
+  const source = solution("lcd").replace('tft.println("Hello Wio");', 'tft.println("Hello Wio"); tft.fillRect(-10, 40, 200, 40, TFT_BLACK);');
+  expect(checkSketch("lcd", source).passed).toBe(false);
+  const board = createBoard(source);
+  board.advance(0);
+  expect(board.snapshot().draws.at(-1)).toEqual({ kind: "rect", color: 0, x: 0, y: 40, width: 190, height: 40 });
+});
+
+test("five-way menu requires both select inputs, a back action, and held-input handling", () => {
+  const source = solution("switch-menu");
+  expect(checkSketch("switch-menu", source.replace("up && !wasUp", "up")).passed).toBe(false);
+  expect(checkSketch("switch-menu", source.replace("WIO_5S_RIGHT) == LOW || ", "WIO_5S_RIGHT) == LOW && ")).passed).toBe(false);
+  expect(checkSketch("switch-menu", source.replace("if (left && !wasLeft) selected = false;", "")).passed).toBe(false);
+});
+
+test("buzzer sounds for exactly 200 ms per press and enforces its pin and PWM range", () => {
+  const source = solution("buzzer");
+  expect(checkSketch("buzzer", source.replace("delay(200)", "delay(100)")).passed).toBe(false);
+  expect(checkSketch("buzzer", source.replace("a && !wasA", "a")).passed).toBe(false);
+  expect(() => createBoard(source.replace("128", "256")).advance(0, { light: 512, buttons: { A: true } })).toThrow("0 ถึง 255");
+  expect(() => createBoard(source.replace("pinMode(WIO_BUZZER, OUTPUT);", "")).advance(0, { light: 512, buttons: { A: true } })).toThrow("OUTPUT");
 });
