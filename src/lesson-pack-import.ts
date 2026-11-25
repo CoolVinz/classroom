@@ -1,6 +1,7 @@
 import { importFields, importObject, importString, maxAiImportBytes, readImportJson } from "./ai-import-json";
 import { parseQuizImport, quizImportExample } from "./quiz-import";
 import { normalizeWorksheetQuestions } from "./worksheet-core";
+import { isWioLabId, validWioMaxScore, wioLabs, type WioLabSettings } from "./wio-labs";
 
 export function parseWorksheetImportText(source: string) {
   return parseWorksheetImport(readImportJson(source), "worksheet");
@@ -66,9 +67,21 @@ function parseWorksheetImport(value: unknown, path: string) {
   return { title, questions: normalizeWorksheetQuestions(questions, true) };
 }
 
+function parseLabImport(value: unknown): WioLabSettings {
+  const lab = importObject(value, "lab");
+  importFields(lab, ["preset", "title", "instructions"], "lab", ["maxScore"]);
+  if (!isWioLabId(lab.preset)) throw new Error("lab.preset: use blink, buttons, lcd, or light");
+  const maxScore = lab.maxScore === undefined ? 100 : lab.maxScore;
+  if (!validWioMaxScore(maxScore)) throw new Error("lab.maxScore: use a positive score with at most two decimal places");
+  const title = importTitle(lab.title, "lab.title");
+  const instructions = importString(lab.instructions, "lab.instructions", 5000);
+  return { preset: lab.preset, title, instructions, maxScore };
+}
+
 export function parseLessonPackImportText(source: string) {
   const raw = importObject(readImportJson(source), "root");
-  importFields(raw, ["format", "version", "lesson", "quiz", "worksheet"], "root");
+  if (Object.hasOwn(raw, "lab")) importFields(raw, ["format", "version", "lesson", "lab"], "root", ["quiz", "worksheet"]);
+  else importFields(raw, ["format", "version", "lesson", "quiz", "worksheet"], "root");
   if (raw.format !== "classroom-lesson-pack" || raw.version !== 1) throw new Error("root: unsupported lesson pack format or version");
 
   const lesson = importObject(raw.lesson, "lesson");
@@ -85,8 +98,9 @@ export function parseLessonPackImportText(source: string) {
   }
   return {
     lesson: { title, code: { type: "code" as const, html, css, javascript, framework, imageIds: [] as string[] } },
-    quiz: parseQuizImport(raw.quiz, "quiz"),
-    worksheet: parseWorksheetImport(raw.worksheet, "worksheet"),
+    quiz: Object.hasOwn(raw, "quiz") ? parseQuizImport(raw.quiz, "quiz") : null,
+    worksheet: Object.hasOwn(raw, "worksheet") ? parseWorksheetImport(raw.worksheet, "worksheet") : null,
+    lab: Object.hasOwn(raw, "lab") ? parseLabImport(raw.lab) : null,
   };
 }
 
@@ -99,15 +113,22 @@ const worksheetExample = {
   ],
 };
 
-export function aiImportTemplate(kind: "worksheet" | "pack", topic: string, grade: string) {
+export function aiImportTemplate(kind: "worksheet" | "pack" | "wio", topic: string, grade: string) {
   const worksheetRules = "ใบงานใช้คำถามแบบเลือกตอบ ถูก/ผิด และเติมคำ ตามตัวอย่าง คะแนนเป็นจำนวนเต็ม 1–1000 ต่อข้อ ใช้ correctAnswer เป็นเลขตัวเลือกเริ่มที่ 1 สำหรับปรนัย และ true หรือ false สำหรับถูก/ผิด ข้อเติมคำใช้ acceptedAnswers เป็นรายการคำตอบสั้น ๆ ที่ยอมรับได้ ตัวเลือกปรนัยมี 2–8 ตัวเลือก ใบงานมี 1–100 ข้อ";
   const pack = {
     format: "classroom-lesson-pack", version: 1,
     lesson: { title: "พื้นฐาน Blender", html: '<!doctype html><html lang="th"><body><main class="container py-4"><h1>พื้นฐาน Blender</h1><p>เริ่มจากการย้าย หมุน และเปลี่ยนขนาดวัตถุ</p></main></body></html>', framework: "bootstrap" },
     quiz: quizImportExample, worksheet: worksheetExample,
   };
-  const task = kind === "pack"
+  const wioPack = {
+    format: "classroom-lesson-pack", version: 1,
+    lesson: { title: "ไฟ LED กะพริบด้วย Wio Terminal", html: '<h1>ไฟ LED กะพริบ</h1><p>ลองสลับไฟทุก 500 มิลลิวินาที</p>', framework: "bootstrap" },
+    lab: { preset: "blink", title: wioLabs.blink.title, instructions: wioLabs.blink.instructions, maxScore: 10 },
+  };
+  const task = kind === "wio"
+    ? "สร้างบทเรียนภาษาไทยพร้อมห้องปฏิบัติการ Wio Terminal ใช้ HTML ใน lesson.html และ framework เป็น bootstrap หรือ none เลือก lab.preset ให้ตรงกับเรื่อง: blink (LED ติด/ดับทุก 500 ms), buttons (A เปิด LED, B ปิด), lcd (แสดง Hello Wio), light (LED ติดเมื่อค่าแสงต่ำกว่า 300) เขียนคำชี้แจงให้ตรงกับการตรวจของ Classroom โปรแกรมจำลองมีโค้ดเริ่มต้นให้แล้ว ห้ามฝังตัวจำลองหรือเฉลยลงในบทเรียน maxScore เป็นคะแนนเต็มบวกที่มีทศนิยมไม่เกิน 2 ตำแหน่ง"
+    : kind === "pack"
     ? `สร้างชุดบทเรียนภาษาไทยที่มีบทเรียน แบบทดสอบ และใบงานในหัวข้อเดียวกัน บทเรียนใช้ HTML ฉบับเต็มใน html พร้อม Bootstrap ที่ Classroom โหลดให้อยู่แล้ว เพิ่ม CSS ใน css และ JavaScript ใน javascript ได้เมื่อจำเป็น ห้ามเรียก API หรือใช้ไฟล์ภายนอก เก็บเฉลยจริงไว้ใน quiz และ worksheet เท่านั้น ใช้แบบทดสอบ 1–100 ข้อ แบบ multiple-choice และ true-false ตามตัวอย่าง ใส่ explanation สั้น ๆ ให้ครบทุกข้อ ${worksheetRules}`
     : `สร้างใบงานภาษาไทย ${worksheetRules}`;
-  return `${task}\n\nหัวข้อ: ${topic.trim() || "[ใส่หัวข้อ]"}\nระดับชั้น: ${grade.trim() || "[ใส่ระดับชั้น]"}\n\nตอบกลับเป็น JSON ที่ถูกต้องเท่านั้น ใช้ฟิลด์ตามตัวอย่าง ไม่ใส่ Markdown รหัสภายใน หรือข้อมูลรูปภาพ ชื่อแต่ละรายการยาวไม่เกิน 120 ตัวอักษร\n\n${JSON.stringify(kind === "pack" ? pack : worksheetExample, null, 2)}`;
+  return `${task}\n\nหัวข้อ: ${topic.trim() || "[ใส่หัวข้อ]"}\nระดับชั้น: ${grade.trim() || "[ใส่ระดับชั้น]"}\n\nตอบกลับเป็น JSON ที่ถูกต้องเท่านั้น ใช้ฟิลด์ตามตัวอย่าง ไม่ใส่ Markdown รหัสภายใน หรือข้อมูลรูปภาพ ชื่อแต่ละรายการยาวไม่เกิน 120 ตัวอักษร\n\n${JSON.stringify(kind === "wio" ? wioPack : kind === "pack" ? pack : worksheetExample, null, 2)}`;
 }

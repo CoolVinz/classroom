@@ -104,7 +104,7 @@ function App() {
   const lessonMatch = pathname.match(/^\/lessons\/([0-9a-f-]{36})(?:\/classrooms\/([0-9a-f-]{36}))?\/?$/i);
   const worksheetMatch = pathname.match(/^\/worksheets\/([0-9a-f-]{36})\/?$/i);
   const studentLogin = user ? <main className="public-lesson-page"><section className="panel learning-panel"><h1>สำหรับนักเรียน</h1><p>กรุณาเข้าสู่ระบบด้วยบัญชี Google ของโรงเรียน</p><Button onClick={() => void logout()}>ออกจากระบบ</Button></section></main> : <Login studentOnly onLogin={setUser} />;
-  if (lessonMatch) return <PublicLessonPage key={pathname} id={lessonMatch[1]} classroomId={lessonMatch[2]} student={user?.role === "student"} login={studentLogin} />;
+  if (lessonMatch) return <PublicLessonPage key={pathname} id={lessonMatch[1]} classroomId={lessonMatch[2]} studentId={user?.role === "student" ? user.id : undefined} login={studentLogin} />;
   if (worksheetMatch) return user?.role === "student" ? <main className="public-lesson-page"><div className="public-lesson-brand"><a href="/">ห้องเรียน</a></div><StudentAttendance /><WorksheetActivity key={worksheetMatch[1]} roundId={worksheetMatch[1]} /></main> : studentLogin;
   const worldMatch = pathname.match(/^\/world\/([0-9a-f-]{36})\/?$/i);
   if (worldMatch) return user ? <div className="world-page"><Suspense fallback={<div className="loading"><span className="spinner"/>กำลังเปิดโลกเสมือน…</div>}><GalleryWorld classroomId={worldMatch[1]} user={user} close={() => navigate("/")} logout={() => void logout()} /></Suspense></div> : <Login studentOnly onLogin={setUser} />;

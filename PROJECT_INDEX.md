@@ -15,7 +15,7 @@ AI entry point. Read `AI_CONTEXT.md`, then open only the documents relevant to t
 | OPS-001 | Deployment | [docs/OPS-001-deployment.md](docs/OPS-001-deployment.md) | App and separate Colyseus Coolify deployment requirements | `Docker, Coolify, Colyseus, operations` | LOW | LOW | TEC-001, DAT-001, MOD-005, MOD-006, MOD-007 |
 | OPS-002 | Coolify and PostgreSQL deployment guide | [COOLIFY-POSTGRES-DEPLOYMENT-GUIDE.md](COOLIFY-POSTGRES-DEPLOYMENT-GUIDE.md) | Copy-ready deployment checklist for other projects | `Coolify, PostgreSQL, TLS, deployment` | LOW | LOW | OPS-001, TEC-001, DAT-001 |
 | REQ-001 | Virtual world gallery | [docs/REQ-001-virtual-world-gallery.md](docs/REQ-001-virtual-world-gallery.md) | Gallery requirements and deployment limits | `gallery, student-work, Colyseus` | LOW | LOW | MOD-002, MOD-004, MOD-007, DAT-001 |
-| REQ-002 | Wio Terminal labs | [docs/REQ-002-wio-terminal-labs.md](docs/REQ-002-wio-terminal-labs.md) | Assign and run beginner Arduino labs with private sketch submissions | `Wio Terminal, Arduino, simulation, lab` | LOW | LOW | MOD-004, MOD-008 |
+| REQ-002 | Wio Terminal labs | [docs/REQ-002-wio-terminal-labs.md](docs/REQ-002-wio-terminal-labs.md) | Build and import Wio lessons with embedded Arduino labs and private sketch submissions | `Wio Terminal, Arduino, simulation, lab, AI-import` | LOW | LOW | MOD-004, MOD-005, MOD-008 |
 
 Project-document rows are rated LOW/LOW; module rows below describe implementation coupling and risk.
 

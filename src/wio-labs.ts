@@ -1,5 +1,16 @@
 export const wioLabIds = ["blink", "buttons", "lcd", "light"] as const;
 export type WioLabId = typeof wioLabIds[number];
+export type WioLabSettings = { preset: WioLabId; title: string; instructions: string; maxScore: number };
+export const wioMaxScore = 9_999_999_999.99;
+
+export function isWioLabId(value: unknown): value is WioLabId {
+  return wioLabIds.some((id) => id === value);
+}
+
+export function validWioMaxScore(value: unknown): value is number {
+  return typeof value === "number" && value >= 0.01 && value <= wioMaxScore && Math.round(value * 100) / 100 === value;
+}
+
 export const wioSketchMaxBytes = 16 * 1024;
 export const wioSketchMediaType = "text/plain; charset=utf-8";
 

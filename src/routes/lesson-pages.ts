@@ -10,6 +10,8 @@ import { HttpError } from "../http-error";
 import { checkRequestOrigin, cleanText } from "../security";
 import { cleanupUnusedLessonImages, maxStoredBytes, maxUploadBytes, uploadRoot, storedFilePath } from "../file-storage";
 
+import { validWioMaxScore, wioLabIds, wioMaxScore, type WioLabSettings } from "../wio-labs";
+
 const block = t.Union([
   t.Object({ type: t.Literal("text"), heading: t.Optional(t.String({ maxLength: 120 })), text: t.String({ maxLength: 10000 }) }),
   t.Object({ type: t.Literal("image"), imageId: t.String({ format: "uuid" }), alt: t.String({ maxLength: 300 }), caption: t.Optional(t.String({ maxLength: 500 })) }),
@@ -19,31 +21,69 @@ const block = t.Union([
 const blocks = t.Array(block, { maxItems: 100 });
 const revisionBody = t.Object({ expectedRevision: t.Integer({ minimum: 0 }) });
 const quizLinksSchema = t.Array(t.Object({ quizId: t.String({ format: "uuid" }), label: t.String({ minLength: 1, maxLength: 100 }) }), { maxItems: 20 });
-const lessonBody = t.Object({ title: t.String({ minLength: 1, maxLength: 120 }), blocks, quizLinks: t.Optional(quizLinksSchema), expectedRevision: t.Integer({ minimum: 0 }) });
+const wioLabSettings = t.Object({
+  preset: t.Union(wioLabIds.map((id) => t.Literal(id))),
+  title: t.String({ minLength: 1, maxLength: 120 }),
+  instructions: t.String({ maxLength: 5000 }),
+  maxScore: t.Number({ minimum: 0.01, maximum: wioMaxScore }),
+});
+const lessonBody = t.Object({ title: t.String({ minLength: 1, maxLength: 120 }), blocks, quizLinks: t.Optional(quizLinksSchema), wioLab: t.Optional(t.Nullable(wioLabSettings)), expectedRevision: t.Integer({ minimum: 0 }) });
 type LessonBlock = { type: "text"; heading?: string; text: string } | { type: "image"; imageId: string; alt: string; caption?: string } | { type: "youtube"; videoId: string; caption?: string } | { type: "code"; html: string; css: string; javascript: string; framework?: "none" | "bootstrap"; imageIds?: string[] };
 type StoredBlock = Exclude<LessonBlock, { type: "code" }> | Extract<LessonBlock, { type: "code" }> & { imageIds: string[] };
 const lessonImagePattern = /lesson-image:\/\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/gi;
 const uuid = t.String({ format: "uuid" });
 const classLessonParams = t.Object({ classroomId: uuid, id: uuid });
 
-async function changeClassAssignment(request: Request, lessonId: string, classroomId: string, assign: boolean) {
+function normalizeWioLab(lab: WioLabSettings | null) {
+  if (lab && !validWioMaxScore(lab.maxScore)) throw new HttpError(422, "คะแนนเต็มต้องใช้ทศนิยมไม่เกิน 2 ตำแหน่ง");
+  return lab ? { ...lab, title: cleanText(lab.title, 120), instructions: lab.instructions.trim() } : null;
+}
+
+async function lockLessonAndClassroom(db: postgres.ISql, ownerId: string, lessonId: string, classroomId: string) {
+  const [lesson] = await db<{ publishedAt: string | null; wioLab: WioLabSettings | null }[]>`
+    SELECT published_at AS "publishedAt", published_wio_lab AS "wioLab" FROM classroom.lesson_pages
+    WHERE id = ${lessonId} AND owner_id = ${ownerId} AND trashed_at IS NULL FOR UPDATE`;
+  const [room] = await db`SELECT id FROM classroom.classrooms
+    WHERE id = ${classroomId} AND owner_id = ${ownerId} AND archived_at IS NULL FOR SHARE`;
+  if (!lesson || !room) throw new HttpError(404, "ไม่พบบทเรียนหรือห้องเรียน");
+  return lesson;
+}
+
+async function requireActiveWioAssignment(db: postgres.ISql, classroomId: string, assignmentId: string) {
+  const [assignment] = await db`SELECT id FROM classroom.assignments
+    WHERE id = ${assignmentId} AND classroom_id = ${classroomId} AND wio_lab IS NOT NULL AND archived_at IS NULL FOR SHARE`;
+  if (!assignment) throw new HttpError(404, "ไม่พบงาน Wio Terminal ที่เปิดอยู่ในห้องนี้");
+}
+
+async function createWioAssignment(db: postgres.ISql, classroomId: string, lab: WioLabSettings) {
+  const [assignment] = await db<{ id: string }[]>`
+    INSERT INTO classroom.assignments (classroom_id, title, instructions, max_score, wio_lab)
+    VALUES (${classroomId}, ${lab.title}, ${lab.instructions}, ${lab.maxScore}, ${lab.preset})
+    RETURNING id`;
+  return assignment.id;
+}
+
+async function changeClassAssignment(request: Request, lessonId: string, classroomId: string, assign: boolean, existingLabId?: string) {
   checkRequestOrigin(request);
   const actor = await requireActor(request);
   return sql.begin(async (tx) => {
-    const [lesson] = await tx`SELECT published_at FROM classroom.lesson_pages
-      WHERE id = ${lessonId} AND owner_id = ${actor.id} AND trashed_at IS NULL FOR UPDATE`;
-    const [room] = await tx`SELECT id FROM classroom.classrooms
-      WHERE id = ${classroomId} AND owner_id = ${actor.id} AND archived_at IS NULL FOR SHARE`;
-    if (!lesson || !room) throw new HttpError(404, "ไม่พบบทเรียนหรือห้องเรียน");
-    if (assign) {
-      if (!lesson.published_at) throw new HttpError(422, "เผยแพร่บทเรียนก่อนมอบหมาย");
-      await tx`INSERT INTO classroom.classroom_lessons (classroom_id, lesson_id)
-        VALUES (${classroomId}, ${lessonId}) ON CONFLICT DO NOTHING`;
-      await tx`UPDATE classroom.lesson_pages SET legacy_public = FALSE WHERE id = ${lessonId} AND legacy_public`;
-    } else {
+    const lesson = await lockLessonAndClassroom(tx, actor.id, lessonId, classroomId);
+    if (!assign) {
       await tx`DELETE FROM classroom.classroom_lessons WHERE classroom_id = ${classroomId} AND lesson_id = ${lessonId}`;
+      return { ok: true };
     }
-    return { ok: true };
+    if (!lesson.publishedAt) throw new HttpError(422, "เผยแพร่บทเรียนก่อนมอบหมาย");
+    const [link] = await tx<{ assignmentId: string | null }[]>`
+      SELECT wio_assignment_id AS "assignmentId" FROM classroom.classroom_lessons WHERE classroom_id = ${classroomId} AND lesson_id = ${lessonId}`;
+    if (link) return { ok: true, assignmentId: link.assignmentId };
+
+    let assignmentId = existingLabId ?? null;
+    if (assignmentId) await requireActiveWioAssignment(tx, classroomId, assignmentId);
+    else if (lesson.wioLab) assignmentId = await createWioAssignment(tx, classroomId, lesson.wioLab);
+    await tx`INSERT INTO classroom.classroom_lessons (classroom_id, lesson_id, wio_assignment_id)
+      VALUES (${classroomId}, ${lessonId}, ${assignmentId})`;
+    await tx`UPDATE classroom.lesson_pages SET legacy_public = FALSE WHERE id = ${lessonId} AND legacy_public`;
+    return { ok: true, assignmentId };
   });
 }
 
@@ -70,16 +110,52 @@ async function usedStorageBytes(tx: postgres.ISql) {
 export const lessonPageRoutes = new Elysia({ prefix: "/api" })
   .get("/lesson-pages/:id/classrooms", async ({ params, request }) => {
     const actor = await requireActor(request);
-    const [lesson] = await sql`SELECT legacy_public AS "legacyPublic" FROM classroom.lesson_pages
+    const [lesson] = await sql`SELECT legacy_public AS "legacyPublic", published_wio_lab AS "publishedWioLab" FROM classroom.lesson_pages
       WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NULL`;
     if (!lesson) throw new HttpError(404, "ไม่พบบทเรียนนี้");
-    const classrooms = await sql`SELECT c.id, c.name, a.lesson_id IS NOT NULL AS assigned
+    const classrooms = await sql`SELECT c.id, c.name, a.lesson_id IS NOT NULL AS assigned,
+        CASE WHEN linked.id IS NOT NULL THEN jsonb_build_object('id', linked.id, 'title', linked.title,
+          'active', linked.archived_at IS NULL AND linked.wio_lab IS NOT NULL) END AS "wioLab",
+        COALESCE((SELECT jsonb_agg(jsonb_build_object('id', candidate.id, 'title', candidate.title) ORDER BY candidate.title, candidate.id)
+          FROM classroom.assignments candidate
+          WHERE candidate.classroom_id = c.id AND candidate.archived_at IS NULL AND candidate.wio_lab IS NOT NULL), '[]'::jsonb) AS "wioChoices"
       FROM classroom.classrooms c LEFT JOIN classroom.classroom_lessons a ON a.classroom_id = c.id AND a.lesson_id = ${params.id}
+      LEFT JOIN classroom.assignments linked ON linked.id = a.wio_assignment_id AND linked.classroom_id = c.id
       WHERE c.owner_id = ${actor.id} AND c.archived_at IS NULL ORDER BY c.name, c.id`;
     return { ...lesson, classrooms };
   }, { params: t.Object({ id: uuid }) })
-  .put("/lesson-pages/:id/classrooms/:classroomId", ({ params, request }) =>
-    changeClassAssignment(request, params.id, params.classroomId, true), { params: classLessonParams })
+  .put("/lesson-pages/:id/classrooms/:classroomId", ({ params, body, request }) =>
+    changeClassAssignment(request, params.id, params.classroomId, true, body?.assignmentId),
+  { params: classLessonParams, body: t.Optional(t.Object({ assignmentId: uuid })) })
+  .put("/lesson-pages/:id/classrooms/:classroomId/wio-lab", async ({ params, body, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireActor(request);
+    return sql.begin(async (tx) => {
+      const { id, classroomId } = params;
+      const lesson = await lockLessonAndClassroom(tx, actor.id, id, classroomId);
+      const [link] = await tx<{ assignmentId: string | null }[]>`
+        SELECT wio_assignment_id AS "assignmentId" FROM classroom.classroom_lessons WHERE classroom_id = ${classroomId} AND lesson_id = ${id}`;
+      if (!link) throw new HttpError(404, "มอบหมายบทเรียนให้ห้องนี้ก่อนเพิ่มห้องปฏิบัติการ");
+      if (link.assignmentId !== body.expectedAssignmentId) throw new HttpError(409, "ห้องปฏิบัติการถูกเปลี่ยนแล้ว กรุณาโหลดใหม่");
+      let assignmentId: string | null;
+      if ("create" in body) {
+        if (!lesson.publishedAt) throw new HttpError(422, "เผยแพร่บทเรียนก่อนเพิ่มห้องปฏิบัติการ");
+        assignmentId = await createWioAssignment(tx, classroomId, normalizeWioLab(body.create)!);
+      } else {
+        assignmentId = body.assignmentId;
+        if (assignmentId) {
+          if (!lesson.publishedAt) throw new HttpError(422, "เผยแพร่บทเรียนก่อนเพิ่มห้องปฏิบัติการ");
+          await requireActiveWioAssignment(tx, classroomId, assignmentId);
+        }
+      }
+      await tx`UPDATE classroom.classroom_lessons SET wio_assignment_id = ${assignmentId}
+        WHERE classroom_id = ${classroomId} AND lesson_id = ${id}`;
+      return { ok: true, assignmentId };
+    });
+  }, { params: classLessonParams, body: t.Union([
+    t.Object({ expectedAssignmentId: t.Nullable(uuid), assignmentId: t.Nullable(uuid) }),
+    t.Object({ expectedAssignmentId: t.Nullable(uuid), create: wioLabSettings }),
+  ]) })
   .delete("/lesson-pages/:id/classrooms/:classroomId", ({ params, request }) =>
     changeClassAssignment(request, params.id, params.classroomId, false), { params: classLessonParams })
   .get("/classrooms/:classroomId/lesson-pages", async ({ params, request }) => {
@@ -177,7 +253,7 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
     const actor = await requireActor(request);
     const [page] = await sql`SELECT id, title, editor_mode AS "editorMode", draft_blocks AS blocks, draft_revision AS revision,
       published_title AS "publishedTitle", published_at AS "publishedAt", published_revision AS "publishedRevision",
-      draft_quiz_links AS "quizLinks"
+      draft_quiz_links AS "quizLinks", draft_wio_lab AS "wioLab"
       FROM classroom.lesson_pages WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NULL`;
     if (!page) throw new HttpError(404, "ไม่พบบทเรียนนี้");
     return page;
@@ -187,20 +263,23 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
     const actor = await requireActor(request);
     const [page] = await sql.begin(async (tx) => {
       await tx`SELECT pg_advisory_xact_lock(870010022)`;
-      const [current] = await tx<{ editorMode: "blocks" | "code"; quizLinks: { quizId: string; label: string }[] }[]>`SELECT editor_mode AS "editorMode", draft_quiz_links AS "quizLinks" FROM classroom.lesson_pages
+      const [current] = await tx<{ editorMode: "blocks" | "code"; quizLinks: { quizId: string; label: string }[]; wioLab: WioLabSettings | null }[]>`SELECT editor_mode AS "editorMode", draft_quiz_links AS "quizLinks", draft_wio_lab AS "wioLab" FROM classroom.lesson_pages
         WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NULL AND draft_revision = ${body.expectedRevision} FOR UPDATE`;
       if (!current) return [];
       const content = normalizeBlocks(current.editorMode, body.blocks);
       await validateImageReferences(params.id, actor.id, content, tx);
       const quizLinks = body.quizLinks ? normalizeQuizLinks(body.quizLinks) : current.quizLinks;
       await validateQuizLinks(actor.id, quizLinks, tx);
+      const lab = body.wioLab === undefined ? current.wioLab : normalizeWioLab(body.wioLab);
+      const labJson = lab ? sql.json(lab) : null;
       return tx`UPDATE classroom.lesson_pages
         SET title = ${cleanText(body.title, 120)}, draft_blocks = ${sql.json(content)}, draft_quiz_links = ${sql.json(quizLinks)},
+          draft_wio_lab = ${labJson},
           draft_revision = draft_revision + 1, updated_at = NOW()
         WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NULL AND draft_revision = ${body.expectedRevision}
         RETURNING id, title, editor_mode AS "editorMode", draft_blocks AS blocks, draft_revision AS revision,
           published_title AS "publishedTitle",
-          published_at AS "publishedAt", published_revision AS "publishedRevision", draft_quiz_links AS "quizLinks"`;
+          published_at AS "publishedAt", published_revision AS "publishedRevision", draft_quiz_links AS "quizLinks", draft_wio_lab AS "wioLab"`;
     });
     if (!page) await conflictOrMissing(params.id, actor.id);
     cleanupLater();
@@ -211,22 +290,24 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
     const actor = await requireActor(request);
     const [page] = await sql.begin(async (tx) => {
       await tx`SELECT pg_advisory_xact_lock(870010022)`;
-      const [current] = await tx<{ editorMode: "blocks" | "code"; quizLinks: { quizId: string; label: string }[] }[]>`SELECT editor_mode AS "editorMode", draft_quiz_links AS "quizLinks" FROM classroom.lesson_pages
+      const [current] = await tx<{ editorMode: "blocks" | "code"; quizLinks: { quizId: string; label: string }[]; wioLab: WioLabSettings | null }[]>`SELECT editor_mode AS "editorMode", draft_quiz_links AS "quizLinks", draft_wio_lab AS "wioLab" FROM classroom.lesson_pages
         WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NULL AND draft_revision = ${body.expectedRevision} FOR UPDATE`;
       if (!current) return [];
       const content = normalizeBlocks(current.editorMode, body.blocks);
       await validateImageReferences(params.id, actor.id, content, tx);
       const quizLinks = body.quizLinks ? normalizeQuizLinks(body.quizLinks) : current.quizLinks;
       await validateQuizLinks(actor.id, quizLinks, tx);
+      const lab = body.wioLab === undefined ? current.wioLab : normalizeWioLab(body.wioLab);
+      const labJson = lab ? sql.json(lab) : null;
       return tx`UPDATE classroom.lesson_pages SET title = ${cleanText(body.title, 120)},
-        draft_blocks = ${sql.json(content)}, draft_quiz_links = ${sql.json(quizLinks)}, draft_revision = draft_revision + 1,
+        draft_blocks = ${sql.json(content)}, draft_quiz_links = ${sql.json(quizLinks)}, draft_wio_lab = ${labJson}, draft_revision = draft_revision + 1,
         published_blocks = ${sql.json(content)}, published_title = ${cleanText(body.title, 120)}, published_revision = draft_revision + 1,
-        published_quiz_links = ${sql.json(quizLinks)},
+        published_quiz_links = ${sql.json(quizLinks)}, published_wio_lab = ${labJson},
         published_at = NOW(), updated_at = NOW()
         WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NULL
         RETURNING id, title, editor_mode AS "editorMode", draft_blocks AS blocks, draft_revision AS revision,
           published_title AS "publishedTitle",
-          published_at AS "publishedAt", published_revision AS "publishedRevision", draft_quiz_links AS "quizLinks"`;
+          published_at AS "publishedAt", published_revision AS "publishedRevision", draft_quiz_links AS "quizLinks", draft_wio_lab AS "wioLab"`;
     });
     if (!page) await conflictOrMissing(params.id, actor.id);
     cleanupLater();
@@ -236,7 +317,7 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
     checkRequestOrigin(request);
     const actor = await requireActor(request);
     const [page] = await sql`UPDATE classroom.lesson_pages SET published_blocks = NULL,
-      published_title = NULL, published_revision = NULL, published_quiz_links = NULL, published_at = NULL, updated_at = NOW()
+      published_title = NULL, published_revision = NULL, published_quiz_links = NULL, published_wio_lab = NULL, published_at = NULL, updated_at = NOW()
       WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NULL AND draft_revision = ${body.expectedRevision}
       RETURNING id`;
     if (!page) await conflictOrMissing(params.id, actor.id);
@@ -362,7 +443,13 @@ const studentLessonPageRoutes = new Elysia({ prefix: "/api/student" })
     const worksheets = await sql`SELECT id, title FROM classroom.worksheet_rounds
       WHERE classroom_id = ${params.classroomId} AND lesson_id = ${params.id} AND status IN ('open', 'closed')
       ORDER BY created_at, id`;
-    return { ...page, worksheets };
+    const [wioLab] = await sql`
+      SELECT a.id AS "assignmentId", a.title, a.instructions, a.max_score AS "maxScore", a.wio_lab AS preset
+      FROM classroom.classroom_lessons cl
+      JOIN classroom.assignments a ON a.id = cl.wio_assignment_id AND a.classroom_id = cl.classroom_id
+      WHERE cl.classroom_id = ${params.classroomId} AND cl.lesson_id = ${params.id}
+        AND a.archived_at IS NULL AND a.wio_lab IS NOT NULL`;
+    return { ...page, worksheets, wioLab: wioLab ?? null };
   }, { params: classLessonParams })
   .get("/classrooms/:classroomId/lesson-pages/:id/images/:imageId/content", async ({ params, request }) =>
     readPublishedImage(params.id, params.imageId, activeLessonMembership(params.classroomId, (await requireStudent(request)).id)),

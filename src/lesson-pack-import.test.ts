@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { aiImportTemplate, parseLessonPackImportText, parseWorksheetImportText } from "./lesson-pack-import";
 import { gradeWorksheet } from "./worksheet-core";
 
-function example(kind: "worksheet" | "pack") {
+function example(kind: "worksheet" | "pack" | "wio") {
   const prompt = aiImportTemplate(kind, "โมเดล 3 มิติ", "ม.3");
   return prompt.slice(prompt.lastIndexOf("\n\n{") + 2);
 }
@@ -48,12 +48,41 @@ test("a lesson pack uses the matching quiz format and preserves lesson source fo
   sample.lesson.javascript = "\ndocument.title = 'บทเรียน';\n";
   const pack = parseLessonPackImportText(JSON.stringify(sample));
   expect(pack.lesson.code).toEqual({ type: "code", html, css: sample.lesson.css, javascript: sample.lesson.javascript, framework: "bootstrap", imageIds: [] });
-  expect(pack.quiz.content.questions[0].correctChoiceId).toBe(pack.quiz.content.questions[0].choices[0].id);
-  expect(pack.worksheet.questions).toHaveLength(3);
+  const question = pack.quiz?.content.questions[0];
+  expect(question?.correctChoiceId).toEqual(expect.any(String));
+  expect(question?.correctChoiceId).toBe(question?.choices[0].id);
+  expect(pack.worksheet?.questions).toHaveLength(3);
 
   expect(() => parseLessonPackImportText(JSON.stringify({ ...sample, worksheet: {} }))).toThrow("worksheet: missing field");
   expect(() => parseLessonPackImportText(JSON.stringify({ ...sample, quiz: { ...sample.quiz, title: "" } }))).toThrow("quiz.title");
   expect(() => parseLessonPackImportText(JSON.stringify({ ...sample, lesson: { ...sample.lesson, framework: "tailwind" } }))).toThrow("lesson.framework");
   expect(() => parseLessonPackImportText(JSON.stringify({ ...sample, lesson: { ...sample.lesson, html: "<img src='lesson-image://bad'>" } }))).toThrow("uploaded lesson images");
   expect(() => parseLessonPackImportText(JSON.stringify({ ...sample, classroomId: "not accepted" }))).toThrow("unknown field");
+});
+
+test("imports a Wio lesson from the generated template with optional quiz and worksheet", () => {
+  const sample = JSON.parse(example("wio"));
+  const wio = parseLessonPackImportText("```json\n" + example("wio") + "\n```");
+  expect(wio).toMatchObject({ quiz: null, worksheet: null, lab: { preset: "blink", maxScore: 10 } });
+  const old = JSON.parse(example("pack"));
+  const mixed = parseLessonPackImportText(JSON.stringify({ ...sample, quiz: old.quiz, worksheet: old.worksheet, lab: { ...sample.lab, maxScore: undefined } }));
+  expect(mixed).toMatchObject({ lab: { maxScore: 100 }, quiz: { title: old.quiz.title }, worksheet: { title: old.worksheet.title } });
+  expect(parseLessonPackImportText(JSON.stringify({ ...sample, quiz: old.quiz })).worksheet).toBeNull();
+  expect(parseLessonPackImportText(JSON.stringify({ ...sample, worksheet: old.worksheet })).quiz).toBeNull();
+});
+
+test("rejects invalid Wio lab fields and unrelated classroom instructions in the paste", () => {
+  const sample = JSON.parse(example("wio"));
+  for (const [changes, error] of [
+    [{ preset: "wifi" }, "lab.preset"],
+    [{ instructions: 5 }, "lab.instructions"],
+    [{ title: " " }, "lab.title"],
+    [{ maxScore: 0 }, "lab.maxScore"],
+    [{ maxScore: 120.005 }, "lab.maxScore"],
+    [{ classroomId: "not-accepted" }, "unknown field"],
+    [{ starter: "void setup() {}" }, "unknown field"],
+  ] as const) {
+    expect(() => parseLessonPackImportText(JSON.stringify({ ...sample, lab: { ...sample.lab, ...changes } }))).toThrow(error);
+  }
+  expect(() => parseLessonPackImportText(JSON.stringify({ ...sample, lab: null }))).toThrow("expected an object");
 });

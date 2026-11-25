@@ -132,3 +132,11 @@
 @media(pointer:coarse){.gallery-activity-button{min-height:48px}.gallery-activity-panel .button{min-height:44px}}
 
 .gallery-wanted ol{margin:.4rem 0 0;padding-left:1.5rem;display:grid;gap:.4rem}.gallery-wanted li b{margin-inline-start:.6rem;font-size:.75rem;color:#985118}.gallery-drive-hint.gallery-hits{display:inline-block;font-weight:700;white-space:nowrap}
+
+.lesson-class-room {
+  margin-top: .75rem;
+  padding-top: .75rem;
+  border-top: 1px solid var(--line);
+}
+.lesson-class-room .lesson-actions { justify-content: flex-start; align-items: center; }
+.lesson-class-room h3 { margin: .75rem 0 .45rem; font-size: 1rem; }

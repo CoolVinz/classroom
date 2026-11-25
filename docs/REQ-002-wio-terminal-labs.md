@@ -11,6 +11,16 @@ Teachers open a classroom, go to **งานและไฟล์ → สร้�
 
 Students open the assignment to edit the Arduino starter, run the simulated board, and try the practice check. The board has an LED, three active-low buttons, a 320 × 240 LCD in landscape, a 0–1023 light slider, and a Serial Monitor. The draft is local to that account and assignment in the current browser. Students can download the sketch or submit it even if the practice check fails. Each submission is a new private `.ino` file. Teachers download and grade it from the normal assignment review. Published marks appear in the gradebook.
 
+## Labs inside lessons
+
+Publish a lesson and open **ห้องเรียนที่ได้รับบทเรียน**. In each assigned classroom, create a Wio lab or attach an active Wio assignment from that classroom. The lesson shows the simulator and the student's submitted sketches under the reading content. The assignment and lesson share the same browser draft and marking workflow.
+
+For an AI-generated lesson, open **สร้างชุดบทเรียนด้วย AI**, select **Lesson + Wio Lab**, and use **Copy AI template**. Paste the AI response through **Import from AI**, review the lesson and lab, and create the private draft. Edit the preset, title, instructions, or maximum score before publishing. **มอบหมายและสร้างงาน Wio** creates a lab in the selected classroom. Pick an existing lab in the classroom row to reuse it when assigning.
+
+The `classroom-lesson-pack` version 1 JSON uses a `lab` object with `preset` (`blink`, `buttons`, `lcd`, or `light`), `title`, `instructions`, and optional `maxScore` (default 100). Wio packs may also include a quiz and/or worksheet in their existing formats. Pastes can be plain JSON or one JSON code fence, up to 1 MiB.
+
+Archiving an assignment hides its simulator in the lesson until restored. Detaching the lab or unassigning the lesson keeps the classroom assignment, submissions, and grades.
+
 ## Supported code
 
 - `setup()`, `loop()`, `int`, `bool`, `const`, assignment, basic arithmetic/comparison/logical operators, `if/else`, and `while`.

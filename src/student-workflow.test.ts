@@ -1052,6 +1052,87 @@ describe("student submission API", () => {
       await sql`DELETE FROM classroom.lesson_page_images WHERE id = ${restrictedImage.id}`;
       await rm(resolve(uploadDir, restrictedImage.id));
 
+      const wioPackTemplate = aiImportTemplate("wio", "ไฟ LED", "ม.3");
+      const wioPackInput = JSON.parse(wioPackTemplate.slice(wioPackTemplate.lastIndexOf("\n\n{") + 2));
+      const importedWioResponse = await requestAiDraft("lesson-packs", wioPackInput);
+      expect(importedWioResponse.status).toBe(200);
+      const importedWio = await importedWioResponse.json() as { lessonId: string; quizId: string | null; worksheetId: string | null };
+      lessonPageIds.push(importedWio.lessonId);
+      expect(importedWio).toMatchObject({ quizId: null, worksheetId: null });
+      const wioPath = "/lesson-pages/" + importedWio.lessonId;
+      const wioClassA = wioPath + "/classrooms/" + roomA;
+      const wioClassB = wioPath + "/classrooms/" + roomB;
+      const wioStudentA = `/student/classrooms/${roomA}` + wioPath;
+      const wioStudentB = `/student/classrooms/${roomB}` + wioPath;
+      const wioDraft = await (await learningRequest(wioPath)).json() as { title: string; blocks: unknown[]; wioLab: Record<string, unknown> };
+      expect(wioDraft.wioLab).toMatchObject({ preset: "blink", maxScore: 10 });
+      expect((await learningRequest(wioClassA, "PUT")).status).toBe(422);
+      expect((await learningRequest(wioStudentA, "GET", studentHeaders)).status).toBe(404);
+      expect(await sql`SELECT id FROM classroom.assignments WHERE title = ${wioDraft.wioLab.title as string} AND classroom_id = ${roomA}`).toHaveLength(0);
+
+      const labSettings = { ...wioDraft.wioLab, title: "Synthetic published Wio lab", maxScore: 12.35 };
+      const lessonPayload = { title: wioDraft.title, blocks: wioDraft.blocks, wioLab: labSettings, expectedRevision: 0 };
+      expect((await learningRequest(wioPath + "/publish", "POST", teacherHeaders, lessonPayload)).status).toBe(200);
+      expect((await learningRequest(wioPath + "/draft", "PUT", teacherHeaders, {
+        ...lessonPayload, expectedRevision: 1, wioLab: { ...labSettings, title: "Unpublished lab label" },
+      })).status).toBe(200);
+      expect((await learningRequest(wioClassA, "PUT", { ...teacherHeaders, origin: "https://example.invalid" })).status).toBe(403);
+      const assignmentsFromLesson = await Promise.all([learningRequest(wioClassA, "PUT"), learningRequest(wioClassA, "PUT")]);
+      expect(assignmentsFromLesson.map((response) => response.status)).toEqual([200, 200]);
+      const autoLinked = await assignmentsFromLesson[0].json() as { assignmentId: string };
+      expect(await assignmentsFromLesson[1].json()).toMatchObject(autoLinked);
+      expect([...(await sql`SELECT id FROM classroom.assignments WHERE title = 'Synthetic published Wio lab' AND classroom_id = ${roomA}`)]).toEqual([{ id: autoLinked.assignmentId }]);
+      expect(await (await learningRequest(wioStudentA, "GET", studentHeaders)).json()).toMatchObject({
+        wioLab: { assignmentId: autoLinked.assignmentId, title: labSettings.title, preset: "blink" },
+      });
+      expect((await learningRequest(wioStudentB, "GET", studentHeaders)).status).toBe(404);
+      expect((await learningRequest("/public" + wioPath, "GET", {})).status).toBe(404);
+      expect((await learningRequest(wioStudentA, "GET", {})).status).toBe(401);
+      expect((await learningRequest(wioClassB, "PUT", teacherHeaders, { assignmentId: autoLinked.assignmentId })).status).toBe(404);
+      expect((await learningRequest(wioClassB, "PUT", teacherHeaders, { assignmentId: assignmentB })).status).toBe(404);
+
+      const [otherLab] = await sql<{ id: string }[]>`INSERT INTO classroom.assignments (classroom_id, title, wio_lab)
+        VALUES (${roomB}, 'Synthetic existing Wio lab', 'light') RETURNING id`;
+      expect((await learningRequest(wioClassB, "PUT", teacherHeaders, { assignmentId: otherLab.id })).status).toBe(200);
+      expect(await (await learningRequest(wioStudentB, "GET", studentHeaders)).json()).toMatchObject({ wioLab: { assignmentId: otherLab.id, preset: "light" } });
+      expect((await learningRequest(wioStudentB, "GET", peerHeaders)).status).toBe(404);
+
+      const blockLessonClass = `/lesson-pages/${privateLesson.id}/classrooms/${roomA}`;
+      const blockLab = blockLessonClass + "/wio-lab";
+      expect((await learningRequest(blockLessonClass, "PUT")).status).toBe(200);
+      expect((await learningRequest(blockLab, "PUT", teacherHeaders, { assignmentId: otherLab.id, expectedAssignmentId: null })).status).toBe(404);
+      const otherTeacherWio = { ...teacherHeaders, cookie: `classroom_session=${otherTeacherToken}` };
+      expect((await learningRequest(blockLab, "PUT", otherTeacherWio, { assignmentId: autoLinked.assignmentId, expectedAssignmentId: null })).status).toBe(404);
+      const newBlockLab = { create: { preset: "lcd", title: "LCD lesson work", instructions: "แสดงข้อความ", maxScore: 5 }, expectedAssignmentId: null };
+      const created = await Promise.all([learningRequest(blockLab, "PUT", teacherHeaders, newBlockLab), learningRequest(blockLab, "PUT", teacherHeaders, newBlockLab)]);
+      expect(created.map((response) => response.status).sort()).toEqual([200, 409]);
+      const manualLab = await created.find((response) => response.ok)!.json() as { assignmentId: string };
+      expect((await learningRequest(blockLab, "PUT", teacherHeaders, { assignmentId: autoLinked.assignmentId, expectedAssignmentId: manualLab.assignmentId })).status).toBe(200);
+      const blockStudent = `/student/classrooms/${roomA}/lesson-pages/${privateLesson.id}`;
+      expect(await (await learningRequest(blockStudent, "GET", studentHeaders)).json()).toMatchObject({
+        editorMode: "blocks", wioLab: { assignmentId: autoLinked.assignmentId },
+      });
+      const sketchForm = new FormData();
+      sketchForm.set("file", new File(["void setup() {}\nvoid loop() {}"], "wio-lesson.ino", { type: "text/plain" }));
+      const sketchUpload = await app.handle(new Request(
+        `http://localhost/api/student/classrooms/${roomA}/assignments/${autoLinked.assignmentId}/files`,
+        { method: "POST", headers: studentHeaders, body: sketchForm },
+      ));
+      expect(sketchUpload.status).toBe(200);
+      const { id: wioFileId } = await sketchUpload.json() as { id: string };
+      await sql`UPDATE classroom.assignments SET archived_at = NOW() WHERE id = ${autoLinked.assignmentId}`;
+      expect(await (await learningRequest(blockStudent, "GET", studentHeaders)).json()).toMatchObject({ wioLab: null });
+      await sql`UPDATE classroom.assignments SET archived_at = NULL WHERE id = ${autoLinked.assignmentId}`;
+      expect(await (await learningRequest(blockStudent, "GET", studentHeaders)).json()).toMatchObject({ wioLab: { assignmentId: autoLinked.assignmentId } });
+      expect((await learningRequest(blockLab, "PUT", teacherHeaders, { assignmentId: null, expectedAssignmentId: autoLinked.assignmentId })).status).toBe(200);
+      expect(await (await learningRequest(blockStudent, "GET", studentHeaders)).json()).toMatchObject({ wioLab: null });
+      expect((await learningRequest(wioClassA, "DELETE")).status).toBe(200);
+      expect(await (await learningRequest("/student/files/" + wioFileId + "/content", "GET", studentHeaders)).text()).toContain("void setup()");
+      expect((await learningRequest("/files/" + wioFileId, "DELETE")).status).toBe(200);
+      expect((await learningRequest(wioClassB, "DELETE")).status).toBe(200);
+      expect((await learningRequest(blockLessonClass, "DELETE")).status).toBe(200);
+      await sql`DELETE FROM classroom.assignments WHERE id IN (${manualLab.assignmentId}, ${autoLinked.assignmentId}, ${otherLab.id})`;
+
       const assignmentUrl = `http://localhost/api/classrooms/${roomA}/assignments`;
       const wioCreate = (wioLab: string) => app.handle(new Request(assignmentUrl, {
         method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" },

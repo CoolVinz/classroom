@@ -45,12 +45,12 @@ export const aiImportRoutes = new Elysia({ prefix: "/api" })
     const actor = await requireActor(request);
     const pack = validated(parseLessonPackImportText, body.json);
     return sql.begin(async (tx) => {
-      const quiz = await insertQuiz(tx, actor.id, pack.quiz);
-      const worksheet = await insertWorksheet(tx, actor.id, pack.worksheet);
-      const links = [{ quizId: quiz.id, label: "ทำแบบทดสอบ" }];
-      const [lesson] = await tx`INSERT INTO classroom.lesson_pages (owner_id, title, editor_mode, draft_blocks, draft_quiz_links)
-        VALUES (${actor.id}, ${pack.lesson.title}, 'code', ${sql.json([pack.lesson.code])}, ${sql.json(links)})
+      const quiz = pack.quiz ? await insertQuiz(tx, actor.id, pack.quiz) : null;
+      const worksheet = pack.worksheet ? await insertWorksheet(tx, actor.id, pack.worksheet) : null;
+      const links = quiz ? [{ quizId: quiz.id, label: "ทำแบบทดสอบ" }] : [];
+      const [lesson] = await tx`INSERT INTO classroom.lesson_pages (owner_id, title, editor_mode, draft_blocks, draft_quiz_links, draft_wio_lab)
+        VALUES (${actor.id}, ${pack.lesson.title}, 'code', ${sql.json([pack.lesson.code])}, ${sql.json(links)}, ${pack.lab ? sql.json(pack.lab) : null})
         RETURNING id`;
-      return { lessonId: lesson.id, quizId: quiz.id, worksheetId: worksheet.id };
+      return { lessonId: lesson.id, quizId: quiz?.id ?? null, worksheetId: worksheet?.id ?? null };
     });
   }, { body: importBody });

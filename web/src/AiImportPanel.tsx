@@ -1,3 +1,4 @@
+import { wioLabs } from "../../src/wio-labs";
 import { useRef, useState } from "react";
 import { maxAiImportBytes } from "../../src/ai-import-json";
 import { aiImportTemplate, parseLessonPackImportText, parseWorksheetImportText } from "../../src/lesson-pack-import";
@@ -5,9 +6,10 @@ import { api } from "./api";
 
 type Pack = ReturnType<typeof parseLessonPackImportText>;
 type Worksheet = ReturnType<typeof parseWorksheetImportText>;
-type Preview = { worksheet: Worksheet; pack?: Pack };
+type Preview = { worksheet: Worksheet | null; pack?: Pack };
 
 export function AiImportPanel({ kind, onImported }: { kind: "worksheet" | "pack"; onImported: (id: string) => void }) {
+  const [packTemplate, setPackTemplate] = useState<"pack" | "wio">("pack");
   const [topic, setTopic] = useState("");
   const [grade, setGrade] = useState("");
   const [copyNotice, setCopyNotice] = useState("");
@@ -21,7 +23,7 @@ export function AiImportPanel({ kind, onImported }: { kind: "worksheet" | "pack"
   const isPack = kind === "pack";
 
   async function copyPrompt() {
-    const prompt = aiImportTemplate(kind, topic, grade);
+    const prompt = aiImportTemplate(isPack ? packTemplate : "worksheet", topic, grade);
     try {
       await navigator.clipboard.writeText(prompt);
       setCopyFallback(""); setCopyNotice("คัดลอกคำสั่งสำหรับ AI แล้ว");
@@ -62,8 +64,12 @@ export function AiImportPanel({ kind, onImported }: { kind: "worksheet" | "pack"
 
   return <details className="panel learning-panel ai-import-panel">
     <summary>{isPack ? "สร้างชุดบทเรียนด้วย AI" : "สร้างใบงานด้วย AI"}</summary>
-    <p className="muted">{isPack ? "วางผลลัพธ์จาก AI ครั้งเดียวเพื่อสร้างบทเรียน แบบทดสอบ และใบงานเป็นฉบับร่าง" : "วางผลลัพธ์จาก AI เพื่อสร้างใบงานฉบับร่าง"}</p>
+    <p className="muted">{isPack ? "วาง JSON จาก AI เพื่อสร้างชุดบทเรียนฉบับร่าง จากนั้นตรวจทานก่อนมอบหมาย" : "วางผลลัพธ์จาก AI เพื่อสร้างใบงานฉบับร่าง"}</p>
     <div className="lesson-actions">
+      {isPack && <label>รูปแบบคำสั่ง AI<select value={packTemplate} onChange={(event) => {
+        setPackTemplate(event.target.value as "pack" | "wio");
+        setCopyFallback(""); setCopyNotice("");
+      }}><option value="pack">Lesson + Quiz + Worksheet</option><option value="wio">Lesson + Wio Lab</option></select></label>}
       <label>หัวข้อสำหรับ AI<input value={topic} maxLength={160} onChange={(event) => setTopic(event.target.value)} placeholder="เช่น พื้นฐาน Blender" /></label>
       <label>ระดับชั้น<input value={grade} maxLength={80} onChange={(event) => setGrade(event.target.value)} placeholder="เช่น ม.3" /></label>
     </div>
@@ -80,7 +86,7 @@ export function AiImportPanel({ kind, onImported }: { kind: "worksheet" | "pack"
       <button className="button button-quiet" disabled={saving || !pasted.trim()} onClick={review}>ตรวจสอบและดูตัวอย่าง</button>
       {preview && <div className="ai-import-review">
         {preview.pack && <PackPreview pack={preview.pack} />}
-        <section>
+        {preview.worksheet && <section>
           <h3>ใบงาน · {preview.worksheet.title}</h3>
           <p className="muted">{preview.worksheet.questions.length} ข้อ · {totalPoints(preview.worksheet.questions)} คะแนน</p>
           <ol>{preview.worksheet.questions.map((question) => <li key={question.id}>
@@ -88,10 +94,13 @@ export function AiImportPanel({ kind, onImported }: { kind: "worksheet" | "pack"
             {question.choices.length > 0 && <ol>{question.choices.map((choice, index) => <li key={index}>{choice}{index === question.correctChoice ? " · คำตอบถูก" : ""}</li>)}</ol>}
             {question.type === "blank" && <p>คำตอบที่ยอมรับได้ · {question.acceptedAnswers.join(" / ")}</p>}
           </li>)}</ol>
-        </section>
-        <p className="muted">{isPack ? "แบบทดสอบที่นำเข้าจะเชื่อมกับบทเรียน ส่วนใบงานเชื่อมได้เมื่อสร้างรอบของห้องเรียน" : "ตรวจเฉลยก่อนเผยแพร่ใบงาน"}</p>
+        </section>}
+        {preview.pack?.quiz && <p className="muted">แบบทดสอบที่นำเข้าจะเชื่อมกับบทเรียน</p>}
+        {preview.pack && preview.worksheet && <p className="muted">แนบใบงานได้เมื่อสร้างรอบของห้องเรียน</p>}
+        {preview.pack?.lab && <p className="muted">งาน Wio จะสร้างเมื่อมอบหมายบทเรียนที่เผยแพร่แล้วให้ห้องเรียน</p>}
+        {!isPack && <p className="muted">ตรวจเฉลยก่อนเผยแพร่ใบงาน</p>}
         <button className="button button-primary" disabled={saving} onClick={() => void importDrafts()}>
-          {saving ? "กำลังนำเข้า…" : isPack ? "สร้างฉบับร่าง 3 รายการ" : "สร้างใบงานฉบับร่าง"}
+          {saving ? "กำลังนำเข้า…" : isPack ? "สร้างชุดฉบับร่าง" : "สร้างใบงานฉบับร่าง"}
         </button>
       </div>}
     </div>}
@@ -103,7 +112,7 @@ function totalPoints(questions: { points: number }[]) {
 }
 
 function PackPreview({ pack }: { pack: Pack }) {
-  const { lesson, quiz } = pack;
+  const { lesson, quiz, lab } = pack;
   return <>
     <section>
       <h3>บทเรียน · {lesson.title}</h3>
@@ -114,7 +123,12 @@ function PackPreview({ pack }: { pack: Pack }) {
         </div>)}
       </details>
     </section>
-    <section>
+    {lab && <section>
+      <h3>Wio Terminal · {lab.title}</h3>
+      <p className="muted">{wioLabs[lab.preset].title} · {lab.maxScore} คะแนน</p>
+      <p className="assignment-instructions">{lab.instructions}</p>
+    </section>}
+    {quiz && <section>
       <h3>แบบทดสอบ · {quiz.title}</h3>
       <p className="muted">{quiz.content.questions.length} ข้อ · {totalPoints(quiz.content.questions)} คะแนน</p>
       {quiz.content.description && <p>{quiz.content.description}</p>}
@@ -123,6 +137,6 @@ function PackPreview({ pack }: { pack: Pack }) {
         <ol>{question.choices.map((choice) => <li key={choice.id}>{choice.text}{choice.id === question.correctChoiceId ? " · คำตอบถูก" : ""}</li>)}</ol>
         {question.explanation && <p>{question.explanation}</p>}
       </li>)}</ol>
-    </section>
+    </section>}
   </>;
 }
