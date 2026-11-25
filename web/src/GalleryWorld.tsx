@@ -18,6 +18,8 @@ import { broomSeatHeight, knockMessages, vehicleModel, vehicleNames, type Vehicl
 import { createPresentBlast, createPresentModel, createSantaModel, disposeSantaModel } from "./gallery-santa";
 import { depot, nearPlace, portal, rentalPads, shop } from "../../gallery-server/src/world-places.mjs";
 import { createActivityLandmarks, itemNames, shopItems, type ShopPrices, type Wallet } from "./gallery-activities";
+import { jailGate, rankWanted, type PatrolSettings } from "../../gallery-server/src/patrol.mjs";
+import { createGalleryJail, MostWanted, PatrolSettingsForm, type OfficerView, type WantedEntry } from "./gallery-patrol";
 
 type User = { role: "owner" | "teacher" | "student"; displayName: string };
 type GalleryModel = { id: string; studentId: string; displayName: string; studentNumber: number | null; assignmentId: string; assignmentTitle: string; originalName: string; mediaType: string; materialAvailable: boolean; createdAt: string; hidden: boolean; likes: number; likedByMe: boolean };
@@ -25,11 +27,11 @@ type VoteSummary = { limit: number; blockTotals: { studentId: string; votes: num
 type TrainSettings = { mode: "auto" | "manual"; intervalSeconds: 60 | 120; startStudentId: string | null; stationWaitSeconds?: Record<string, number> };
 type TrainView = Omit<TrainSettings, "stationWaitSeconds"> & { active: boolean; x: number; z: number; rotation: number; phase: "waiting" | "boarding" | "moving" | "dwell"; stopId: string; nextStopId: string; departureAt: number; arrivalAt: number; seats: number; revision: number; layoutRoster: string };
 type SantaSettings = { fuseSeconds: number; respawnSeconds: number };
-type Manifest = { enabled: boolean; classroomId: string; classroomName: string; blocks: { studentId: string; displayName: string; studentNumber: number | null; blockIndex: number; layoutIndex: number; archived: boolean }[]; models: GalleryModel[]; nextOffset: number | null; teacher: boolean; viewerStudentId: string | null; train: TrainSettings; santa: SantaSettings; shop: ShopPrices };
+type Manifest = { enabled: boolean; classroomId: string; classroomName: string; blocks: { studentId: string; displayName: string; studentNumber: number | null; blockIndex: number; layoutIndex: number; archived: boolean }[]; models: GalleryModel[]; nextOffset: number | null; teacher: boolean; viewerStudentId: string | null; train: TrainSettings; santa: SantaSettings; shop: ShopPrices; patrol?: PatrolSettings };
 type GalleryAccessStudent = { studentId: string; accountLinked: boolean; displayName: string; studentNumber: number | null; requiredAssignmentId: string | null; requiredAssignmentTitle: string | null; hasSubmission: boolean; approved: boolean; entryAllowed: boolean };
 type GalleryAccess = { mode: "submission" | "approval"; requiredAssignmentId: string | null; requiredAssignmentTitle: string | null; students: GalleryAccessStudent[] };
-type Avatar = AvatarAppearance & { displayName: string; role: string; x: number; z: number; rotation: number; sequence?: number; jump?: number; movementEpoch?: number; knocked?: boolean; knockCause?: string; respawnAt?: number; protectedUntil?: number; trainSeat?: number; vehicleId?: string };
-type VehicleAvailability = Pick<VehicleState, "id" | "kind" | "revision" | "driverId" | "rental"> & { driverName?: string };
+type Avatar = AvatarAppearance & { displayName: string; role: string; x: number; z: number; rotation: number; sequence?: number; jump?: number; movementEpoch?: number; knocked?: boolean; knockCause?: string; respawnAt?: number; protectedUntil?: number; wantedCount?: number; wantedSince?: number; jailedUntil?: number; trainSeat?: number; vehicleId?: string };
+type VehicleAvailability = Pick<VehicleState, "id" | "kind" | "revision" | "driverId" | "rental" | "hitLimit" | "hitsRemaining"> & { driverName?: string };
 type Activity = "" | "portal" | "shop" | "depot";
 type BoltVisual = { group: THREE.Group; trail: THREE.Line; target: THREE.Vector3 };
 type PresentView = { x: number; z: number; expiresAt: number };
@@ -114,6 +116,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   const aimPoint = useRef(new THREE.Vector2());
   const [castReady, setCastReady] = useState(true);
   const [knockSeconds, setKnockSeconds] = useState(0);
+  const [wanted, setWanted] = useState<{ entries: WantedEntry[]; targetId: string } | null>(null);
   const [knockCause, setKnockCause] = useState("wand");
   const roomRef = useRef<any>(null);
   const wandRef = useRef(false);
@@ -123,7 +126,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   const castReadyAt = useRef(0);
   const knockUntil = useRef(0);
   const boltMeshes = useRef(new Map<string, BoltVisual>());
-  const effectMeshes = useRef<Array<{ mesh: THREE.Mesh; until: number }>>([]);
+  const effectMeshes = useRef<Array<{ mesh: THREE.Mesh; until: number; duration: number; velocity?: THREE.Vector3 }>>([]);
   const [appearance, setAppearance] = useState<AvatarAppearance>(defaultAvatarAppearance);
   const [draftAppearance, setDraftAppearance] = useState<AvatarAppearance>(defaultAvatarAppearance);
   const [customizerOpen, setCustomizerOpen] = useState(false);
@@ -209,6 +212,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   useEffect(() => {
     lastSavedTrainSettings.current = null; lastSavedSantaSettings.current = null; setTrainView(null); setTrainSeat(-1); setDisplayPages({});
     setSantaActive(false); setNearestPresent(""); setGiftMessage(""); setSantaForm({ fuseSeconds: 5, respawnSeconds: 10 });
+    setWanted(null);
     window.clearTimeout(activityTimeout.current);
     setWallet(null); setShopPrices(null); setQuote(null); setActivityPanel(""); setActivity(""); setActivityMessage(""); setActivityPending(false);
   }, [classroomId]);
@@ -326,6 +330,17 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     const trainGroup = new THREE.Group(); scene.add(trainGroup);
     const santaGroup = createSantaModel(); santaGroup.visible = false; scene.add(santaGroup);
     const santaTarget = new THREE.Vector3(-29, 0, 8);
+    const officer = createAvatarCharacter({ ...defaultAvatarAppearance, shirtColor: "#193f66", trousersColor: "#17263d", hatStyle: "cap", hatColor: "#1d4065", glassesStyle: "square", glassesColor: "#17263d" });
+    const officerLabel = new THREE.Sprite(new THREE.SpriteMaterial({ map: labelTexture("สายตรวจ"), transparent: true }));
+    officerLabel.position.y = avatarNameLabelY;
+    officerLabel.scale.set(2.5, 0.45, 1);
+    officer.add(officerLabel);
+    const jail = createGalleryJail(labelTexture("เรือนจำ"));
+    officer.position.set(jailGate.x, 0, jailGate.z);
+    officer.visible = jail.visible = false;
+    scene.add(officer, jail);
+    const officerTarget = new THREE.Vector3(jailGate.x, 0, jailGate.z);
+    let officerAngle = 0, officerWalking = false, officerChasing = false, officerPhase = 0;
     const presentMeshes = new Map<string, THREE.Group>();
     const blastMeshes = new Map<string, THREE.Group>();
     const presentPositions = new Map<string, PresentView>();
@@ -749,20 +764,43 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       });
       room.onMessage("knocked", ({ respawnAt, cause }: { respawnAt: number; cause?: string }) => { knockedRef.current = true; knockUntil.current = respawnAt; setKnockCause(cause ?? "wand"); setKnockSeconds(Math.max(1, Math.ceil((respawnAt - Date.now()) / 1000))); });
       room.onMessage("respawn", ({ movementEpoch: epoch, x, z }: { movementEpoch: number; x: number; z: number }) => { knockedRef.current = false; knockUntil.current = 0; setKnockSeconds(0); movementEpoch = epoch; local = { x, z, rotation: 0 }; unsent = { dx: 0, dz: 0 }; pending = []; lastAcknowledged = -1; visualOffset = { x: 0, z: 0 }; });
+      function addEffect(mesh: THREE.Mesh, x: number, y: number, z: number, duration: number, velocity?: THREE.Vector3) {
+        if (effectMeshes.current.length >= 20) {
+          const old = effectMeshes.current.shift()!;
+          scene.remove(old.mesh); disposeAvatarCharacter(old.mesh);
+        }
+        mesh.position.set(x, y, z);
+        scene.add(mesh);
+        effectMeshes.current.push({ mesh, duration, until: performance.now() + duration, velocity });
+      }
       room.onMessage("wand-impact", ({ x, y, z }: { x: number; y: number; z: number }) => {
-        if (effectMeshes.current.length >= 20) { const old = effectMeshes.current.shift()!; scene.remove(old.mesh); old.mesh.geometry.dispose(); (old.mesh.material as THREE.Material).dispose(); }
-        const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 6), new THREE.MeshBasicMaterial({ color: 0x84f4ff, transparent: true, opacity: 0.9 }));
-        mesh.position.set(x, y, z); scene.add(mesh); effectMeshes.current.push({ mesh, until: performance.now() + 450 });
+        addEffect(new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 6),
+          new THREE.MeshBasicMaterial({ color: 0x84f4ff, transparent: true, opacity: 0.9 })), x, y, z, 450);
       });
       room.onMessage("santa-explosion", ({ x, y, z }: { x: number; y: number; z: number }) => {
-        if (effectMeshes.current.length >= 20) { const old = effectMeshes.current.shift()!; scene.remove(old.mesh); old.mesh.geometry.dispose(); (old.mesh.material as THREE.Material).dispose(); }
-        const mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(1, 1), new THREE.MeshBasicMaterial({ color: 0xff9c43, transparent: true, opacity: 0.92 }));
-        mesh.position.set(x, y + 0.8, z); scene.add(mesh); effectMeshes.current.push({ mesh, until: performance.now() + 600 });
+        addEffect(new THREE.Mesh(new THREE.IcosahedronGeometry(1, 1),
+          new THREE.MeshBasicMaterial({ color: 0xff9c43, transparent: true, opacity: 0.92 })), x, y + 0.8, z, 600);
+      });
+      room.onMessage("vehicle-break", ({ x, y, z, driverId }: { x: number; y: number; z: number; driverId: string }) => {
+        if (driverId === room.sessionId) setGiftMessage("ยานพาหนะพัง · ใบขับขี่ถูกใช้แล้ว");
+        for (let index = 0; index < 6; index++) {
+          const angle = index * Math.PI / 3;
+          const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.24, 0.3),
+            new THREE.MeshBasicMaterial({ color: index % 2 ? 0x31515d : 0xf5a657, transparent: true }));
+          addEffect(mesh, x, y + 0.6, z, 550, new THREE.Vector3(Math.cos(angle) * 3, 2 + (index % 3), Math.sin(angle) * 3));
+        }
       });
       let requestedWallet = false;
       room.onStateChange((state: any) => {
         if (!alive) return;
         landmarks.visible = state.activities === true;
+        if (state.officer) {
+          const wire = state.officer as OfficerView;
+          officerTarget.set(wire.x, 0, wire.z);
+          if (!officer.visible) officer.position.copy(officerTarget);
+          officerAngle = wire.rotation; officerWalking = wire.walking; officerChasing = Boolean(wire.targetId);
+          officer.visible = jail.visible = true;
+        }
         if (landmarks.visible && !teacher && !requestedWallet && state.players?.has(room.sessionId)) {
           requestedWallet = true;
           room.send("wallet-read");
@@ -797,9 +835,9 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
           state.vehicles.forEach((vehicle: VehicleState, id: string) => {
             const kind = vehicle.kind;
             if (!vehicleKinds.includes(kind)) return;
-            const wire = { id, kind, rental: Boolean(vehicle.rental), x: vehicle.x, y: vehicle.y, z: vehicle.z, rotation: vehicle.rotation, revision: vehicle.revision, driverId: vehicle.driverId };
+            const wire = { id, kind, rental: Boolean(vehicle.rental), x: vehicle.x, y: vehicle.y, z: vehicle.z, rotation: vehicle.rotation, revision: vehicle.revision, driverId: vehicle.driverId, hitLimit: vehicle.hitLimit, hitsRemaining: vehicle.hitsRemaining };
             currentVehicles.add(id);
-            availability.push({ id, kind, rental: wire.rental, revision: wire.revision, driverId: wire.driverId, driverName: state.players?.get(wire.driverId)?.displayName });
+            availability.push({ id, kind, rental: wire.rental, revision: wire.revision, driverId: wire.driverId, driverName: state.players?.get(wire.driverId)?.displayName, hitLimit: wire.hitLimit, hitsRemaining: wire.hitsRemaining });
             let visual = vehicleMeshes.get(id);
             if (!visual) {
               const group = vehicleModel(kind);
@@ -819,7 +857,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
           }
           setVehicles((current) => current?.length === availability.length && current.every((vehicle, index) => {
             const next = availability[index]!;
-            return vehicle.id === next.id && vehicle.revision === next.revision && vehicle.driverName === next.driverName;
+            return vehicle.id === next.id && vehicle.revision === next.revision && vehicle.driverName === next.driverName && vehicle.hitsRemaining === next.hitsRemaining;
           }) ? current : availability);
         }
         if (state.train) {
@@ -856,7 +894,9 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         for (const [id, visual] of boltMeshes.current) if (!activeBolts.has(id)) { scene.remove(visual.group); disposeAvatarCharacter(visual.group); boltMeshes.current.delete(id); }
         setOnline((current) => current === state.players.size ? current : state.players.size);
         const present = new Set<string>();
+        const wantedEntries: WantedEntry[] = [];
         state.players.forEach((player: Avatar, id: string) => {
+          if (player.wantedCount && player.wantedSince) wantedEntries.push({ id, name: player.displayName, count: player.wantedCount, since: player.wantedSince });
           present.add(id); let avatar = avatarMeshes.get(id);
           if (!avatar) {
             avatar = new THREE.Group(); avatar.position.set(player.x, 0, player.z); avatar.rotation.y = player.rotation;
@@ -890,10 +930,12 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
               setDriving(drivingKindRef.current);
             }
             if (trainSeatRef.current >= 0 || mounted) local = { x: player.x, z: player.z, rotation: player.rotation };
-            knockedRef.current=Boolean(player.knocked);
-            if (player.knocked) { knockUntil.current = player.respawnAt ?? 0; setKnockCause(player.knockCause || "wand"); }
-            else knockUntil.current = 0;
-            const seconds=player.knocked ? Math.max(1,Math.ceil(((player.respawnAt??0)-Date.now())/1000)) : 0;
+            const deadline = player.jailedUntil || (player.knocked ? player.respawnAt ?? 0 : 0);
+            if (Boolean(deadline) !== knockedRef.current) onBlur();
+            knockedRef.current = Boolean(deadline);
+            knockUntil.current = deadline;
+            if (deadline) setKnockCause(player.jailedUntil ? "jail" : player.knockCause || "wand");
+            const seconds = deadline ? Math.max(1, Math.ceil((deadline - Date.now()) / 1000)) : 0;
             if (seconds!==lastKnockSecond.current) { lastKnockSecond.current=seconds; setKnockSeconds(seconds); }
             const epoch=player.movementEpoch??0;
             if (epoch!==movementEpoch) { movementEpoch=epoch; local={x:player.x,z:player.z,rotation:player.rotation}; pending=[]; unsent={dx:0,dz:0}; visualOffset={x:0,z:0}; lastAcknowledged=player.sequence??-1; jumpTime = -Infinity; }
@@ -915,6 +957,13 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
             }
           }
         });
+        if (state.officer) {
+          wantedEntries.sort(rankWanted);
+          const targetId: string = state.officer.targetId;
+          setWanted((current) => current?.targetId === targetId && current.entries.length === wantedEntries.length &&
+            current.entries.every((entry, index) => entry.id === wantedEntries[index]!.id && entry.count === wantedEntries[index]!.count && entry.name === wantedEntries[index]!.name)
+            ? current : { entries: wantedEntries, targetId });
+        }
         for (const [id, avatar] of avatarMeshes) if (!present.has(id)) { scene.remove(avatar); disposeAvatarCharacter(avatar); avatar.traverse((object) => { if (object instanceof THREE.Sprite) object.material.map?.dispose(); }); avatarMeshes.delete(id); }
       });
     }).catch((reason) => { if (alive) setError(reason instanceof Error ? reason.message : "เชื่อมต่อโลกเสมือนไม่สำเร็จ"); });
@@ -925,6 +974,13 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       const santaAngle = (santaGroup.userData.rotationTarget as number | undefined) ?? 0;
       santaGroup.rotation.y += Math.atan2(Math.sin(santaAngle - santaGroup.rotation.y), Math.cos(santaAngle - santaGroup.rotation.y)) * (1 - Math.exp(-10 * dt));
       santaGroup.position.y = Math.sin(time * 0.003) * 0.035;
+      if (officer.visible) {
+        officer.position.lerp(officerTarget, 1 - Math.exp(-22 * dt));
+        const angle = officerAngle - officer.rotation.y;
+        officer.rotation.y += Math.atan2(Math.sin(angle), Math.cos(angle)) * (1 - Math.exp(-14 * dt));
+        if (officerWalking) officerPhase += dt * (officerChasing ? 15 : 8);
+        animateAvatarCharacter(officer, officerPhase, officerWalking ? 1 : 0, false, false, false);
+      }
       for (const [id, gift] of presentMeshes) { gift.rotation.y += dt * 0.45; gift.position.y = 0.035 + Math.sin(time * 0.004 + id.length) * 0.035; }
       for (const [id, blast] of blastMeshes) blast.scale.setScalar(5 * (1 + Math.sin(time * 0.012 + id.length) * 0.035));
       for (const { group, state, position } of vehicleMeshes.values()) {
@@ -934,7 +990,20 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         group.rotation.y += Math.atan2(Math.sin(angle), Math.cos(angle)) * blend;
         if (group.userData.rotor && state.driverId) group.userData.rotor.rotation.y += dt * 23;
       }
-      for (let i = effectMeshes.current.length - 1; i >= 0; i--) { const effect = effectMeshes.current[i]!; const left = effect.until - time; if (left <= 0) { scene.remove(effect.mesh); effect.mesh.geometry.dispose(); (effect.mesh.material as THREE.Material).dispose(); effectMeshes.current.splice(i, 1); } else { effect.mesh.scale.setScalar(1 + (1 - left / 450) * 2); (effect.mesh.material as THREE.MeshBasicMaterial).opacity = left / 450; } }
+      for (let i = effectMeshes.current.length - 1; i >= 0; i--) {
+        const effect = effectMeshes.current[i]!;
+        const left = (effect.until - time) / effect.duration;
+        if (left <= 0) {
+          scene.remove(effect.mesh); disposeAvatarCharacter(effect.mesh); effectMeshes.current.splice(i, 1);
+        } else {
+          if (effect.velocity) {
+            effect.mesh.position.addScaledVector(effect.velocity, dt);
+            effect.velocity.y -= 8 * dt;
+            effect.mesh.rotation.y += 7 * dt;
+          } else effect.mesh.scale.setScalar(1 + (1 - left) * 2);
+          (effect.mesh.material as THREE.MeshBasicMaterial).opacity = Math.min(1, left);
+        }
+      }
       if (time - lastModelScan > 500) { lastModelScan = time; updateNearbyModels(); }
       if (syncedManifest !== manifestRef.current) { syncedManifest = manifestRef.current; syncBlocks(); syncExhibits(); syncVoteVisuals(); }
       if (syncedModels !== modelsRef.current || syncedPages !== displayPagesRef.current) { syncedModels = modelsRef.current; syncedPages = displayPagesRef.current; groupStudentModels(); syncExhibits(); syncVoteVisuals(); }
@@ -1164,6 +1233,10 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     const saved = await api<ShopPrices>(apiPath(classroomId, "/shop"), { method: "PUT", body: JSON.stringify(prices) });
     setManifest((current) => current?.classroomId === classroomId ? { ...current, shop: saved } : current);
   }
+  async function savePatrolSettings(settings: PatrolSettings) {
+    const patrol = await api<PatrolSettings>(apiPath(classroomId, "/patrol"), { method: "PUT", body: JSON.stringify(settings) });
+    setManifest((current) => current?.classroomId === classroomId ? { ...current, patrol } : current);
+  }
   function toggleWand() {
     setWandMode((value) => !value);
     setSelected(null);
@@ -1300,6 +1373,8 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         </section>}
         <div className="gallery-management"><strong>ตัวละคร</strong><div className="gallery-management-actions"><button className="button button-quiet" onClick={() => { setError(""); setDraftAppearance({ ...appearance }); setCustomizerOpen(true); setMenuOpen(false); }}>ปรับแต่งตัวละคร</button></div></div>
         {teacher && <div className="gallery-management"><strong>จัดการโลกเสมือน</strong><p>{enabled ? "เปิดสำหรับนักเรียน" : "หยุดสำหรับนักเรียน · ครูเข้าชมได้"}</p><div className="gallery-management-actions"><button className="button button-quiet" disabled={loading} onClick={() => void setWorld(!enabled)}>{enabled ? "หยุดโลกสำหรับนักเรียน" : "เปิดโลกสำหรับนักเรียน"}</button><button className="button button-quiet" aria-pressed={wandMode} onClick={toggleWand}>{wandMode ? "เก็บไม้กายสิทธิ์" : "ถือไม้กายสิทธิ์"}</button></div></div>}
+        {wanted && <MostWanted entries={wanted.entries} targetId={wanted.targetId} />}
+        {teacher && manifest?.patrol && <PatrolSettingsForm key={`patrol-${classroomId}`} settings={manifest.patrol} save={savePatrolSettings} />}
         {teacher && manifest?.shop && <ShopPriceForm key={classroomId} prices={manifest.shop} save={saveShopPrices} />}
         {teacher && <section className="gallery-management"><strong>🎅 ซานต้าตัวแสบ</strong><p>{santaActive ? "กำลังกวาดตาดูทางเดิน · ของขวัญใหม่ทุก 8 วินาที" : "กิจกรรมปิดอยู่"}</p><div className="gallery-management-actions"><button className="button button-quiet" onClick={santaCommand}>{santaActive ? "หยุดกิจกรรมและเก็บของขวัญ" : "เริ่มกิจกรรมคริสต์มาส"}</button></div><div className="gallery-access-mode"><label>นับถอยหลังก่อนระเบิด (วินาที)<input type="number" min={2} max={15} step={1} value={santaForm.fuseSeconds} onChange={(event) => setSantaForm({ ...santaForm, fuseSeconds: Number(event.target.value) })} /></label><label>เวลาคูลดาวน์ก่อนเกิดใหม่ (วินาที)<input type="number" min={3} max={60} step={1} value={santaForm.respawnSeconds} onChange={(event) => setSantaForm({ ...santaForm, respawnSeconds: Number(event.target.value) })} /></label><button className="button button-quiet" disabled={loading || santaForm.fuseSeconds < 2 || santaForm.fuseSeconds > 15 || santaForm.respawnSeconds < 3 || santaForm.respawnSeconds > 60} onClick={() => void saveSantaSettings()}>บันทึกการตั้งค่าระเบิด</button></div><small>นับถอยหลังปรับได้ 2–15 วินาที · คูลดาวน์เกิดใหม่ 3–60 วินาที</small>{santaMessage && <small role="status">{santaMessage}</small>}</section>}
         {teacher && <section className="gallery-management gallery-access">
@@ -1366,10 +1441,15 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         <p className="gallery-aim-hint">เลื่อนเมาส์หรือแตะเพื่อเล็ง · ลากเพื่อหมุนกล้อง · กด F หรือปุ่มยิง{!aimValid && <span>จุดนี้ยิงไม่ได้ — เลือกจุดเล็งใหม่</span>}</p>
         <button className="gallery-fire button button-primary" disabled={!castReady || !aimValid || knockSeconds > 0} onClick={() => fireWandRef.current()}>{castReady ? "ยิงเวทมนตร์ · F" : "กำลังชาร์จ…"}{!teacher && wallet && ` · ${wallet.spells} คาถา`}</button>
       </>}
-      {knockSeconds > 0 && <div className="gallery-knockdown" role="status">{knockMessages[knockCause] ?? "ตัวละครล้ม"} · ฟื้นใน {knockSeconds} วินาที</div>}
-      {trainAction && <button className="gallery-train-quick-action button button-primary" onClick={() => trainCommand(trainAction === "board" ? "train-board" : "train-leave")}>{trainAction === "board" ? "ขึ้นรถไฟ" : "ลงจากรถไฟ"}</button>}
+      {knockSeconds > 0 ? <div className="gallery-knockdown" role="status">{knockCause === "jail"
+        ? `ถูกจับเข้าเรือนจำ · ปล่อยตัวใน ${knockSeconds} วินาที`
+        : `${knockMessages[knockCause] ?? "ตัวละครล้ม"} · ฟื้นใน ${knockSeconds} วินาที`}</div>
+        : wanted?.targetId && wanted.targetId === roomRef.current?.sessionId ? <div className="gallery-knockdown" role="status">สายตรวจกำลังตามจับคุณ</div> : null}
+      {!knockSeconds && trainAction && <button className="gallery-train-quick-action button button-primary" onClick={() => trainCommand(trainAction === "board" ? "train-board" : "train-leave")}>{trainAction === "board" ? "ขึ้นรถไฟ" : "ลงจากรถไฟ"}</button>}
       {!menuOpen && !customizerOpen && !knockSeconds && (driving || vehicleNearby) && <div className={`gallery-vehicle-controls${driving ? " driving" : ""}`}>
         {driving ? <>
+          {vehicles?.filter((vehicle) => vehicle.id === drivingRef.current && vehicle.hitLimit).map((vehicle) =>
+            <span key={vehicle.id} className="gallery-drive-hint gallery-hits" role="status">ชนได้อีก {vehicle.hitsRemaining}/{vehicle.hitLimit}</span>)}
           <span className="gallery-drive-hint">{vehicleNames[driving]} · WASD{vehicleSpecs[driving].flying ? " · Q ขึ้น / E ลง" : ""}</span>
           {vehicleSpecs[driving].flying && <div className="gallery-flight-buttons" aria-label="ควบคุมระดับความสูง">
             {([1, -1] as const).map((direction) => <button key={direction} className="button button-quiet"
@@ -1383,7 +1463,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
           <button className="button button-primary" disabled={!canExitVehicle} onClick={() => vehicleCommand("exit", drivingRef.current)}>{canExitVehicle ? "ออกจากยานพาหนะ" : "ลงจอดก่อนออก"}</button>
         </> : vehicleNearby && <button className="button button-primary" onClick={() => vehicleCommand("enter", vehicleNearby)}>ขับ{vehicleNames[vehicleNearby as VehicleKind]}</button>}
       </div>}
-      <div className="gallery-touch" role="group" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); moveTouchJoystick(event, touchKnobRef.current, touchRef.current); }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) moveTouchJoystick(event, touchKnobRef.current, touchRef.current); }} onPointerUp={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} onPointerCancel={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} onLostPointerCapture={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} aria-label="ลากจอยสติ๊กเพื่อเดิน"><span ref={touchKnobRef} className="gallery-touch-knob" aria-hidden="true" /></div>
+      {!knockSeconds && <div className="gallery-touch" role="group" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); moveTouchJoystick(event, touchKnobRef.current, touchRef.current); }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) moveTouchJoystick(event, touchKnobRef.current, touchRef.current); }} onPointerUp={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} onPointerCancel={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} onLostPointerCapture={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} aria-label="ลากจอยสติ๊กเพื่อเดิน"><span ref={touchKnobRef} className="gallery-touch-knob" aria-hidden="true" /></div>}
       {!driving && <button className="gallery-jump button button-quiet" disabled={customizerOpen || knockSeconds > 0} onPointerDown={(event) => { event.preventDefault(); jumpRef.current = true; }} onClick={(event) => { if (event.detail === 0) jumpRef.current = true; }}>กระโดด ↑</button>}
       {selected && <aside className="gallery-inspect"><button className="icon-button" onClick={() => setSelected(null)} aria-label="ปิด">×</button><p className="eyebrow">{selected.displayName} · เลขที่ {selected.studentNumber ?? "—"}</p><h3>{selected.originalName}</h3><p className="muted">{selected.assignmentTitle}</p><p>{selected.likes} ถูกใจ{selected.likes >= 6 ? " · ระดับทอง" : selected.likes >= 3 ? " · ระดับเงิน" : selected.likes > 0 ? " · ระดับทองแดง" : ""}</p>{selectedPageCount > 1 && <div className="gallery-display-pages"><span>ผลงานในพื้นที่ {selectedPage * 40 + 1}–{Math.min(selectedPage * 40 + 40, selectedStudentWork.length)} จาก {selectedStudentWork.length}</span><button className="text-button" disabled={selectedPage === 0} onClick={() => { const next = selectedStudentWork[(selectedPage - 1) * 40]; setDisplayPages((pages) => ({ ...pages, [selected.studentId]: selectedPage - 1 })); if (next) setSelected(next); }}>ก่อนหน้า</button><button className="text-button" disabled={selectedPage + 1 >= selectedPageCount} onClick={() => { const next = selectedStudentWork[(selectedPage + 1) * 40]; setDisplayPages((pages) => ({ ...pages, [selected.studentId]: selectedPage + 1 })); if (next) setSelected(next); }}>ถัดไป</button></div>}{user.role === "student" && selected.studentId !== manifest?.viewerStudentId && <><small>เหลือ {selectedVotesRemaining}/{voteSummary?.limit ?? 10} โหวตสำหรับงานนี้</small><button className="button button-quiet" disabled={!selected.likedByMe && selectedVotesRemaining <= 0} onClick={() => void like(selected)}>{selected.likedByMe ? "ยกเลิกโหวต · ได้สิทธิ์คืน" : selectedVotesRemaining <= 0 ? "โหวตครบแล้ว" : "โหวตผลงานนี้"}</button></>}{teacher && <button className="button button-quiet" onClick={() => void setHidden(selected)}>{selected.hidden ? "แสดงผลงาน" : "ซ่อนผลงาน"}</button>}<button className="button button-primary" onClick={() => setPreview(selected)}>เปิดดูโมเดล</button></aside>}
       {customizerOpen && <CharacterCustomizer appearance={draftAppearance} onChange={setDraftAppearance} onCancel={() => setCustomizerOpen(false)} onSave={() => void saveAppearance()} saving={loading} error={error} />}

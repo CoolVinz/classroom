@@ -6,6 +6,7 @@ import { HttpError } from "../http-error";
 import { checkRequestOrigin } from "../security";
 import { storedFilePath } from "../file-storage";
 import { trainTrack } from "../../gallery-server/src/train-layout.mjs";
+import type { PatrolSettings } from "../../gallery-server/src/patrol.mjs";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const galleryVoteLimit = 10;
@@ -140,7 +141,12 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     if (teacher) { await ownedClass(teacher, params.classroomId); await sql`INSERT INTO classroom.gallery_worlds(classroom_id,enabled) VALUES(${params.classroomId},false) ON CONFLICT DO NOTHING`; }
     else if (student) viewerStudentId = await studentClass(student.id, params.classroomId);
     else throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
-    const [world] = await sql<{ enabled: boolean; classroomName: string; fuseSeconds: number; respawnSeconds: number; wand: number; license: number }[]>`SELECT w.enabled, c.name AS "classroomName", w.santa_bomb_fuse_seconds AS "fuseSeconds", w.santa_respawn_seconds AS "respawnSeconds", w.wand_price AS wand, w.license_price AS license FROM classroom.gallery_worlds w JOIN classroom.classrooms c ON c.id=w.classroom_id WHERE w.classroom_id=${params.classroomId}`;
+    const [world] = await sql<{ enabled: boolean; classroomName: string; fuseSeconds: number; respawnSeconds: number; wand: number; license: number; patrol: PatrolSettings }[]>`
+      SELECT w.enabled, c.name AS "classroomName", w.santa_bomb_fuse_seconds AS "fuseSeconds", w.santa_respawn_seconds AS "respawnSeconds",
+        w.wand_price AS wand, w.license_price AS license,
+        json_build_object('car', w.patrol_car_hits, 'bike', w.patrol_bike_hits, 'helicopter', w.patrol_helicopter_hits,
+          'broom', w.patrol_broom_hits, 'baseSeconds', w.jail_base_seconds, 'extraSeconds', w.jail_extra_seconds, 'maxSeconds', w.jail_max_seconds) AS patrol
+      FROM classroom.gallery_worlds w JOIN classroom.classrooms c ON c.id=w.classroom_id WHERE w.classroom_id=${params.classroomId}`;
     if (!world || (!teacher && !world.enabled)) throw new HttpError(404, "ยังไม่ได้เปิดโลกเสมือน");
     await ensureBlocks(params.classroomId);
     const offset = Math.max(0, Math.min(100000, Number(query.offset) || 0));
@@ -153,7 +159,7 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     ]);
     const [count] = await sql<{ count: number }[]>`SELECT COUNT(*)::int AS count FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id LEFT JOIN classroom.gallery_hidden_models h ON h.classroom_id=f.classroom_id AND h.file_id=f.id WHERE f.classroom_id=${params.classroomId} AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$' AND s.archived_at IS NULL AND a.archived_at IS NULL AND (${teacher !== null} OR h.file_id IS NULL)`;
     const [train] = await sql<{ mode: "auto" | "manual"; intervalSeconds: number; startStudentId: string | null; stationWaitSeconds: Record<string, number> }[]>`SELECT w.train_mode AS mode, w.train_interval_seconds AS "intervalSeconds", CASE WHEN s.id IS NULL THEN NULL ELSE s.id END AS "startStudentId", w.train_station_wait_seconds AS "stationWaitSeconds" FROM classroom.gallery_worlds w LEFT JOIN classroom.students s ON s.id=w.train_start_student_id AND s.classroom_id=w.classroom_id AND s.archived_at IS NULL AND s.student_number IS NOT NULL WHERE w.classroom_id=${params.classroomId}`;
-    return { classroomId: params.classroomId, classroomName: world.classroomName, enabled: world.enabled, blocks, models, nextOffset: offset + models.length < count.count ? offset + models.length : null, teacher: Boolean(teacher), viewerStudentId, train: { mode: train?.mode ?? "auto", intervalSeconds: train?.intervalSeconds ?? 120, startStudentId: train?.startStudentId ?? null, stationWaitSeconds: train?.stationWaitSeconds ?? {} }, santa: { fuseSeconds: world.fuseSeconds, respawnSeconds: world.respawnSeconds }, shop: { wand: world.wand, license: world.license } };
+    return { classroomId: params.classroomId, classroomName: world.classroomName, enabled: world.enabled, blocks, models, nextOffset: offset + models.length < count.count ? offset + models.length : null, teacher: Boolean(teacher), viewerStudentId, train: { mode: train?.mode ?? "auto", intervalSeconds: train?.intervalSeconds ?? 120, startStudentId: train?.startStudentId ?? null, stationWaitSeconds: train?.stationWaitSeconds ?? {} }, santa: { fuseSeconds: world.fuseSeconds, respawnSeconds: world.respawnSeconds }, shop: { wand: world.wand, license: world.license }, patrol: world.patrol };
   })
   .get("/classrooms/:classroomId/gallery/votes", async ({ params, request }) => {
     const teacher = await readActor(request);
@@ -199,6 +205,24 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
       ON CONFLICT(classroom_id) DO UPDATE SET wand_price=EXCLUDED.wand_price, license_price=EXCLUDED.license_price, updated_at=NOW()`;
     return body;
   }, { body: t.Object({ wand: t.Integer({ minimum: 1, maximum: 1000 }), license: t.Integer({ minimum: 1, maximum: 1000 }) }) })
+  .put("/classrooms/:classroomId/gallery/patrol", async ({ params, body, request }) => {
+    checkRequestOrigin(request);
+    await ownedClass(await requireActor(request), params.classroomId);
+    if (body.maxSeconds < body.baseSeconds) throw new HttpError(422, "เวลาขังสูงสุดต้องไม่น้อยกว่าเวลาเริ่มต้น");
+    await sql`INSERT INTO classroom.gallery_worlds(classroom_id, patrol_car_hits, patrol_bike_hits, patrol_helicopter_hits,
+        patrol_broom_hits, jail_base_seconds, jail_extra_seconds, jail_max_seconds)
+      VALUES (${params.classroomId}, ${body.car}, ${body.bike}, ${body.helicopter}, ${body.broom}, ${body.baseSeconds}, ${body.extraSeconds}, ${body.maxSeconds})
+      ON CONFLICT (classroom_id) DO UPDATE SET patrol_car_hits=EXCLUDED.patrol_car_hits, patrol_bike_hits=EXCLUDED.patrol_bike_hits,
+        patrol_helicopter_hits=EXCLUDED.patrol_helicopter_hits, patrol_broom_hits=EXCLUDED.patrol_broom_hits,
+        jail_base_seconds=EXCLUDED.jail_base_seconds, jail_extra_seconds=EXCLUDED.jail_extra_seconds,
+        jail_max_seconds=EXCLUDED.jail_max_seconds, updated_at=NOW()`;
+    return body;
+  }, { params: t.Object({ classroomId: t.String({ format: "uuid" }) }), body: t.Object({
+    car: t.Integer({ minimum: 1, maximum: 20 }), bike: t.Integer({ minimum: 1, maximum: 20 }),
+    helicopter: t.Integer({ minimum: 1, maximum: 20 }), broom: t.Integer({ minimum: 1, maximum: 20 }),
+    baseSeconds: t.Integer({ minimum: 5, maximum: 120 }), extraSeconds: t.Integer({ minimum: 1, maximum: 30 }),
+    maxSeconds: t.Integer({ minimum: 5, maximum: 180 }),
+  }) })
   .put("/classrooms/:classroomId/gallery/santa", async ({ params, body, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);

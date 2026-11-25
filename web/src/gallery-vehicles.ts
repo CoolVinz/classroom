@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { vehicleSpecs, type VehicleKind } from "../../gallery-server/src/vehicles.mjs";
 
-export type VehicleState = { id: string; kind: VehicleKind; rental: boolean; x: number; y: number; z: number; rotation: number; revision: number; driverId: string };
+export type VehicleState = { id: string; kind: VehicleKind; rental: boolean; x: number; y: number; z: number; rotation: number; revision: number; driverId: string; hitLimit?: number; hitsRemaining?: number };
 export const vehicleNames: Record<VehicleKind, string> = { car: "รถยนต์", bike: "มอเตอร์ไซค์", helicopter: "เฮลิคอปเตอร์", broom: "ไม้กวาดบิน" };
 export const knockMessages: Record<string, string> = { train: "ถูกรถไฟชน", car: "ถูกรถยนต์ชน", bike: "ถูกมอเตอร์ไซค์ชน", helicopter: "ถูกเฮลิคอปเตอร์ชน", broom: "ถูกไม้กวาดบินชน", wand: "ถูกเวทมนตร์", santa: "โดนระเบิดของขวัญซานต้า" };
 export const broomSeatHeight = 0.55;

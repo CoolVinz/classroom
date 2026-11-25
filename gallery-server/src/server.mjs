@@ -8,21 +8,24 @@ import { advanceBolt, knockPlayer, playerHitFraction, respawnPlayer, validAim } 
 import { databaseConfig } from "./database-config.mjs";
 import { blockPosition, BLOCK_DEPTH, distanceToNextStation, TRAIN_SPEED, trainTrack } from "./train-layout.mjs";
 import { canBoardTrain, firstDepartureAt, nextDepartureAt, stationWaitMs } from "./train-rules.mjs";
-import { advanceVehicle, hitsMovingBody, LANDING_HEIGHT, trainBodies, validVehicleInput, VEHICLE_BAY_Z, VEHICLE_ENTER_DISTANCE, vehicleKinds, vehicleSpecs } from "./vehicles.mjs";
+import { advanceVehicle, hitsMovingBody, LANDING_HEIGHT, trainBodies, validVehicleInput, VEHICLE_BAY_Z, VEHICLE_ENTER_DISTANCE, vehicleKinds, vehicleRespawn, vehicleSpecs } from "./vehicles.mjs";
 import { advanceSanta, canOpenPresent, maxPresents, presentDropMs, presentLifetimeMs, santaPath, insideBombRadius } from "./santa.mjs";
 import { buyItem, isRequestId, readShop, readWallet, useItem, withStudentWallet } from "./wallet.mjs";
 import { depot, nearPlace, portal, rentalPads, shop } from "./world-places.mjs";
+import { addKnockdown, advanceOfficer, canArrest, defaultPatrolSettings, jailCell, jailGate, knockdownsUntilBreak, rankWanted, sentenceSeconds } from "./patrol.mjs";
 
 if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
 const pool = new pg.Pool(databaseConfig());
-const Player = schema({ displayName: t.string(), role: t.string(), skinColor: t.string(), hairColor: t.string(), shirtColor: t.string(), trousersColor: t.string(), hairStyle: t.string(), hatStyle: t.string(), glassesStyle: t.string(), shoeStyle: t.string(), hatColor: t.string(), glassesColor: t.string(), shoeColor: t.string(), x: t.number().default(0), z: t.number().default(0), rotation: t.number().default(0), sequence: t.number().default(0), jump: t.number().default(0), movementEpoch: t.number().default(0), knocked: t.boolean().default(false), knockCause: t.string().default(""), vehicleId: t.string().default(""), respawnAt: t.number().default(0), protectedUntil: t.number().default(0), trainSeat: t.number().default(-1) });
+const Player = schema({ displayName: t.string(), role: t.string(), skinColor: t.string(), hairColor: t.string(), shirtColor: t.string(), trousersColor: t.string(), hairStyle: t.string(), hatStyle: t.string(), glassesStyle: t.string(), shoeStyle: t.string(), hatColor: t.string(), glassesColor: t.string(), shoeColor: t.string(), x: t.number().default(0), z: t.number().default(0), rotation: t.number().default(0), sequence: t.number().default(0), jump: t.number().default(0), movementEpoch: t.number().default(0), knocked: t.boolean().default(false), knockCause: t.string().default(""), wantedCount: t.number().default(0), wantedSince: t.number().default(0), jailedUntil: t.number().default(0), vehicleId: t.string().default(""), respawnAt: t.number().default(0), protectedUntil: t.number().default(0), trainSeat: t.number().default(-1) });
 const Bolt = schema({ id: t.string(), x: t.number(), y: t.number(), z: t.number() });
 const Train = schema({ active: t.boolean().default(false), x: t.number().default(0), z: t.number().default(2), rotation: t.number().default(0), phase: t.string().default("waiting"), stopId: t.string().default("entrance"), nextStopId: t.string().default(""), departureAt: t.number().default(0), arrivalAt: t.number().default(0), mode: t.string().default("auto"), intervalSeconds: t.number().default(120), seats: t.number().default(0), revision: t.number().default(0), startStudentId: t.string().default(""), layoutRoster: t.string().default("[]") });
-const Vehicle = schema({ id: t.string(), kind: t.string(), rental: t.boolean().default(false), x: t.number(), y: t.number(), z: t.number(), rotation: t.number(), revision: t.number(), driverId: t.string() });
+const Vehicle = schema({ id: t.string(), kind: t.string(), rental: t.boolean().default(false), x: t.number(), y: t.number(), z: t.number(), rotation: t.number(), revision: t.number(), driverId: t.string(), hitsRemaining: t.number().default(0), hitLimit: t.number().default(0) });
+const Officer = schema({ x: t.number().default(jailGate.x), z: t.number().default(jailGate.z), rotation: t.number().default(0), walking: t.boolean().default(false), targetId: t.string().default("") });
 const Santa = schema({ enabled: t.boolean().default(false), x: t.number().default(-29), z: t.number().default(8), rotation: t.number().default(0), nextPoint: t.number().default(1), nextDropAt: t.number().default(0) });
 const Present = schema({ id: t.string(), x: t.number(), z: t.number(), droppedAt: t.number(), expiresAt: t.number() });
 const Blast = schema({ id: t.string(), x: t.number(), y: t.number(), z: t.number(), detonateAt: t.number() });
-const GalleryState = schema({ players: t.map(Player), bolts: t.map(Bolt), train: Train, vehicles: t.map(Vehicle), santa: Santa, presents: t.map(Present), blasts: t.map(Blast), activities: t.boolean().default(true) });
+const GalleryState = schema({ players: t.map(Player), bolts: t.map(Bolt), train: Train, vehicles: t.map(Vehicle), santa: Santa, presents: t.map(Present), blasts: t.map(Blast), officer: Officer, activities: t.boolean().default(true) });
+const cannotAct = (player) => player.knocked || player.jailedUntil > 0;
 const idleVehicleInput = { throttle: 0, turn: 0, lift: 0 };
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
@@ -80,6 +83,8 @@ class ClassroomGallery extends Room {
   castTimes = new Map();
   usedShotIds = new Set();
   lifeStates = new Map();
+  wantedRecords = new Map();
+  patrolSettings = defaultPatrolSettings;
   combatTimer;
   trainRoute = [];
   trainConfig = null;
@@ -116,7 +121,7 @@ class ClassroomGallery extends Room {
     this.onMessage("move", (client, message) => this.move(client, message));
     this.onMessage("jump", (client) => {
       const player = this.state.players.get(client.sessionId), now = Date.now();
-      if (!player || player.knocked || player.trainSeat >= 0 || player.vehicleId || now - (this.jumpTimes.get(client.sessionId) ?? 0) < 900) return;
+      if (!player || cannotAct(player) || player.trainSeat >= 0 || player.vehicleId || now - (this.jumpTimes.get(client.sessionId) ?? 0) < 900) return;
       this.jumpTimes.set(client.sessionId, now); this.jumpStarts.set(client.sessionId, now); player.jump++;
     });
     this.onMessage("cast", (client, message) => { void this.cast(client, message).catch(() => client.send("cast-result", { ok: false })); });
@@ -145,12 +150,14 @@ class ClassroomGallery extends Room {
     this.onMessage("vehicle-input", (client, message) => this.vehicleInput(client, message));
     this.state.train = new Train();
     this.state.santa = new Santa();
+    this.state.officer = new Officer();
     Object.assign(this.state.santa, santaPath[0]);
     this.state.santa.nextPoint = 1;
     this.state.santa.nextDropAt = 0;
     this.santaLastTick = Date.now();
     await this.refreshTrainConfiguration(true).catch(() => {});
     await this.refreshSantaSettings().catch(() => {});
+    await this.refreshPatrolSettings().catch(() => {});
     const readSignature = async () => {
       const { rows } = await pool.query(`SELECT
         (SELECT COUNT(*)::int FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id WHERE f.classroom_id=$1 AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$' AND s.archived_at IS NULL AND a.archived_at IS NULL) AS files,
@@ -185,8 +192,16 @@ class ClassroomGallery extends Room {
         if (auth && !(await stillAllowed(auth).catch(() => false))) client.leave(4003, "Classroom access expired");
       }
     }, 15000);
-    this.combatTimer = setInterval(() => { this.updateCombat(); this.updateTrain(); this.updateVehicles(); this.updateSanta(); }, 50);
-    this.trainSettingsTimer = setInterval(() => { void this.refreshTrainConfiguration().catch(() => {}); void this.refreshSantaSettings().catch(() => {}); }, 5000);
+    this.combatTimer = setInterval(() => { this.updateCombat(); this.updateTrain(); this.updateVehicles(); this.updateSanta(); this.updatePatrol(); }, 50);
+    this.trainSettingsTimer = setInterval(() => { void this.refreshTrainConfiguration().catch(() => {}); void this.refreshSantaSettings().catch(() => {}); void this.refreshPatrolSettings().catch(() => {}); }, 5000);
+  }
+
+  async refreshPatrolSettings() {
+    const { rows: [settings] } = await pool.query(`SELECT patrol_car_hits AS car, patrol_bike_hits AS bike,
+      patrol_helicopter_hits AS helicopter, patrol_broom_hits AS broom, jail_base_seconds AS "baseSeconds",
+      jail_extra_seconds AS "extraSeconds", jail_max_seconds AS "maxSeconds"
+      FROM classroom.gallery_worlds WHERE classroom_id=$1`, [this.classroomId]);
+    if (settings) this.patrolSettings = settings;
   }
 
   async refreshSantaSettings() {
@@ -225,7 +240,7 @@ class ClassroomGallery extends Room {
   async openPresent(client, message) {
     const auth = this.members.get(client.sessionId), player = this.state.players.get(client.sessionId), id = message?.id;
     const now = Date.now(), present = typeof id === "string" ? this.state.presents.get(id) : null;
-    if (!auth || auth.role !== "student" || !player || !this.state.santa.enabled || player.knocked || player.vehicleId || player.trainSeat >= 0 || !present || this.openingGifts.has(id) || now - (this.santaCommandTimes.get(`open:${client.sessionId}`) ?? 0) < 300 || !canOpenPresent(player, present, now)) {
+    if (!auth || auth.role !== "student" || !player || !this.state.santa.enabled || cannotAct(player) || player.vehicleId || player.trainSeat >= 0 || !present || this.openingGifts.has(id) || now - (this.santaCommandTimes.get(`open:${client.sessionId}`) ?? 0) < 300 || !canOpenPresent(player, present, now)) {
       client.send("present-result", { ok: false, message: "อยู่ใกล้ของขวัญมากพอและลงจากยานพาหนะก่อนเปิด" }); return;
     }
     this.santaCommandTimes.set(`open:${client.sessionId}`, now);
@@ -235,7 +250,7 @@ class ClassroomGallery extends Room {
         client.send("present-result", { ok: false, message: "สิทธิ์เข้าห้องเปลี่ยนแล้ว" }); return;
       }
       const current = this.state.presents.get(id), latest = this.state.players.get(client.sessionId);
-      if (!this.state.santa.enabled || current !== present || latest !== player || player.knocked || player.vehicleId || player.trainSeat >= 0 || !canOpenPresent(player, present, Date.now())) {
+      if (!this.state.santa.enabled || current !== present || latest !== player || cannotAct(player) || player.vehicleId || player.trainSeat >= 0 || !canOpenPresent(player, present, Date.now())) {
         client.send("present-result", { ok: false, message: "ของขวัญนี้ถูกเปิดไปแล้วหรือหมดเวลา" }); return;
       }
       const kind = randomInt(2) === 0 ? "bomb" : "points";
@@ -287,7 +302,7 @@ class ClassroomGallery extends Room {
 
   visitorAt(client, auth, place) {
     const player = this.state.players.get(client.sessionId);
-    return player && this.members.get(client.sessionId) === auth && !player.knocked &&
+    return player && this.members.get(client.sessionId) === auth && !cannotAct(player) &&
       !player.vehicleId && player.trainSeat < 0 && nearPlace(player, place) ? player : null;
   }
 
@@ -358,7 +373,7 @@ class ClassroomGallery extends Room {
     for (const [id, blast] of this.state.blasts) {
       if (blast.detonateAt > now) continue;
       for (const [sessionId, player] of this.state.players) {
-        if (player.knocked || player.protectedUntil > now) continue;
+        if (cannotAct(player) || player.protectedUntil > now) continue;
         const started = this.jumpStarts.get(sessionId) ?? -Infinity, elapsed = (now - started) / 1000;
         const jump = elapsed > 0 && elapsed < 0.75 ? Math.max(0, 6 * elapsed - 8 * elapsed * elapsed) : 0;
         const vehicle = this.state.vehicles.get(player.vehicleId);
@@ -381,10 +396,21 @@ class ClassroomGallery extends Room {
     player.displayName = auth.displayName;
     player.role = auth.role;
     applyAppearance(player, auth.appearance);
-    const life = this.lifeStates.get(auth.accountId);
-    if (life) respawnPlayer(life, Date.now());
-    if (life && (life.knocked || life.protectedUntil > Date.now())) Object.assign(player, life);
-    else { player.x = Math.random() * 4 - 2; player.z = Math.random() * 4 - 2; }
+    const now = Date.now(), record = this.wantedRecords.get(auth.accountId);
+    if (record?.releaseAt) {
+      if (record.releaseAt > now) {
+        Object.assign(player, jailCell, { jailedUntil: record.releaseAt });
+      } else {
+        Object.assign(player, jailGate, { protectedUntil: now + 3000 });
+        this.wantedRecords.delete(auth.accountId);
+      }
+    } else {
+      const life = this.lifeStates.get(auth.accountId);
+      if (life) respawnPlayer(life, now);
+      if (life && (life.knocked || life.protectedUntil > now)) Object.assign(player, life);
+      else { player.x = Math.random() * 4 - 2; player.z = Math.random() * 4 - 2; }
+      if (record) Object.assign(player, { wantedCount: record.count, wantedSince: record.since });
+    }
     player.trainSeat = -1;
     this.state.players.set(client.sessionId, player);
     this.movementTimes.set(client.sessionId, Date.now());
@@ -392,7 +418,7 @@ class ClassroomGallery extends Room {
 
   move(client, message) {
     const player = this.state.players.get(client.sessionId);
-    if (!player || !message || player.knocked || player.trainSeat >= 0 || player.vehicleId || message.movementEpoch !== player.movementEpoch) return;
+    if (!player || !message || cannotAct(player) || player.trainSeat >= 0 || player.vehicleId || message.movementEpoch !== player.movementEpoch) return;
     const now = Date.now();
     const count = this.movementMessages.get(client.sessionId) ?? { start: now, total: 0 };
     if (now - count.start > 1000) { count.start = now; count.total = 0; }
@@ -490,10 +516,10 @@ class ClassroomGallery extends Room {
     const auth = this.members.get(client.sessionId), player = this.state.players.get(client.sessionId), train = this.state.train, now = Date.now();
     const commandKey = auth ? `board:${auth.accountId}` : "";
     const last = auth ? this.trainCommandTimes.get(commandKey) ?? 0 : 0;
-    if (!auth || !player || !message || message.revision !== train.revision || player.trainSeat >= 0 || player.knocked || player.vehicleId || this.trainFinishing || !canBoardTrain({ active: train.active, phase: train.phase, seats: this.trainSeats.size, distance: Math.hypot(player.x - train.x, player.z - train.z) }) || now - last < 250) { client.send("train-result", { ok: false, message: "อยู่ใกล้สถานีและรอให้รถหยุดก่อนขึ้นรถไฟ" }); return; }
+    if (!auth || !player || !message || message.revision !== train.revision || player.trainSeat >= 0 || cannotAct(player) || player.vehicleId || this.trainFinishing || !canBoardTrain({ active: train.active, phase: train.phase, seats: this.trainSeats.size, distance: Math.hypot(player.x - train.x, player.z - train.z) }) || now - last < 250) { client.send("train-result", { ok: false, message: "อยู่ใกล้สถานีและรอให้รถหยุดก่อนขึ้นรถไฟ" }); return; }
     this.trainCommandTimes.set(commandKey, now);
     if (!(await stillAllowed(auth).catch(() => false)) || this.members.get(client.sessionId) !== auth) { client.leave(4003, "Classroom access expired"); return; }
-    if (message.revision !== train.revision || player.trainSeat >= 0 || player.knocked || player.vehicleId || this.trainFinishing || !canBoardTrain({ active: train.active, phase: train.phase, seats: this.trainSeats.size, distance: Math.hypot(player.x - train.x, player.z - train.z) })) { client.send("train-result", { ok: false, message: "รถไฟออกแล้วหรือไม่มีที่นั่งว่าง" }); return; }
+    if (message.revision !== train.revision || player.trainSeat >= 0 || cannotAct(player) || player.vehicleId || this.trainFinishing || !canBoardTrain({ active: train.active, phase: train.phase, seats: this.trainSeats.size, distance: Math.hypot(player.x - train.x, player.z - train.z) })) { client.send("train-result", { ok: false, message: "รถไฟออกแล้วหรือไม่มีที่นั่งว่าง" }); return; }
     const occupied = new Set(this.trainSeats.values()); let seat = 0; while (occupied.has(seat)) seat++;
     this.trainSeats.set(client.sessionId, seat); player.trainSeat = seat; player.x = train.x; player.z = train.z; player.rotation = train.rotation; player.movementEpoch++;
     this.jumpStarts.delete(client.sessionId); train.seats = this.trainSeats.size;
@@ -574,13 +600,13 @@ class ClassroomGallery extends Room {
     const id = message?.id ?? message?.kind;
     const now = Date.now();
     const result = (ok, text) => client.send("vehicle-result", { ok, message: text });
-    if (!auth || !player || (!vehicleKinds.includes(id) && !this.state.vehicles.has(id))) return;
+    if (!auth || !player || player.jailedUntil || (!vehicleKinds.includes(id) && !this.state.vehicles.has(id))) return;
     const commandKey = sessionId + ":" + action;
     if (now - (this.vehicleCommandTimes.get(commandKey) ?? 0) < 300) {
       result(false, "โปรดรอสักครู่แล้วลองใหม่"); return;
     }
     this.vehicleCommandTimes.set(commandKey, now);
-    if (!(await stillAllowed(auth, action === "reset")) || this.members.get(sessionId) !== auth) {
+    if (!(await stillAllowed(auth, action === "reset")) || this.members.get(sessionId) !== auth || player.jailedUntil) {
       result(false, "คุณไม่มีสิทธิ์ใช้คำสั่งนี้"); return;
     }
     const vehicles = this.state.vehicles, current = vehicles.get(id);
@@ -611,7 +637,7 @@ class ClassroomGallery extends Room {
       result(true, "ออกจากยานพาหนะแล้ว"); return;
     }
     if (auth.role === "student") { result(false, "เลือกยานพาหนะที่จุดรับรถด้วยใบขับขี่"); return; }
-    if (!current || current.rental || current.driverId || player.knocked || player.vehicleId || player.trainSeat >= 0 || this.worldActions.has(sessionId)
+    if (!current || current.rental || current.driverId || cannotAct(player) || player.vehicleId || player.trainSeat >= 0 || this.worldActions.has(sessionId)
       || current.y > LANDING_HEIGHT || Math.hypot(player.x - current.x, player.z - current.z) > VEHICLE_ENTER_DISTANCE) {
       result(false, "ยานพาหนะไม่ว่างหรืออยู่ไกลเกินไป"); return;
     }
@@ -641,7 +667,8 @@ class ClassroomGallery extends Room {
       client.send("license-used", {});
       if (!eligible()) return result(false, "การขับขี่สิ้นสุดแล้ว");
       const vehicle = new Vehicle();
-      Object.assign(vehicle, { id: randomUUID(), kind: message.kind, rental: true, ...pad, y: 0, rotation: Math.PI, revision: 0, driverId: "" });
+      const hitLimit = this.patrolSettings[message.kind];
+      Object.assign(vehicle, { id: randomUUID(), kind: message.kind, rental: true, hitsRemaining: hitLimit, hitLimit, ...pad, y: 0, rotation: Math.PI, revision: 0, driverId: "" });
       this.mountVehicle(sessionId, player, vehicle);
       this.state.vehicles.set(vehicle.id, vehicle);
       result(true, "เริ่มขับขี่แล้ว");
@@ -672,7 +699,7 @@ class ClassroomGallery extends Room {
 
   vehicleInput(client, message) {
     const player = this.state.players.get(client.sessionId);
-    if (!player?.vehicleId || player.knocked || message?.epoch !== player.movementEpoch || !validVehicleInput(message)) return;
+    if (!player?.vehicleId || cannotAct(player) || message?.epoch !== player.movementEpoch || !validVehicleInput(message)) return;
     const vehicle = this.state.vehicles.get(player.vehicleId);
     if (vehicle?.driverId !== client.sessionId || vehicle.revision !== message.revision) return;
     const at = Date.now();
@@ -693,22 +720,84 @@ class ClassroomGallery extends Room {
       const next = advanceVehicle(vehicle, active, 0.05, this.vehicleBounds);
       Object.assign(vehicle, next);
       player.x = next.x; player.z = next.z; player.rotation = next.rotation;
-      this.collideVehicle(from, next, [vehicleSpecs[vehicle.kind]], vehicle.kind, now);
+      this.collideVehicle(from, next, [vehicleSpecs[vehicle.kind]], vehicle.kind, now, vehicle);
     }
   }
 
-  collideVehicle(from, to, bodies, cause, now) {
+  jumpAltitude(sessionId, now) {
+    const elapsed = (now - (this.jumpStarts.get(sessionId) ?? -Infinity)) / 1000;
+    return elapsed < 0.75 ? Math.max(0, 6 * elapsed - 8 * elapsed * elapsed) : 0;
+  }
+
+  collideVehicle(from, to, bodies, cause, now, vehicle) {
     if (Math.hypot(to.x - from.x, to.y - from.y, to.z - from.z) < 0.001) return;
-    for (const [sessionId, player] of this.state.players) {
-      if (player.knocked || player.protectedUntil > now || player.trainSeat >= 0 || player.vehicleId) continue;
-      const elapsed = (now - (this.jumpStarts.get(sessionId) ?? -Infinity)) / 1000;
-      const height = elapsed < 0.75 ? Math.max(0, 6 * elapsed - 8 * elapsed * elapsed) : 0;
-      if (bodies.some((body) => hitsMovingBody(from, to, body, player, height))) this.knockAvatar(sessionId, player, now, cause);
+    const driver = this.members.get(vehicle?.driverId);
+    const broken = knockdownsUntilBreak(vehicle, this.state.players, ([sessionId, player]) => {
+      if (cannotAct(player) || player.protectedUntil > now || player.trainSeat >= 0 || player.vehicleId) return false;
+      const height = this.jumpAltitude(sessionId, now);
+      if (!bodies.some((body) => hitsMovingBody(from, to, body, player, height))) return false;
+      if (!this.knockAvatar(sessionId, player, now, cause)) return false;
+      if (driver?.role === "student") this.recordWanted(driver.accountId, now);
+      return true;
+    });
+    if (broken) {
+      const client = this.clients.find(({ sessionId }) => sessionId === vehicle.driverId);
+      const driverPlayer = this.state.players.get(vehicle.driverId);
+      if (driverPlayer) driverPlayer.protectedUntil = now + 3000;
+      this.broadcast("vehicle-break", { x: to.x, y: to.y, z: to.z, driverId: vehicle.driverId });
+      this.releaseVehicle(vehicle, vehicleRespawn);
+      client?.send("vehicle-result", { ok: true, message: "ยานพาหนะพังหลังชนครบจำนวน ใบขับขี่ถูกใช้แล้ว" });
     }
+  }
+
+  recordWanted(accountId, now) {
+    const record = addKnockdown(this.wantedRecords, accountId, now);
+    for (const [sessionId, member] of this.members) {
+      if (member.accountId !== accountId) continue;
+      const player = this.state.players.get(sessionId);
+      if (player && !record.releaseAt) Object.assign(player, { wantedCount: record.count, wantedSince: record.since });
+      break;
+    }
+  }
+
+  updatePatrol() {
+    const now = Date.now(), officer = this.state.officer;
+    let target;
+    for (const [id, player] of this.state.players) {
+      const accountId = this.members.get(id)?.accountId;
+      if (player.jailedUntil && player.jailedUntil <= now) {
+        this.wantedRecords.delete(accountId);
+        Object.assign(player, { jailedUntil: 0, protectedUntil: now + 3000 });
+        this.resetPosition(id, player, jailGate.x, jailGate.z, 0);
+      }
+      if (!player.wantedCount) continue;
+      const candidate = { id, player, accountId, count: player.wantedCount, since: player.wantedSince };
+      if (!target || rankWanted(candidate, target) < 0) target = candidate;
+    }
+    officer.targetId = target?.id ?? "";
+    advanceOfficer(officer, target?.player ?? jailGate, 0.05, Boolean(target));
+    if (!target) return;
+    const { player, id, accountId, count } = target;
+    const altitude = (this.state.vehicles.get(player.vehicleId)?.y ?? 0) + this.jumpAltitude(id, now);
+    if (!canArrest(officer, player, altitude)) return;
+
+    const record = this.wantedRecords.get(accountId);
+    if (!record) return;
+    record.releaseAt = now + sentenceSeconds(this.patrolSettings, count) * 1000;
+    if (player.vehicleId) this.releaseVehicle(this.state.vehicles.get(player.vehicleId), jailCell);
+    if (this.trainSeats.delete(id)) this.state.train.seats = this.trainSeats.size;
+    Object.assign(player, { trainSeat: -1, wantedCount: 0, wantedSince: 0, jailedUntil: record.releaseAt });
+    this.resetPosition(id, player, jailCell.x, jailCell.z, 0);
+    for (const [boltId, details] of this.boltDetails) {
+      if (details.accountId !== accountId) continue;
+      this.boltDetails.delete(boltId);
+      this.state.bolts.delete(boltId);
+    }
+    officer.targetId = "";
   }
 
   knockAvatar(sessionId, player, now, cause, cooldownMs) {
-    if (!knockPlayer(player, now, cause, cooldownMs)) return false;
+    if (player.jailedUntil || !knockPlayer(player, now, cause, cooldownMs)) return false;
     if (player.trainSeat >= 0) {
       this.trainSeats.delete(sessionId);
       player.trainSeat = -1;
@@ -723,7 +812,7 @@ class ClassroomGallery extends Room {
   async cast(client, message) {
     const auth=this.members.get(client.sessionId), player=this.state.players.get(client.sessionId), aim=validAim(message), now=Date.now();
     if (aim) aim.shotId = aim.shotId.toLowerCase();
-    if (!auth || !player || player.knocked || player.vehicleId || !aim || now-(this.castTimes.get(auth.accountId)??0)<2000 || this.usedShotIds.has(aim.shotId)) {
+    if (!auth || !player || cannotAct(player) || player.vehicleId || !aim || now-(this.castTimes.get(auth.accountId)??0)<2000 || this.usedShotIds.has(aim.shotId)) {
       client.send("cast-result",{ok:false}); return;
     }
     this.usedShotIds.add(aim.shotId);
@@ -732,7 +821,7 @@ class ClassroomGallery extends Room {
     const epoch = player.movementEpoch;
     let origin;
     const eligible = () => {
-      if (this.members.get(client.sessionId) !== auth || player.knocked || player.vehicleId ||
+      if (this.members.get(client.sessionId) !== auth || cannotAct(player) || player.vehicleId ||
         player.movementEpoch !== epoch || (auth.role === "student" && player.trainSeat >= 0)) return false;
       origin = { x: player.x + Math.sin(player.rotation) * 0.45, y: 1.45, z: player.z + Math.cos(player.rotation) * 0.45 };
       return true;
@@ -742,10 +831,11 @@ class ClassroomGallery extends Room {
       if (!eligible() || this.worldActions.has(client.sessionId)) { client.send("cast-result", { ok: false }); return; }
       spells = await withStudentWallet(pool, auth, (tx) => useItem(tx, auth, "wand", aim.shotId, eligible));
       if (spells === null) { client.send("cast-result", { ok: false }); return; }
+      if (!eligible()) { client.send("cast-result", { ok: true, spells }); return; }
     } else if (!(await stillAllowed(auth)) || !eligible()) { client.send("cast-result", { ok: false }); return; }
     const bolt = new Bolt();
     Object.assign(bolt, origin, { id: aim.shotId });
-    const details={...aim,x:bolt.x,y:bolt.y,z:bolt.z,travelled:0,accountId:auth.accountId};
+    const details={...aim,x:bolt.x,y:bolt.y,z:bolt.z,travelled:0,accountId:auth.accountId,role:auth.role};
     this.state.bolts.set(bolt.id,bolt); this.boltDetails.set(bolt.id,details);
     client.send("cast-result",{ok:true, spells});
   }
@@ -771,15 +861,17 @@ class ClassroomGallery extends Room {
       bolt.x=to.x; bolt.y=to.y; bolt.z=to.z;
       let hit=null, nearest=1;
       for (const [sessionId,player] of this.state.players) {
-        if (player.role!=="student" || this.members.get(sessionId)?.accountId === details.accountId || player.knocked || player.protectedUntil>now) continue;
-        const started=this.jumpStarts.get(sessionId)??-Infinity, elapsed=(now-started)/1000;
-        const jump=elapsed>0&&elapsed<0.75?Math.max(0,6*elapsed-8*elapsed*elapsed):0;
+        if (player.role!=="student" || this.members.get(sessionId)?.accountId === details.accountId || cannotAct(player) || player.protectedUntil>now) continue;
+        const jump = this.jumpAltitude(sessionId, now);
         const altitude = this.state.vehicles.get(player.vehicleId)?.y ?? 0;
         const fraction=playerHitFraction(from,to,player,jump + altitude);
         if (fraction!==null && fraction<nearest) { nearest=fraction; hit={sessionId,player,x:from.x+(to.x-from.x)*fraction,y:from.y+(to.y-from.y)*fraction,z:from.z+(to.z-from.z)*fraction}; }
       }
       if (hit) {
-        if (this.knockAvatar(hit.sessionId, hit.player, now, "wand")) this.broadcast("wand-impact",{id,x:hit.x,y:hit.y,z:hit.z});
+        if (this.knockAvatar(hit.sessionId, hit.player, now, "wand")) {
+          if (details.role === "student") this.recordWanted(details.accountId, now);
+          this.broadcast("wand-impact",{id,x:hit.x,y:hit.y,z:hit.z});
+        }
       }
       if (hit || expired) { this.state.bolts.delete(id); this.boltDetails.delete(id); }
     }
@@ -835,11 +927,11 @@ class ClassroomGallery extends Room {
     this.jumpStarts.delete(client.sessionId);
   }
 
-  onDispose() { clearInterval(this.accessTimer); clearInterval(this.galleryTimer); clearInterval(this.worldTimer); clearInterval(this.combatTimer); clearInterval(this.trainSettingsTimer); this.state.bolts.clear(); this.boltDetails.clear(); this.lifeStates.clear(); this.usedShotIds.clear(); this.trainSeats.clear(); this.trainCommandTimes.clear(); this.santaCommandTimes.clear(); this.openingGifts.clear(); this.state.presents.clear(); this.state.blasts.clear(); this.state.vehicles.clear(); this.vehicleInputs.clear(); this.vehicleCommandTimes.clear(); }
+  onDispose() { clearInterval(this.accessTimer); clearInterval(this.galleryTimer); clearInterval(this.worldTimer); clearInterval(this.combatTimer); clearInterval(this.trainSettingsTimer); this.state.bolts.clear(); this.boltDetails.clear(); this.lifeStates.clear(); this.wantedRecords.clear(); this.usedShotIds.clear(); this.trainSeats.clear(); this.trainCommandTimes.clear(); this.santaCommandTimes.clear(); this.openingGifts.clear(); this.state.presents.clear(); this.state.blasts.clear(); this.state.vehicles.clear(); this.vehicleInputs.clear(); this.vehicleCommandTimes.clear(); }
 }
 
 const gameServer = new Server({
-  express: (app) => app.get("/__gallery_protocol", (_request, response) => response.type("text").send("shop-v1")),
+  express: (app) => app.get("/__gallery_protocol", (_request, response) => response.type("text").send("patrol-v1")),
 });
 gameServer.define("classroom", ClassroomGallery).filterBy(["classroomId"]);
 await gameServer.listen(Number(process.env.PORT ?? 2567));

@@ -8,10 +8,11 @@ import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { Client, type Room } from "@colyseus/sdk";
 import { Elysia } from "elysia";
+import { defaultPatrolSettings, jailCell, jailGate } from "../gallery-server/src/patrol.mjs";
 import { depot, portal, shop } from "../gallery-server/src/world-places.mjs";
 
 const database = process.env.CLASSROOM_TEST_DATABASE_URL;
-test.skipIf(!database)("checks gallery admission, teleporting, the shop, and rides in a live room", async () => {
+test.skipIf(!database)("checks gallery admission, rides, and patrol in a live room", async () => {
   process.env.DATABASE_URL = database!;
   process.env.DATABASE_SSL = process.env.CLASSROOM_TEST_DATABASE_SSL ?? "disable";
   process.env.APP_URL = "http://localhost:3000";
@@ -24,7 +25,7 @@ test.skipIf(!database)("checks gallery admission, teleporting, the shop, and rid
   const { createSession, createStudentSession } = await import("./auth/session");
   const app = new Elysia().onError(handleAppError).use(galleryRoutes).use(studentCourseworkRoutes);
   const teacher = randomUUID(), student = randomUUID(), classroom = randomUUID(), other = randomUUID(), member = randomUUID(), assignment = randomUUID(), nextAssignment = randomUUID();
-  const peer = randomUUID(), peerMember = randomUUID(), otherMember = randomUUID(), otherAssignment = randomUUID();
+  const foreignTeacher = randomUUID(), peer = randomUUID(), peerMember = randomUUID(), otherMember = randomUUID(), otherAssignment = randomUUID();
   const probe = createServer(); probe.listen(0, "127.0.0.1"); await once(probe, "listening");
   const port = (probe.address() as { port: number }).port;
   await new Promise<void>((resolve) => probe.close(() => resolve()));
@@ -35,7 +36,8 @@ test.skipIf(!database)("checks gallery admission, teleporting, the shop, and rid
       try { if ((await fetch("http://127.0.0.1:" + port + "/__healthcheck")).ok) break; } catch {}
       await Bun.sleep(100);
     }
-    await sql`INSERT INTO classroom.teachers(id,username,display_name,password_hash) VALUES(${teacher},${teacher},'Synthetic Teacher','unused')`;
+    await sql`INSERT INTO classroom.teachers(id,username,display_name,password_hash)
+      VALUES(${teacher},${teacher},'Synthetic Teacher','unused'),(${foreignTeacher},${foreignTeacher},'Outside Teacher','unused')`;
     await sql`INSERT INTO classroom.student_accounts(id,email) VALUES(${student},${student + "@banjan.ac.th"})`;
     await sql`INSERT INTO classroom.classrooms(id,owner_id,name) VALUES(${classroom},${teacher},'Synthetic World'),(${other},${teacher},'Other World')`;
     await sql`INSERT INTO classroom.students(id,classroom_id,student_code,student_number,display_name,account_id) VALUES(${member},${classroom},'0001',1,'Synthetic Student',${student})`;
@@ -46,18 +48,35 @@ test.skipIf(!database)("checks gallery admission, teleporting, the shop, and rid
     const request = (token: string, suffix = "", method = "GET", body?: unknown, id = classroom) => app.handle(new Request("http://localhost/api/classrooms/" + id + "/gallery" + suffix, { method, headers: { cookie: "classroom_session=" + token, origin: "http://localhost:3000", "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined }));
     const client = new Client("http://127.0.0.1:" + port);
     const join = async (token: string, roomId = classroom) => {
-      const response = await request(token, "/ticket", "POST", undefined, roomId);
-      expect(response.status).toBe(200);
-      const { ticket } = await response.json();
-      const room = await client.joinOrCreate("classroom", { classroomId: roomId, ticket });
-      rooms.push(room);
-      for (let attempt = 0; attempt < 80 && !(room.state as any)?.players?.has(room.sessionId); attempt++) await Bun.sleep(25);
-      expect((room.state as any)?.players?.has(room.sessionId)).toBe(true);
-      return room;
+      for (let attempt = 0; ; attempt++) {
+        const response = await request(token, "/ticket", "POST", undefined, roomId);
+        expect(response.status).toBe(200);
+        const { ticket } = await response.json();
+        try {
+          const room = await client.joinOrCreate("classroom", { classroomId: roomId, ticket });
+          rooms.push(room);
+          for (let patch = 0; patch < 80 && !(room.state as any)?.players?.has(room.sessionId); patch++) await Bun.sleep(25);
+          expect((room.state as any)?.players?.has(room.sessionId)).toBe(true);
+          return room;
+        } catch (error) {
+          if ((error as { code?: number }).code !== 4009 || attempt >= 15) throw error;
+          // The leave reply can arrive just before Colyseus removes the previous session.
+          await Bun.sleep(80);
+        }
+      }
     };
     const initialManifest = await (await request(teacherToken)).json();
     expect(initialManifest.enabled).toBe(false);
     expect(initialManifest.shop).toEqual({ wand: 5, license: 10 });
+    expect(initialManifest.patrol).toEqual(defaultPatrolSettings);
+    const patrolSettings = { ...defaultPatrolSettings, car: 1, broom: 4, baseSeconds: 5, extraSeconds: 2, maxSeconds: 10 };
+    expect((await request(studentToken, "/patrol", "PUT", patrolSettings)).status).toBe(401);
+    expect((await request(await createSession(foreignTeacher), "/patrol", "PUT", patrolSettings)).status).toBe(404);
+    expect((await request(teacherToken, "/patrol", "PUT", { ...patrolSettings, helicopter: 21 })).status).toBe(422);
+    expect((await request(teacherToken, "/patrol", "PUT", { ...patrolSettings, baseSeconds: 20 })).status).toBe(422);
+    expect(await (await request(teacherToken, "/patrol", "PUT", patrolSettings)).json()).toEqual(patrolSettings);
+    expect((await (await request(teacherToken, "", "GET", undefined, other)).json()).patrol).toEqual(defaultPatrolSettings);
+    expect((await (await request(teacherToken)).json()).patrol).toEqual(patrolSettings);
     expect((await request(studentToken, "/shop", "PUT", { wand: 5, license: 10 })).status).toBe(401);
     expect((await request(teacherToken, "/shop", "PUT", { wand: 0, license: 10 })).status).toBe(422);
     expect(initialManifest.train).toEqual({ mode: "auto", intervalSeconds: 120, startStudentId: null, stationWaitSeconds: {} });
@@ -223,7 +242,7 @@ test.skipIf(!database)("checks gallery admission, teleporting, the shop, and rid
     expect((await request(studentToken, "/ticket", "POST")).status).toBe(403);
     await expect(client.joinOrCreate("classroom", { classroomId: classroom, ticket: preRevocationTicket })).rejects.toThrow();
     expect((await request(teacherToken, `/access/${member}`, "PUT", { assignmentId: currentAssignment, approved: true })).status).toBe(200);
-    const studentRoomAgain = await join(studentToken);
+    let studentRoomAgain = await join(studentToken);
     expect(studentRoomAgain.connection.isOpen).toBe(true);
     const santaStarted = new Promise<{ ok: boolean; enabled: boolean }>((resolve) => teacherRoom.onMessage("santa-result", resolve));
     teacherRoom.send("santa-toggle", { enabled: true });
@@ -325,7 +344,7 @@ test.skipIf(!database)("checks gallery admission, teleporting, the shop, and rid
     const rentalId = rider(studentRoomAgain).vehicleId, peerRental = rider(peerRoom).vehicleId;
     expect(rentalId).not.toBe(peerRental);
     const broom = scene(studentRoomAgain).vehicles.get(rentalId);
-    expect(broom).toMatchObject({ kind: "broom", rental: true });
+    expect(broom).toMatchObject({ kind: "broom", rental: true, hitLimit: 4, hitsRemaining: 4 });
     for (let i = 0; i < 4; i++) {
       studentRoomAgain.send("vehicle-input", { revision: broom.revision, epoch: rider(studentRoomAgain).movementEpoch, throttle: 0, turn: 0, lift: 1 });
       await Bun.sleep(85);
@@ -354,7 +373,28 @@ test.skipIf(!database)("checks gallery admission, teleporting, the shop, and rid
     await waitFor(() => rider(returningPeer).knockCause === "wand");
     expect(rider(teacherRoom).knocked).toBe(false);
     expect(rider(studentRoomAgain).knocked).toBe(false);
-    await Bun.sleep(2010);
+    await waitFor(() => rider(studentRoomAgain).wantedCount === 1 && scene(studentRoomAgain).officer.targetId === studentRoomAgain.sessionId);
+    await studentRoomAgain.leave();
+    studentRoomAgain = await join(studentToken);
+    expect(rider(studentRoomAgain).wantedCount).toBe(1);
+    await waitFor(() => rider(studentRoomAgain).jailedUntil > Date.now(), 4500);
+    const jailedUntil = rider(studentRoomAgain).jailedUntil;
+    expect(rider(studentRoomAgain)).toMatchObject({ ...jailCell, wantedCount: 0, vehicleId: "" });
+    await studentRoomAgain.leave();
+    studentRoomAgain = await join(studentToken);
+    expect(rider(studentRoomAgain)).toMatchObject({ ...jailCell, jailedUntil });
+    const custodyPlayer = rider(studentRoomAgain);
+    studentRoomAgain.send("move", { dx: 0.3, dz: 0, sequence: custodyPlayer.sequence + 1, movementEpoch: custodyPlayer.movementEpoch });
+    studentRoomAgain.send("jump", {});
+    expect((await castAsStudent()).ok).toBe(false);
+    expect((await command(studentRoomAgain, "teleport", "teleport-result")).ok).toBe(false);
+    expect((await startRide(studentRoomAgain)).ok).toBe(false);
+    const otherWhileJailed = await join(studentToken, other);
+    expect(rider(otherWhileJailed)).toMatchObject({ wantedCount: 0, jailedUntil: 0 });
+    await otherWhileJailed.leave();
+    expect(rider(studentRoomAgain)).toMatchObject({ ...jailCell, jump: 0 });
+    await waitFor(() => rider(studentRoomAgain).jailedUntil === 0, 5500);
+    expect(rider(studentRoomAgain)).toMatchObject({ ...jailGate, wantedCount: 0 });
     expect((await castAsStudent(studentShot)).ok).toBe(false);
     for (let remaining = 13; remaining >= 0; remaining--) {
       expect(await castAsStudent()).toMatchObject({ ok: true, spells: remaining });
@@ -362,6 +402,27 @@ test.skipIf(!database)("checks gallery admission, teleporting, the shop, and rid
     }
     expect((await castAsStudent()).ok).toBe(false);
     expect(await command(studentRoomAgain, "wallet-read", "wallet")).toMatchObject({ wallet: { spells: 0 } });
+    await sql`INSERT INTO classroom.gallery_point_claims (gift_id,account_id,classroom_id)
+      SELECT gen_random_uuid(), ${student}, ${classroom} FROM generate_series(1,10)`;
+    await moveTo(studentRoomAgain, shop.x, shop.z);
+    expect(await buy(studentRoomAgain, "license", 10)).toMatchObject({ ok: true });
+    await Promise.all([moveTo(studentRoomAgain, depot.x, depot.z), moveTo(teacherRoom, 11, 17)]);
+    expect((await command(studentRoomAgain, "ride-start", "vehicle-result", { kind: "car", requestId: randomUUID() })).ok).toBe(true);
+    await waitFor(() => Boolean(rider(studentRoomAgain).vehicleId));
+    const newCarId = rider(studentRoomAgain).vehicleId;
+    const newCar = scene(studentRoomAgain).vehicles.get(newCarId);
+    expect(newCar).toMatchObject({ hitLimit: 1, hitsRemaining: 1 });
+    let carBroke = false;
+    const unlisten = studentRoomAgain.onMessage("vehicle-break", ({ driverId }: { driverId: string }) => { carBroke = driverId === studentRoomAgain.sessionId; });
+    for (let step = 0; step < 12 && !carBroke; step++) {
+      studentRoomAgain.send("vehicle-input", { revision: newCar.revision, epoch: rider(studentRoomAgain).movementEpoch, throttle: 1, turn: 0, lift: 0 });
+      await Bun.sleep(80);
+    }
+    await waitFor(() => carBroke && !scene(studentRoomAgain).vehicles.has(newCarId));
+    unlisten();
+    expect(rider(studentRoomAgain).vehicleId).toBe("");
+    expect(rider(teacherRoom).knockCause).toBe("car");
+    expect(await command(studentRoomAgain, "wallet-read", "wallet")).toMatchObject({ wallet: { license: false } });
     await sql`DELETE FROM classroom.assignments WHERE classroom_id=${other}`;
     await sql`DELETE FROM classroom.students WHERE classroom_id=${other}`;
     await sql`DELETE FROM classroom.classrooms WHERE id=${other}`;
@@ -369,7 +430,8 @@ test.skipIf(!database)("checks gallery admission, teleporting, the shop, and rid
     const stale = await (await request(studentToken, "/ticket", "POST")).json();
     const departed = new Promise<number>((resolve) => studentRoomAgain.onLeave(resolve));
     expect((await request(teacherToken, "", "PUT", { enabled: false })).status).toBe(200);
-    expect(await Promise.race([departed, Bun.sleep(4000).then(() => -1)])).toBe(4403);
+    // Closing entry can be observed by either the world-status poll or the session check.
+    expect([4403, 4003]).toContain(await Promise.race([departed, Bun.sleep(4000).then(() => -1)]));
     expect(teacherRoom.connection.isOpen).toBe(true);
     expect((await request(studentToken, "/ticket", "POST")).status).toBe(404);
     expect((await request(studentToken, "/files/" + randomUUID() + "/content")).status).toBe(404);
@@ -394,7 +456,7 @@ test.skipIf(!database)("checks gallery admission, teleporting, the shop, and rid
     await sql`DELETE FROM classroom.students WHERE classroom_id IN (${classroom},${other})`;
     await sql`DELETE FROM classroom.classrooms WHERE id IN (${classroom},${other})`;
     await sql`DELETE FROM classroom.student_accounts WHERE id IN (${student},${peer})`;
-    await sql`DELETE FROM classroom.teachers WHERE id=${teacher}`;
+    await sql`DELETE FROM classroom.teachers WHERE id IN (${teacher},${foreignTeacher})`;
     await rm(uploadDir, { recursive: true, force: true });
   }
-}, 135000);
+}, 165000);

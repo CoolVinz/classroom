@@ -41,6 +41,7 @@ PostgreSQL 18 or newer stores app data in an app-owned `classroom` schema in the
 - **Gallery display state:** `gallery_hidden_models` stores teacher-hidden file UUIDs. `gallery_likes` is unique per model/student and scoped to that student's classroom membership. Students may hold up to 10 likes per assignment; removing a like frees a slot. File/student deletion removes likes and hidden metadata through existing file/roster references. Per-student assignment counts are computed from existing file and like rows; no additional vote counter is stored.
 - **Gallery admission ticket:** a SHA-256 token hash, classroom, actor kind/account, optional roster student, existing session hash, and 60-second expiry/consumption timestamps. Tickets are single-use; the Colyseus service checks the active session and membership again after admission.
 - **Gallery world settings:** per-classroom access and train settings plus Santa bomb fuse and respawn cooldown. Fuse is constrained to 2–15 seconds and respawn cooldown to 3–60 seconds; defaults are 5 and 10 seconds.
+- **Gallery patrol settings:** migration 028 adds one 1–20 hit limit per student vehicle kind and adjustable base, increment, and maximum jail seconds. Wanted counts, officer position, and jail deadlines exist only in Colyseus rooms.
 
 ## Constraints and behavior
 
