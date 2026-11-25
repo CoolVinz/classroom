@@ -1052,6 +1052,59 @@ describe("student submission API", () => {
       await sql`DELETE FROM classroom.lesson_page_images WHERE id = ${restrictedImage.id}`;
       await rm(resolve(uploadDir, restrictedImage.id));
 
+      const assignmentUrl = `http://localhost/api/classrooms/${roomA}/assignments`;
+      const wioCreate = (wioLab: string) => app.handle(new Request(assignmentUrl, {
+        method: "POST", headers: { ...teacherHeaders, "content-type": "application/json" },
+        body: JSON.stringify({ title: "Wio Terminal practice", wioLab, maxScore: 10 }),
+      }));
+      expect((await wioCreate("invalid")).status).toBe(422);
+      const labResponse = await wioCreate("blink");
+      expect(labResponse.status).toBe(200);
+      const lab = await labResponse.json() as { id: string; wioLab: string };
+      expect(lab.wioLab).toBe("blink");
+
+      const patchLab = (body: unknown, headers = teacherHeaders) => app.handle(new Request(assignmentUrl + "/" + lab.id, {
+        method: "PATCH", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify(body),
+      }));
+      expect((await patchLab({ wioLab: "buttons" }, { ...teacherHeaders, cookie: `classroom_session=${otherTeacherToken}` })).status).toBe(404);
+      expect((await patchLab({ wioLab: "buttons" })).status).toBe(200);
+      expect((await patchLab({ instructions: "ไฟติดเมื่อกด A" })).status).toBe(200);
+      const labList = await app.handle(new Request("http://localhost/api/student/assignments", { headers: studentHeaders }));
+      expect(await labList.json()).toEqual(expect.arrayContaining([expect.objectContaining({ assignmentId: lab.id, wioLab: "buttons" })]));
+
+      const sketch = "// ไฟ LED\nvoid setup() {}\nvoid loop() {}";
+      const submitIno = (room: string, assignment: string, bytes: BlobPart = sketch, headers = studentHeaders) => {
+        const body = new FormData();
+        body.set("file", new File([bytes], "practice.ino", { type: "text/plain" }));
+        return app.handle(new Request(`http://localhost/api/student/classrooms/${room}/assignments/${assignment}/files`, {
+          method: "POST", headers, body,
+        }));
+      };
+      expect((await submitIno(roomA, assignmentA)).status).toBe(422);
+      expect((await submitIno(roomB, lab.id)).status).toBe(404);
+      expect((await submitIno(roomA, lab.id, sketch, { ...studentHeaders, origin: "https://example.test" })).status).toBe(403);
+      expect((await submitIno(roomA, lab.id, new Uint8Array([0xff]))).status).toBe(422);
+      expect((await submitIno(roomA, lab.id, "ก".repeat(5500))).status).toBe(413);
+      const wioSubmissions = await Promise.all([submitIno(roomA, lab.id), submitIno(roomA, lab.id, sketch + "\n// updated")]);
+      expect(wioSubmissions.map((response) => response.status)).toEqual([200, 200]);
+      const sketches = await Promise.all(wioSubmissions.map((response) => response.json() as Promise<{ id: string }>));
+      expect(sketches[0].id).not.toBe(sketches[1].id);
+      const studentDownload = "/api/student/files/" + sketches[0].id + "/content";
+      const teacherDownload = "/api/files/" + sketches[0].id + "/content";
+      const download = await app.handle(new Request("http://localhost" + studentDownload, { headers: studentHeaders }));
+      expect(download.headers.get("content-disposition")).toBe("attachment; filename*=UTF-8''practice.ino");
+      expect(await download.text()).toBe(sketch);
+      expect((await app.handle(new Request("http://localhost" + studentDownload, { headers: peerHeaders }))).status).toBe(404);
+      expect((await app.handle(new Request("http://localhost" + teacherDownload, { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).status).toBe(404);
+      expect(await (await app.handle(new Request("http://localhost" + teacherDownload, { headers: teacherHeaders }))).text()).toBe(sketch);
+      expect((await patchLab({ wioLab: null })).status).toBe(200);
+      expect((await submitIno(roomA, lab.id)).status).toBe(422);
+      expect((await patchLab({ wioLab: "blink", archived: true })).status).toBe(200);
+      expect((await submitIno(roomA, lab.id)).status).toBe(404);
+      for (const { id } of sketches) {
+        expect((await app.handle(new Request(`http://localhost/api/files/${id}`, { method: "DELETE", headers: teacherHeaders }))).status).toBe(200);
+      }
+
       const form = new FormData();
       form.set("file", new File(["%PDF-1.7\nstudent work"], "work.pdf", { type: "application/pdf" }));
       process.env.UPLOAD_MAX_TOTAL_BYTES = "20";

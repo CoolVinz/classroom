@@ -1,3 +1,4 @@
+import { wioLabIds } from "../wio-labs";
 import { Elysia, t } from "elysia";
 import { randomUUID } from "node:crypto";
 import { mkdir, rename, rm } from "node:fs/promises";
@@ -35,12 +36,14 @@ function hasTwoDecimalPlaces(value: number) {
   return Number.isFinite(value) && Math.round(value * 100) === value * 100;
 }
 
+const wioLab = t.Optional(t.Nullable(t.Union(wioLabIds.map((id) => t.Literal(id)))));
+
 export const courseworkRoutes = new Elysia({ prefix: "/api" })
   .get("/classrooms/:classroomId/assignments", async ({ params, request }) => {
     const actor = await requireActor(request);
     await ownedClassroom(params.classroomId, actor.id);
     return sql`
-      SELECT a.id, a.title, a.instructions, a.max_score AS "maxScore", a.archived_at IS NOT NULL AS archived,
+      SELECT a.id, a.title, a.instructions, a.wio_lab AS "wioLab", a.max_score AS "maxScore", a.archived_at IS NOT NULL AS archived,
         a.created_at AS "createdAt", COUNT(f.id) FILTER (WHERE f.kind <> 'working')::int AS "fileCount"
       FROM classroom.assignments a
       LEFT JOIN classroom.files f ON f.assignment_id = a.id
@@ -55,12 +58,12 @@ export const courseworkRoutes = new Elysia({ prefix: "/api" })
     const maxScore = body.maxScore ?? 100;
     if (!hasTwoDecimalPlaces(maxScore)) throw new HttpError(422, "คะแนนเต็มต้องใช้ทศนิยมไม่เกิน 2 ตำแหน่ง");
     const [assignment] = await sql`
-      INSERT INTO classroom.assignments (classroom_id, title, instructions, max_score)
-      VALUES (${params.classroomId}, ${cleanText(body.title, 120)}, ${body.instructions?.trim() ?? ""}, ${maxScore})
-      RETURNING id, title, instructions, max_score AS "maxScore", created_at AS "createdAt"
+      INSERT INTO classroom.assignments (classroom_id, title, instructions, max_score, wio_lab)
+      VALUES (${params.classroomId}, ${cleanText(body.title, 120)}, ${body.instructions?.trim() ?? ""}, ${maxScore}, ${body.wioLab ?? null})
+      RETURNING id, title, instructions, wio_lab AS "wioLab", max_score AS "maxScore", created_at AS "createdAt"
     `;
     return assignment;
-  }, { body: t.Object({ title: t.String({ minLength: 1, maxLength: 120 }), instructions: t.Optional(t.String({ maxLength: 5000 })), maxScore: t.Optional(maximumScore) }) })
+  }, { body: t.Object({ title: t.String({ minLength: 1, maxLength: 120 }), instructions: t.Optional(t.String({ maxLength: 5000 })), maxScore: t.Optional(maximumScore), wioLab }) })
   .patch("/classrooms/:classroomId/assignments/:assignmentId", async ({ params, body, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
@@ -83,11 +86,12 @@ export const courseworkRoutes = new Elysia({ prefix: "/api" })
         await tx`UPDATE classroom.assignments SET max_score = ${maxScore} WHERE id = ${params.assignmentId}`;
       });
     }
-    if (body.title !== undefined || body.instructions !== undefined) {
+    if (body.title !== undefined || body.instructions !== undefined || body.wioLab !== undefined) {
       await sql`
         UPDATE classroom.assignments SET
           title = COALESCE(${body.title === undefined ? null : cleanText(body.title, 120)}, title),
-          instructions = COALESCE(${body.instructions ?? null}, instructions)
+          instructions = COALESCE(${body.instructions ?? null}, instructions),
+          wio_lab = CASE WHEN ${body.wioLab !== undefined} THEN ${body.wioLab ?? null} ELSE wio_lab END
         WHERE id = ${params.assignmentId} AND classroom_id = ${params.classroomId}
       `;
     }
@@ -95,7 +99,7 @@ export const courseworkRoutes = new Elysia({ prefix: "/api" })
       await sql`UPDATE classroom.assignments SET archived_at = ${body.archived ? sql`NOW()` : sql`NULL`} WHERE id = ${params.assignmentId} AND classroom_id = ${params.classroomId}`;
     }
     return { ok: true };
-  }, { body: t.Object({ title: t.Optional(t.String({ minLength: 1, maxLength: 120 })), instructions: t.Optional(t.String({ maxLength: 5000 })), maxScore: t.Optional(maximumScore), archived: t.Optional(t.Boolean()) }) })
+  }, { body: t.Object({ title: t.Optional(t.String({ minLength: 1, maxLength: 120 })), instructions: t.Optional(t.String({ maxLength: 5000 })), maxScore: t.Optional(maximumScore), wioLab, archived: t.Optional(t.Boolean()) }) })
   .get("/classrooms/:classroomId/assignments/:assignmentId/assessments", async ({ params, query, request }) => {
     const actor = await requireActor(request);
     await ownedAssignment(params.classroomId, params.assignmentId, actor.id, true);

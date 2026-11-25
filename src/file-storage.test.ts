@@ -102,6 +102,14 @@ describe("file upload validation", () => {
     await expect(validateStudentUpload(new File(["BLENDER-v300"], "work.blend"))).rejects.toThrow("ไม่รองรับ");
   });
 
+  test("validates bounded UTF-8 Arduino source without attempting to compile it", async () => {
+    const sketch = new File(["// อธิบายงาน\nvoid setup() { TODO"], "../งาน.INO");
+    await expect(validateStudentUpload(sketch)).resolves.toMatchObject({ originalName: ".._งาน.INO", mediaType: "text/plain; charset=utf-8" });
+    await expect(validateStudentUpload(new File([Uint8Array.of(65, 0, 66)], "binary.ino"))).rejects.toMatchObject({ status: 422 });
+    await expect(validateStudentUpload(new File(["ก".repeat(5500)], "large.ino"))).rejects.toMatchObject({ status: 413 });
+    await expect(validateUpload(sketch, "worksheet")).rejects.toMatchObject({ status: 422 });
+  });
+
   test("validates legacy, current, and gzip-compressed Blender working files", async () => {
     const legacy = Buffer.from("BLENDER-v300");
     const current = Buffer.from("BLENDER17-01v0502");

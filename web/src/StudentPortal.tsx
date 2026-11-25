@@ -1,3 +1,4 @@
+import type { WioLabId } from "../../src/wio-labs";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { api } from "./api";
 import { StudentAttendance } from "./StudentAttendance";
@@ -6,10 +7,11 @@ import { generateThumbnail } from "./thumbnail-jobs";
 import { StudentGroups } from "./StudentGroups";
 import { StudentLearning } from "./StudentLearning";
 
+const WioLab = lazy(() => import("./WioLab"));
 const ModelPreview = lazy(() => import("./ModelPreview"));
 export type StudentUser = { id: string; username: string; displayName: string; role: "student" };
 type ClassroomMembership = { classroomId: string; classroomName: string };
-type Assignment = { assignmentId: string; classroomId: string; classroomName: string; title: string; instructions: string; submissionCount: number; publishedScore: number | string | null; publishedMaxScore: number | string | null; publishedFeedback: string | null; publishedAt: string | null; newWork: boolean };
+type Assignment = { assignmentId: string; classroomId: string; classroomName: string; title: string; instructions: string; wioLab: WioLabId | null; submissionCount: number; publishedScore: number | string | null; publishedMaxScore: number | string | null; publishedFeedback: string | null; publishedAt: string | null; newWork: boolean };
 type StudentFile = { id: string; kind: "worksheet" | "model" | "submission" | "working"; originalName: string; mediaType: string; sizeBytes: number | string; createdAt: string; studentSubmission: boolean; thumbnailAvailable: boolean; materialAvailable: boolean };
 type StudentQuiz = { quizId: string; classroomId: string; title: string; classroomName: string; status: string; finishedAt: string | null; score: string | null };
 type GalleryClass = { classroomId: string; classroomName: string; entryMode: "submission" | "approval"; requiredAssignmentId: string | null; requiredAssignmentTitle: string | null; hasSubmission: boolean; approved: boolean; entryAllowed: boolean };
@@ -126,6 +128,24 @@ export function StudentPortal({ user, logout, openWorld }: { user: StudentUser; 
     return () => controller.abort();
   }, [classroomId, assignmentId, fileRevision, activityRevision]);
 
+  async function uploadAssignmentFile(target: Assignment, file: File, materialFile?: File) {
+    const body = new FormData();
+    body.set("file", file);
+    if (materialFile) body.set("materialFile", materialFile);
+    return api<{ id: string; mediaType: string; materialAvailable: boolean }>(
+      `/student/classrooms/${target.classroomId}/assignments/${target.assignmentId}/files`, { method: "POST", body });
+  }
+
+  async function submitSketch(target: Assignment, source: string) {
+    setBusy(true);
+    setError("");
+    try {
+      await uploadAssignmentFile(target, new File([source], `wio-${target.wioLab}.ino`, { type: "text/plain" }));
+      setFileRevision((current) => current + 1);
+      await Promise.all([loadAssignments(), loadWorlds()]);
+    } finally { setBusy(false); }
+  }
+
   async function upload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selected) return;
@@ -141,9 +161,7 @@ export function StudentPortal({ user, logout, openWorld }: { user: StudentUser; 
     let uploaded = 0;
     try {
       for (const file of picked) {
-        const body = new FormData(); body.set("file", file);
-        if (materialFile && file === objFiles[0]) body.set("materialFile", materialFile);
-        const uploadedFile = await api<{ id: string; mediaType: string; materialAvailable: boolean }>(`/student/classrooms/${selected.classroomId}/assignments/${selected.assignmentId}/files`, { method: "POST", body });
+        const uploadedFile = await uploadAssignmentFile(selected, file, file === objFiles[0] ? materialFile : undefined);
         void generateThumbnail({ id: uploadedFile.id, originalName: file.name, mediaType: uploadedFile.mediaType },
           "/api/student/files/" + uploadedFile.id + "/content", "/student/files/" + uploadedFile.id + "/thumbnail", new AbortController().signal, file,
           uploadedFile.materialAvailable ? "/api/student/files/" + uploadedFile.id + "/material" : undefined, materialFile).catch(() => {});
@@ -227,7 +245,11 @@ export function StudentPortal({ user, logout, openWorld }: { user: StudentUser; 
       </section>
       {selected && <section className="panel" key={assignmentId}><header className="panel-heading"><div><p className="eyebrow">{selected.classroomName}</p><h2>{selected.title}</h2>{selected.instructions && <p className="muted assignment-instructions">{selected.instructions}</p>}</div></header>
         {selected.publishedScore !== null && selected.publishedScore !== undefined && <div className="student-assessment"><strong>คะแนน: {Number(selected.publishedScore)} / {Number(selected.publishedMaxScore)}</strong>{selected.publishedFeedback && <p>{selected.publishedFeedback}</p>}{selected.newWork && <small>มีไฟล์งานใหม่รอครูตรวจ</small>}</div>}
-        <form className="work-upload" onSubmit={(event) => void upload(event)}><label className="work-file-input">เลือกไฟล์งาน<input name="studentFiles" type="file" accept={uploadTypes} multiple required/></label><label className="work-file-input">ไฟล์สี MTL (ไม่บังคับ)<input name="materialFile" type="file" accept=".mtl"/><small>เลือกคู่กับ OBJ ไฟล์เดียว · สีพื้นผิวเท่านั้น ไม่รองรับรูป texture</small></label><button className="button button-primary" disabled={busy}>{busy ? "กำลังส่งงาน…" : "ส่งไฟล์"}</button><small>PDF, รูปภาพ, Word, STL, OBJ, GLB หรือ glTF · ไม่เกิน 50 MB รวม OBJ และ MTL · รองรับ GLB/glTF แบบฝังข้อมูล แนะนำ Blender → glTF Binary (.glb)</small></form>
+        {selected.wioLab && <Suspense fallback={<p className="inline-loading">กำลังเปิด Wio Terminal…</p>}>
+          <WioLab key={selected.wioLab} lab={selected.wioLab} draftKey={`classroom:wio:${user.id}:${selected.assignmentId}:${selected.wioLab}`}
+            disabled={busy} submit={(source) => submitSketch(selected, source)} />
+        </Suspense>}
+        <form className="work-upload" onSubmit={(event) => void upload(event)}><label className="work-file-input">เลือกไฟล์งาน<input name="studentFiles" type="file" accept={uploadTypes + (selected.wioLab ? ",.ino" : "")} multiple required/></label><label className="work-file-input">ไฟล์สี MTL (ไม่บังคับ)<input name="materialFile" type="file" accept=".mtl"/><small>เลือกคู่กับ OBJ ไฟล์เดียว · สีพื้นผิวเท่านั้น ไม่รองรับรูป texture</small></label><button className="button button-primary" disabled={busy}>{busy ? "กำลังส่งงาน…" : "ส่งไฟล์"}</button><small>PDF, รูปภาพ, Word, STL, OBJ, GLB หรือ glTF · ไม่เกิน 50 MB รวม OBJ และ MTL · รองรับ GLB/glTF แบบฝังข้อมูล แนะนำ Blender → glTF Binary (.glb)</small></form>
         <section className="student-submission-groups"><h3>ไฟล์ทำงาน Blender — ยังไม่ใช่การส่งงาน</h3><p className="muted">ดาวน์โหลดมาแก้ไขใน Blender แล้วอัปโหลดไฟล์ใหม่เพื่อแทนที่ไฟล์เดิม · ก่อนย้ายไปใช้คอมพิวเตอร์เครื่องอื่น ให้เลือก File → External Data → Pack Resources เพื่อรวม texture ไว้ในไฟล์</p>{workingFile ? <article className="work-file"><span className="file-kind">BLEND</span><div className="work-file-copy"><strong>{workingFile.originalName}</strong><small>บันทึก {formatDate(workingFile.createdAt)} · {formatBytes(Number(workingFile.sizeBytes))}</small></div><div className="work-file-actions"><a className="text-button" href={`/api/student/files/${workingFile.id}/content`} download>ดาวน์โหลด</a><button className="text-button subdued" type="button" disabled={busy} onClick={() => void removeWorkingFile()}>ลบ</button></div></article> : <p className="muted">ยังไม่มีไฟล์ทำงานที่บันทึกไว้</p>}<form className="work-upload" onSubmit={(event) => void saveWorkingFile(event)}><label className="work-file-input">{workingFile ? "เลือกไฟล์ Blender ใหม่เพื่อแทนที่" : "เลือกไฟล์ Blender"}<input name="workingFile" type="file" accept=".blend" required/></label><button className="button button-quiet" disabled={busy || !filesAreCurrent}>{workingFile ? "แทนที่ไฟล์ทำงาน" : "บันทึกไฟล์ทำงาน"}</button><small>ไฟล์ .blend · ไม่เกิน 50 MB · ไม่รวมในจำนวนงานที่ส่ง</small></form></section>
         <div className="student-submission-groups"><h3>ใบงานและคำชี้แจง</h3>{worksheets.length ? worksheets.map((file) => <FileRow key={file.id} file={file} onPreview={setPreview}/>) : <p className="muted">ครูยังไม่ได้แนบใบงาน</p>}<h3>งานที่ส่งแล้ว</h3>{submissions.length ? submissions.map((file) => <FileRow key={file.id} file={file} onPreview={setPreview}/>) : <p className="muted">ยังไม่ได้ส่งงานนี้</p>}</div>
       </section>}

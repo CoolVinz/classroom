@@ -14,6 +14,8 @@ Each assignment has an editable maximum score (default 100). Scores allow zero a
 
 Only the published score and its published maximum snapshot are included in the class gradebook (MOD-008); private drafts stay in the assignment review screen.
 
+Assignments can select a [Wio Terminal lab preset](REQ-002-wio-terminal-labs.md). The student workspace runs a bounded Arduino subset in a browser worker. Practice checks give immediate feedback without awarding marks. Student `.ino` uploads require an active lab assignment and valid UTF-8 within 16 KiB and the configured file limit. Sketches use the normal private submission, file quota, and marking workflow.
+
 ## Workflows and rules
 
 - Teachers create or edit an assignment and attach one or more worksheet files.
@@ -45,6 +47,8 @@ Only the published score and its published maximum snapshot are included in the 
 
 ```text
 UI and assignment limits: web/src/ClassroomWork.tsx
+Wio workspace and interpreter: web/src/WioLab.tsx, web/src/wio-board.ts, web/src/wio-sketch.ts, src/wio-labs.ts
+Wio preset migration and tests: src/db/migrations/029_wio_terminal_labs.sql, web/src/wio-board.test.ts
 Assessment list and draft/publish controls: web/src/AssignmentAssessment.tsx
 Thumbnails and job queue: web/src/FileThumbnail.tsx, web/src/thumbnail-jobs.ts
 Shared model loading/rendering and OBJ material colors: web/src/model-view.ts, web/src/model-preview.worker.ts, web/src/parse-obj-model.ts, web/src/obj-materials.ts

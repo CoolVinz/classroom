@@ -43,5 +43,5 @@ export function FileThumbnail({ file, onPreview, student = false }: { file: Thum
   const preview = thumbnail ? <img src={thumbnail} alt={"ตัวอย่าง " + file.originalName} loading="lazy" decoding="async" onError={() => { setHasThumbnail(false); if (source) setFailed(true); }}/> : <span>{model ? "3D" : "IMG"}<small>{failed ? "ไม่มีภาพตัวอย่าง" : generating ? "กำลังสร้างภาพ…" : model ? "ตัวอย่างโมเดล" : "ตัวอย่างรูปภาพ"}</small></span>;
   if (model) return <button ref={element as Ref<HTMLButtonElement>} type="button" className="work-thumbnail" onClick={onPreview} aria-label={"แสดงตัวอย่าง " + file.originalName} title={failed ? "สร้างภาพตัวอย่างไม่สำเร็จ · คลิกเพื่อเปิดโมเดล" : "คลิกเพื่อเปิดโมเดล"}>{preview}</button>;
   if (image) return <a ref={element as Ref<HTMLAnchorElement>} className="work-thumbnail" href={path} target="_blank" rel="noreferrer" aria-label={"เปิดภาพ " + file.originalName}>{preview}</a>;
-  return <span className="file-kind">{file.mediaType.includes("word") ? "DOC" : "PDF"}</span>;
+  return <span className="file-kind">{file.originalName.toLowerCase().endsWith(".ino") ? "INO" : file.mediaType.includes("word") ? "DOC" : "PDF"}</span>;
 }

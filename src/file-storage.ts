@@ -1,3 +1,4 @@
+import { wioSketchMaxBytes, wioSketchMediaType } from "./wio-labs";
 import { inspectGLTF } from "./gltf";
 import { access, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -338,6 +339,16 @@ export async function validateMaterialUpload(file: File, objBytes: number) {
 
 export async function validateStudentUpload(file: File) {
   const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+  if (extension === "ino" && file.name.toLowerCase().endsWith(".ino")) {
+    const limit = Math.min(maxUploadBytes(), wioSketchMaxBytes);
+    if (!file.size || file.size > limit) throw new HttpError(413, `ไฟล์ .ino ต้องมีขนาดไม่เกิน ${limit.toLocaleString("en")} ไบต์`);
+    let text: string;
+    try { text = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer()); }
+    catch { throw new HttpError(422, "ไฟล์ .ino ต้องเป็นข้อความ UTF-8"); }
+    if (!text.trim() || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(text)) throw new HttpError(422, "ไฟล์ .ino ต้องเป็นข้อความ UTF-8");
+    const originalName = file.name.replace(/[\\/\0-\x1f\x7f]/g, "_").trim().slice(-255);
+    return { mediaType: wioSketchMediaType, originalName, kind: "worksheet" as const };
+  }
   const type = FILE_TYPES[extension];
   if (!type) throw new HttpError(422, "ไม่รองรับชนิดไฟล์นี้");
   return { ...(await validateUpload(file, type.kind)), kind: type.kind };

@@ -1,3 +1,4 @@
+import { wioSketchMediaType, type WioLabId } from "../wio-labs";
 import { Elysia, t } from "elysia";
 import { randomUUID } from "node:crypto";
 import { mkdir, rename, rm } from "node:fs/promises";
@@ -56,7 +57,7 @@ export const studentCourseworkRoutes = new Elysia({ prefix: "/api/student" })
   .get("/assignments", async ({ request }) => {
     const actor = await requireStudent(request);
     return sql`
-      SELECT a.id AS "assignmentId", a.title, a.instructions,
+      SELECT a.id AS "assignmentId", a.title, a.instructions, a.wio_lab AS "wioLab",
         c.id AS "classroomId", c.name AS "classroomName",
         a.created_at AS "createdAt", q.published_score AS "publishedScore",
         q.published_max_score AS "publishedMaxScore", q.published_feedback AS "publishedFeedback",
@@ -131,8 +132,8 @@ export const studentCourseworkRoutes = new Elysia({ prefix: "/api/student" })
       if (materialTempPath && body.materialFile) await Bun.write(materialTempPath, body.materialFile);
       await sql.begin(async (tx) => {
         await tx.unsafe("SELECT pg_advisory_xact_lock(870010022)");
-        const [membership] = await tx<{ studentId: string }[]>`
-          SELECT s.id AS "studentId"
+        const [membership] = await tx<{ wioLab: WioLabId | null }[]>`
+          SELECT a.wio_lab AS "wioLab"
           FROM classroom.students s
           JOIN classroom.classrooms c ON c.id = s.classroom_id
           JOIN classroom.assignments a ON a.classroom_id = c.id
@@ -142,6 +143,9 @@ export const studentCourseworkRoutes = new Elysia({ prefix: "/api/student" })
           FOR SHARE OF s, c, a
         `;
         if (!membership) throw new HttpError(404, "ไม่พบงานนี้");
+        if (valid.mediaType === wioSketchMediaType && !membership.wioLab) {
+          throw new HttpError(422, "ส่งไฟล์ .ino ได้เฉพาะงาน Wio Terminal");
+        }
         const [usage] = await tx<{ used: string }[]>`
           SELECT ((SELECT COALESCE(SUM(size_bytes + COALESCE(material_size_bytes, 0) + COALESCE(thumbnail_size_bytes, 0)), 0) FROM classroom.files) +
             (SELECT COALESCE(SUM(size_bytes), 0) FROM classroom.lesson_page_images) +

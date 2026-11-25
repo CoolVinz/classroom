@@ -1,3 +1,4 @@
+import { wioLabIds, wioLabs, type WioLabId } from "../../src/wio-labs";
 import { lazy, Suspense, useCallback, useEffect, useState, type FormEvent } from "react";
 import { api } from "./api";
 import { FileThumbnail } from "./FileThumbnail";
@@ -7,7 +8,7 @@ import { AssignmentAssessment } from "./AssignmentAssessment";
 const ModelPreview = lazy(() => import("./ModelPreview"));
 type Classroom = { id: string };
 type Student = { id: string; displayName: string; studentCode: string | null; studentNumber: number | null; archived: boolean };
-type Assignment = { id: string; title: string; instructions: string; maxScore: number | string; archived: boolean; fileCount: number };
+type Assignment = { id: string; title: string; instructions: string; maxScore: number | string; wioLab: WioLabId | null; archived: boolean; fileCount: number };
 type ClassFile = { id: string; studentId: string | null; studentName: string | null; kind: "worksheet" | "model" | "submission"; originalName: string; mediaType: string; sizeBytes: number | string; createdAt: string; studentSubmission: boolean; thumbnailAvailable: boolean; materialAvailable: boolean };
 
 export function ClassroomWork({ room, onError }: { room: Classroom; onError: (message: string) => void }) {
@@ -20,6 +21,7 @@ export function ClassroomWork({ room, onError }: { room: Classroom; onError: (me
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState("");
   const [instructions, setInstructions] = useState("");
+  const [lab, setLab] = useState<WioLabId | "">("");
   const [maxScore, setMaxScore] = useState("100");
   const [assessmentRefresh, setAssessmentRefresh] = useState(0);
   const [kind, setKind] = useState<"worksheet" | "model">("worksheet");
@@ -55,10 +57,10 @@ export function ClassroomWork({ room, onError }: { room: Classroom; onError: (me
     event.preventDefault();
     try {
       if (creating) {
-        const next = await api<Assignment>("/classrooms/" + room.id + "/assignments", { method: "POST", body: JSON.stringify({ title, instructions, maxScore: Number(maxScore) }) });
+        const next = await api<Assignment>("/classrooms/" + room.id + "/assignments", { method: "POST", body: JSON.stringify({ title, instructions, maxScore: Number(maxScore), wioLab: lab || null }) });
         await loadAssignments(); setSelectedId(next.id); setCreating(false);
       } else if (selected) {
-        await api("/classrooms/" + room.id + "/assignments/" + selected.id, { method: "PATCH", body: JSON.stringify({ title, instructions, maxScore: Number(maxScore) }) });
+        await api("/classrooms/" + room.id + "/assignments/" + selected.id, { method: "PATCH", body: JSON.stringify({ title, instructions, maxScore: Number(maxScore), wioLab: lab || null }) });
         await loadAssignments(); setEditing(false);
       }
     } catch (reason) { onError(reason instanceof Error ? reason.message : "บันทึกงานไม่สำเร็จ"); }
@@ -110,18 +112,26 @@ export function ClassroomWork({ room, onError }: { room: Classroom; onError: (me
     catch (reason) { onError(reason instanceof Error ? reason.message : "ลบไฟล์ไม่สำเร็จ"); }
   }
 
+  const labSelector = <label>รูปแบบงาน<select value={lab} onChange={(event) => {
+    const next = event.target.value as WioLabId | "";
+    setLab(next);
+    if (creating && next) {
+      if (!title.trim() || (lab && title === wioLabs[lab].title)) setTitle(wioLabs[next].title);
+      if (!instructions.trim() || (lab && instructions === wioLabs[lab].instructions)) setInstructions(wioLabs[next].instructions);
+    }
+  }}><option value="">งานทั่วไป</option>{wioLabIds.map((id) => <option key={id} value={id}>Wio Terminal · {wioLabs[id].title}</option>)}</select></label>;
   const visibleAssignments = assignments.filter((assignment) => showArchived || !assignment.archived);
   const accept = kind === "model" ? ".stl,.obj,.glb,.gltf" : ".pdf,.png,.jpg,.jpeg,.doc,.docx";
 
   return <>
-    <section className="panel"><header className="panel-heading"><div><p className="eyebrow">งานประจำห้องเรียน</p><h2>งานและไฟล์</h2><p className="muted">เพิ่มใบงาน แล้วแนบโมเดลของนักเรียนแต่ละคน</p></div><Button onClick={() => { setCreating(true); setEditing(false); setTitle(""); setInstructions(""); setMaxScore("100"); }}>＋ สร้างงาน</Button></header>
+    <section className="panel"><header className="panel-heading"><div><p className="eyebrow">งานประจำห้องเรียน</p><h2>งานและไฟล์</h2><p className="muted">เพิ่มใบงาน แล้วแนบโมเดลของนักเรียนแต่ละคน</p></div><Button onClick={() => { setCreating(true); setEditing(false); setTitle(""); setInstructions(""); setMaxScore("100"); setLab(""); }}>＋ สร้างงาน</Button></header>
       <div className="assignment-list">{visibleAssignments.map((assignment) => <div className="assignment-row" key={assignment.id}><button className={"assignment-select " + (assignment.id === selectedId ? "selected" : "")} onClick={() => { setSelectedId(assignment.id); setCreating(false); setEditing(false); }}><strong>{assignment.title}</strong><small>{assignment.fileCount} ไฟล์{assignment.archived ? " · เก็บแล้ว" : ""}</small></button>{assignment.id === selectedId && <span className="assignment-marker">●</span>}</div>)}{!visibleAssignments.length && <p className="muted assignment-empty">ยังไม่มีงานในห้องเรียนนี้</p>}</div>
       <label className="archive-filter"><input type="checkbox" checked={showArchived} onChange={(event) => setShowArchived(event.target.checked)}/> แสดงงานที่เก็บแล้ว</label>
     </section>
 
-    {creating && <section className="panel"><header className="panel-heading compact"><div><h2>สร้างงาน</h2></div><button className="text-button" onClick={() => setCreating(false)}>ยกเลิก</button></header><form className="assignment-form" onSubmit={(event) => void saveAssignment(event)}><label>ชื่องาน<input maxLength={120} value={title} onChange={(event) => setTitle(event.target.value)} required/></label><label>คะแนนเต็ม<input type="number" min="0.01" step="0.01" max="9999999999.99" value={maxScore} onChange={(event) => setMaxScore(event.target.value)} required/></label><label>คำชี้แจง <small>(ไม่บังคับ)</small><textarea maxLength={5000} rows={3} value={instructions} onChange={(event) => setInstructions(event.target.value)}/></label><Button disabled={!title.trim() || !maxScore}>บันทึกงาน</Button></form></section>}
+    {creating && <section className="panel"><header className="panel-heading compact"><div><h2>สร้างงาน</h2></div><button className="text-button" onClick={() => setCreating(false)}>ยกเลิก</button></header><form className="assignment-form" onSubmit={(event) => void saveAssignment(event)}>{labSelector}<label>ชื่องาน<input maxLength={120} value={title} onChange={(event) => setTitle(event.target.value)} required/></label><label>คะแนนเต็ม<input type="number" min="0.01" step="0.01" max="9999999999.99" value={maxScore} onChange={(event) => setMaxScore(event.target.value)} required/></label><label>คำชี้แจง <small>(ไม่บังคับ)</small><textarea maxLength={5000} rows={3} value={instructions} onChange={(event) => setInstructions(event.target.value)}/></label><Button disabled={!title.trim() || !maxScore}>บันทึกงาน</Button></form></section>}
 
-    {selected && <section className="panel"><header className="panel-heading"><div><p className="eyebrow">{room.id && "งานในห้องเรียน"}{selected.archived ? " · เก็บแล้ว" : ""}</p>{editing ? <form className="assignment-form" onSubmit={(event) => void saveAssignment(event)}><label>ชื่องาน<input maxLength={120} value={title} onChange={(event) => setTitle(event.target.value)} required/></label><label>คะแนนเต็ม<input type="number" min="0.01" step="0.01" max="9999999999.99" value={maxScore} onChange={(event) => setMaxScore(event.target.value)} required/></label><label>คำชี้แจง<textarea maxLength={5000} rows={3} value={instructions} onChange={(event) => setInstructions(event.target.value)}/></label><div className="assignment-actions"><Button disabled={!title.trim() || !maxScore}>บันทึก</Button><Button type="button" tone="quiet" onClick={() => setEditing(false)}>ยกเลิก</Button></div></form> : <><h2>{selected.title}</h2><p className="muted">คะแนนเต็ม {Number(selected.maxScore)} คะแนน</p>{selected.instructions && <p className="muted assignment-instructions">{selected.instructions}</p>}</>}</div><div className="assignment-actions">{!editing && !selected.archived && <button className="text-button" onClick={() => { setTitle(selected.title); setInstructions(selected.instructions); setMaxScore(String(selected.maxScore)); setEditing(true); }}>แก้ไข</button>}{!editing && <Button tone="quiet" onClick={() => void archiveAssignment(!selected.archived)}>{selected.archived ? "นำกลับมา" : "เก็บงาน"}</Button>}</div></header>
+    {selected && <section className="panel"><header className="panel-heading"><div><p className="eyebrow">{room.id && "งานในห้องเรียน"}{selected.archived ? " · เก็บแล้ว" : ""}</p>{editing ? <form className="assignment-form" onSubmit={(event) => void saveAssignment(event)}>{labSelector}<label>ชื่องาน<input maxLength={120} value={title} onChange={(event) => setTitle(event.target.value)} required/></label><label>คะแนนเต็ม<input type="number" min="0.01" step="0.01" max="9999999999.99" value={maxScore} onChange={(event) => setMaxScore(event.target.value)} required/></label><label>คำชี้แจง<textarea maxLength={5000} rows={3} value={instructions} onChange={(event) => setInstructions(event.target.value)}/></label><div className="assignment-actions"><Button disabled={!title.trim() || !maxScore}>บันทึก</Button><Button type="button" tone="quiet" onClick={() => setEditing(false)}>ยกเลิก</Button></div></form> : <><h2>{selected.title}</h2>{selected.wioLab && <p>Wio Terminal · {wioLabs[selected.wioLab].title}</p>}<p className="muted">คะแนนเต็ม {Number(selected.maxScore)} คะแนน</p>{selected.instructions && <p className="muted assignment-instructions">{selected.instructions}</p>}</>}</div><div className="assignment-actions">{!editing && !selected.archived && <button className="text-button" onClick={() => { setTitle(selected.title); setInstructions(selected.instructions); setMaxScore(String(selected.maxScore)); setLab(selected.wioLab ?? ""); setEditing(true); }}>แก้ไข</button>}{!editing && <Button tone="quiet" onClick={() => void archiveAssignment(!selected.archived)}>{selected.archived ? "นำกลับมา" : "เก็บงาน"}</Button>}</div></header>
       {!selected.archived && !editing && <form className="work-upload" onSubmit={(event) => void uploadFiles(event)}><label>ประเภทไฟล์<select value={kind} onChange={(event) => setKind(event.target.value as "worksheet" | "model")}><option value="worksheet">ใบงาน / เอกสาร</option><option value="model">โมเดลของนักเรียน</option></select></label>{kind === "model" && <label>นักเรียน<select value={studentId} onChange={(event) => setStudentId(event.target.value)} required><option value="">เลือกนักเรียน</option>{students.filter((student) => !student.archived).map((student) => <option value={student.id} key={student.id}>{student.studentNumber ?? "—"} · {student.displayName}{student.studentCode ? " · " + student.studentCode : ""}</option>)}</select></label>}<label className="work-file-input">เลือกไฟล์<input name="uploadFiles" type="file" accept={accept} multiple required/></label>{kind === "model" && <label className="work-file-input">ไฟล์สี MTL (ไม่บังคับ)<input name="materialFile" type="file" accept=".mtl"/><small>เลือกคู่กับ OBJ ไฟล์เดียว · สีพื้นผิวเท่านั้น ไม่รองรับรูป texture</small></label>}<Button disabled={uploading || (kind === "model" && !studentId)}>{uploading ? "กำลังอัปโหลด…" : "อัปโหลดไฟล์"}</Button><small>ไม่เกิน 50 MB รวม OBJ และ MTL · รองรับ GLB/glTF แบบฝังข้อมูล แนะนำ Blender → glTF Binary (.glb)</small></form>}
       <AssignmentAssessment key={selected.id} classroomId={room.id} assignmentId={selected.id} maxScore={selected.maxScore} onPreview={setPreview} onFilesChanged={() => { void loadFiles(); }} refresh={assessmentRefresh}/>
       <h3 className="worksheet-heading">ใบงานที่แนบ</h3>
