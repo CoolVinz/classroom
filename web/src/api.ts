@@ -5,6 +5,9 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     headers: Object.assign({}, options.body && !multipart ? { "Content-Type": "application/json" } : {}, options.headers ?? {}),
   });
   const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result.error || "ทำรายการไม่สำเร็จ กรุณาลองอีกครั้ง");
+  if (!response.ok) throw new ApiError(result.error || "ทำรายการไม่สำเร็จ กรุณาลองอีกครั้ง", response.status);
   return result as T;
+}
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
 }

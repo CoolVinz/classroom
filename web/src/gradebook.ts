@@ -1,6 +1,6 @@
 export type GradebookScore = { studentId: string; itemId: string; score: number; maxScore: number };
 export type GradebookExportStudent = { studentId: string; studentCode: string | null; studentNumber: number | null; displayName: string };
-export type GradebookExportItem = { id: string; name: string; maxScore: number; kind?: "assignment" | "quiz" | "manual" };
+export type GradebookExportItem = { id: string; name: string; maxScore: number; kind?: "assignment" | "quiz" | "worksheet" | "manual" };
 
 export function gradebookTotalForStudent(
   studentId: string,

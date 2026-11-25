@@ -15,8 +15,8 @@ Browser
         │           │     └── PostgreSQL 18+ / classroom schema
         │           └── protected file routes
         │                 └── persistent Coolify volume
-        ├── public /lessons/:id reader
-        ├── authenticated /quizzes/:id student attempt page
+        ├── classroom /lessons/:id reader with legacy public links
+        ├── authenticated quiz and worksheet attempt pages
         ├── browser-only model parsing worker
         └── Colyseus WebSocket client
               └── separate Node.js gallery server

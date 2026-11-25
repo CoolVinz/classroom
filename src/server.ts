@@ -16,6 +16,7 @@ import { attendanceScheduleRoutes } from "./routes/attendance-schedule";
 import { studentAttendanceRoutes } from "./routes/student-attendance";
 import { lessonPageApiRoutes } from "./routes/lesson-pages";
 import { quizRoutes, studentQuizRoutes } from "./routes/quizzes";
+import { worksheetRoutes, studentWorksheetRoutes } from "./routes/worksheets";
 import { appFramePolicy } from "./content-security-policy";
 import { galleryRoutes } from "./routes/gallery";
 import { gradebookRoutes } from "./routes/gradebook";
@@ -49,6 +50,8 @@ const app = new Elysia({ serve: { maxRequestBodySize: maxUploadBytes() + 1024 * 
   .use(studentAttendanceRoutes)
   .use(quizRoutes)
   .use(studentQuizRoutes)
+  .use(worksheetRoutes)
+  .use(studentWorksheetRoutes)
   .use(galleryRoutes)
   .use(gradebookRoutes)
   .use(groupSetRoutes)

@@ -6,7 +6,7 @@
 
 ## Purpose and behavior
 
-Give teachers one class-level view of scores from published assignment assessments, completed quiz attempts, and manually created score columns. Students cannot access this view. Assignment drafts and unfinished quiz attempts remain private and do not appear as grades.
+Give teachers one class-level view of scores from published assignment assessments, completed quiz attempts, submitted worksheet activities, and manually created score columns. Students cannot access this view. Assignment drafts and unfinished quiz or worksheet attempts have no grade. Worksheet scores are read-only here and use the round’s fixed maximum.
 
 Teachers can create a manual score item with a name and maximum, edit scores for the roster, save a whole column atomically, and archive or restore manual columns. A blank clears a saved manual score; `0` is an explicit score. Revision checks reject stale column saves. Archived students and archived items can be included through a filter; their records remain available.
 
@@ -14,7 +14,7 @@ Teachers choose which visible items contribute to each student's total. The grad
 
 ## Dependencies and consumers
 
-**dependencies:** MOD-002, MOD-004, MOD-006, DAT-001  
+**dependencies:** MOD-002, MOD-004, MOD-006, MOD-009, DAT-001
 **used_by:** teacher classroom score review and Excel export
 
 **Code Map:**
@@ -25,6 +25,7 @@ Total calculation and checks: web/src/gradebook.ts, web/src/gradebook.test.ts
 Teacher-only read and manual score APIs: src/routes/gradebook.ts
 Published assignment assessment source: src/routes/coursework.ts, classroom.assignment_assessments
 Completed quiz result source: src/routes/quizzes.ts, classroom.quiz_attempts
+Submitted worksheet source: src/routes/worksheets.ts, classroom.worksheet_attempts
 Manual score tables: src/db/migrations/019_gradebook.sql
 Migration runner: src/db/bootstrap.ts
 ```

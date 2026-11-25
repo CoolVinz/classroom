@@ -23,7 +23,7 @@ export const gradebookRoutes = new Elysia({ prefix: "/api" })
   .get("/classrooms/:classroomId/gradebook", async ({ params, request }) => {
     const actor = await requireActor(request);
     await ownedClassroom(params.classroomId, actor.id);
-    const [students, assignments, assignmentScores, quizzes, quizScores, columns, manualScores] = await Promise.all([
+    const [students, assignments, assignmentScores, quizzes, quizScores, worksheets, worksheetScores, columns, manualScores] = await Promise.all([
       sql`SELECT id AS "studentId", student_code AS "studentCode", student_number AS "studentNumber",
         display_name AS "displayName", archived_at IS NOT NULL AS archived
         FROM classroom.students WHERE classroom_id = ${params.classroomId}
@@ -46,6 +46,11 @@ export const gradebookRoutes = new Elysia({ prefix: "/api" })
         FROM classroom.quiz_attempts a JOIN classroom.classroom_quizzes r ON r.id = a.classroom_quiz_id
         JOIN classroom.quizzes q ON q.id = r.quiz_id AND q.trashed_at IS NULL
         WHERE r.classroom_id = ${params.classroomId} AND a.finished_at IS NOT NULL`,
+      sql`SELECT id, title AS name, status, max_score AS "maxScore" FROM classroom.worksheet_rounds
+        WHERE classroom_id = ${params.classroomId} ORDER BY created_at, id`,
+      sql`SELECT a.student_id AS "studentId", a.round_id AS "itemId", a.score, r.max_score AS "maxScore"
+        FROM classroom.worksheet_attempts a JOIN classroom.worksheet_rounds r ON r.id = a.round_id
+        WHERE a.classroom_id = ${params.classroomId} AND a.submitted_at IS NOT NULL`,
       sql`SELECT id, name, max_score::float8 AS "maxScore", revision,
         archived_at IS NOT NULL AS archived FROM classroom.gradebook_columns
         WHERE classroom_id = ${params.classroomId} ORDER BY archived_at NULLS FIRST, created_at, id`,
@@ -59,9 +64,10 @@ export const gradebookRoutes = new Elysia({ prefix: "/api" })
       items: [
         ...assignments.map((item) => ({ ...item, kind: "assignment" as const })),
         ...quizzes.map((item) => ({ ...item, kind: "quiz" as const, archived: false })),
+        ...worksheets.map((item) => ({ ...item, kind: "worksheet" as const, archived: false })),
         ...columns.map((item) => ({ ...item, kind: "manual" as const })),
       ],
-      scores: [...assignmentScores, ...quizScores, ...manualScores],
+      scores: [...assignmentScores, ...quizScores, ...worksheetScores, ...manualScores],
     };
   }, { params: t.Object({ classroomId: t.String({ format: "uuid" }) }) })
   .post("/classrooms/:classroomId/gradebook/columns", async ({ params, body, request }) => {

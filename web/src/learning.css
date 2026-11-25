@@ -1,0 +1,39 @@
+.learning-panel {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: clamp(14px, 3vw, 24px);
+  margin-bottom: 16px;
+  align-items: start;
+  justify-items: start;
+}
+.learning-panel h2, .learning-panel p { margin: 0; }
+.learning-panel label:not(.worksheet-option) { display: grid; gap: 5px; }
+.learning-panel input:not([type=radio]):not([type=checkbox]), .learning-panel textarea, .learning-panel select {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+  color: var(--ink);
+  font: inherit;
+}
+.worksheet-questions, .worksheet-round { display: grid; gap: 10px; width: 100%; }
+.worksheet-questions fieldset, .worksheet-round {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow-wrap: anywhere;
+}
+.worksheet-questions legend { max-width: 100%; white-space: pre-wrap; font-weight: 650; }
+.worksheet-questions small { font-weight: 400; }
+.worksheet-option { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.worksheet-option .text-button { flex-shrink: 0; }
+.worksheet-score { font-size: 1.2rem; font-weight: 700; }

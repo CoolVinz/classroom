@@ -1,3 +1,4 @@
+import { LessonClassAssignments } from "./LessonClassAssignments";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import { LessonContent, type LessonBlock } from "./LessonContent";
@@ -141,7 +142,7 @@ export function LessonLibrary({ onError, onDirtyChange }: { onError: (message: s
 
   return <section className="lesson-editor">
     <header className="page-heading"><div><button className="text-button" onClick={() => { if (dirty && !window.confirm("ออกจากบทเรียนโดยไม่บันทึกการแก้ไขหรือไม่?")) return; setLesson(null); void load(); }}>← บทเรียนทั้งหมด</button><p className="eyebrow">{lesson.publishedAt ? "เผยแพร่แล้ว" : "ฉบับร่าง"}</p><h1>แก้ไขบทเรียน</h1></div><div className="lesson-actions">
-      {lesson.publishedAt && publicUrl && <><button className="button button-quiet" onClick={() => window.open(publicUrl, "_blank", "noopener,noreferrer")}>ดูหน้าสาธารณะ</button><button className="button button-quiet" onClick={() => void navigator.clipboard.writeText(publicUrl).then(() => onError("คัดลอกลิงก์แล้ว")).catch(() => onError("คัดลอกลิงก์ไม่สำเร็จ"))}>คัดลอกลิงก์</button></>}
+      {lesson.publishedAt && publicUrl && <><button className="button button-quiet" onClick={() => void navigator.clipboard.writeText(publicUrl).then(() => onError("คัดลอกลิงก์แล้ว")).catch(() => onError("คัดลอกลิงก์ไม่สำเร็จ"))}>คัดลอกลิงก์</button></>}
       <button className="button button-danger" disabled={busy} onClick={() => void trashLesson(lesson.id, title, revision, dirty)}>ย้ายไปถังขยะ</button>
       <button className="button button-quiet" disabled={busy || !dirty} onClick={() => void save(false)}>บันทึกฉบับร่าง</button>
       <button className="button button-primary" disabled={busy || !dirty && Boolean(lesson.publishedAt)} onClick={() => void save(true)}>{lesson.publishedAt ? "บันทึกและเผยแพร่" : "เผยแพร่"}</button>
@@ -149,6 +150,7 @@ export function LessonLibrary({ onError, onDirtyChange }: { onError: (message: s
     </div></header>
     {revision !== lesson.revision && <p className="notice">บทเรียนนี้ถูกแก้ไขอีกหน้าต่างหนึ่ง กรุณากลับไปโหลดข้อมูลล่าสุดก่อนบันทึก</p>}
     <label className="lesson-title-field">ชื่อบทเรียน<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={120} /></label>
+    <LessonClassAssignments key={lesson.id} id={lesson.id} published={Boolean(lesson.publishedAt)} onError={onError} />
     <section className="panel lesson-quiz-links"><h2>ปุ่มแบบทดสอบในบทเรียน</h2><p className="muted">ปุ่มจะแสดงนอกเนื้อหา HTML และเปิดแบบทดสอบสำหรับนักเรียนที่เข้าสู่ระบบแล้ว</p>
       {quizLinks.map((link, index) => <div className="lesson-quiz-link" key={link.quizId}><label>แบบทดสอบ<select value={link.quizId} onChange={(event) => setQuizLinks((all) => all.map((item, i) => i === index ? { ...item, quizId: event.target.value } : item))}>{quizzes.filter((quiz) => quiz.id === link.quizId || !quiz.trashed).map((quiz) => <option key={quiz.id} value={quiz.id}>{quiz.publishedTitle ?? quiz.title}{quiz.trashed ? " · อยู่ในถังขยะชั่วคราว" : quiz.publishedAt ? " · เผยแพร่แล้ว" : " · ยังไม่เผยแพร่"}</option>)}</select></label><label>ข้อความบนปุ่ม<input value={link.label} maxLength={100} onChange={(event) => setQuizLinks((all) => all.map((item, i) => i === index ? { ...item, label: event.target.value } : item))}/></label><button className="text-button danger" onClick={() => setQuizLinks((all) => all.filter((_, i) => i !== index))}>นำออก</button></div>)}
       <div className="lesson-add-controls"><select aria-label="เลือกแบบทดสอบ" value={linkQuizId} onChange={(event) => setLinkQuizId(event.target.value)}><option value="">เลือกแบบทดสอบ</option>{quizzes.filter((quiz) => !quiz.trashed && !quizLinks.some((link) => link.quizId === quiz.id)).map((quiz) => <option key={quiz.id} value={quiz.id}>{quiz.title}</option>)}</select><button className="button button-quiet" disabled={!linkQuizId} onClick={() => { const quiz = quizzes.find((item) => item.id === linkQuizId); if (quiz) setQuizLinks((all) => [...all, { quizId: quiz.id, label: quiz.publishedTitle ?? quiz.title }]); setLinkQuizId(""); }}>＋ เพิ่มปุ่มแบบทดสอบ</button></div>

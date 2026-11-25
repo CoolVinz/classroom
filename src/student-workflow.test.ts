@@ -50,6 +50,7 @@ describe("student submission API", () => {
 
     const { sql } = await import("./db/client");
     const { createSession, createStudentSession } = await import("./auth/session");
+    const { worksheetRoutes, studentWorksheetRoutes } = await import("./routes/worksheets");
     const { galleryRoutes } = await import("./routes/gallery");
     const [{ authRoutes }, { studentAuthRoutes }, { classroomRoutes }, { courseworkRoutes }, { studentCourseworkRoutes }, { attendanceScheduleRoutes }, { studentAttendanceRoutes }, { lessonPageApiRoutes }, { quizRoutes, studentQuizRoutes }, { gradebookRoutes }, { groupSetRoutes }, { handleAppError }] = await Promise.all([
       import("./routes/auth"), import("./routes/student-auth"), import("./routes/classrooms"),
@@ -60,7 +61,7 @@ describe("student submission API", () => {
       import("./routes/group-sets"), import("./error-handler"),
     ]);
     const { ensureUploadRoot, cleanupUnusedLessonImages } = await import("./file-storage");
-    const app = new Elysia().onError(handleAppError).use(authRoutes).use(studentAuthRoutes).use(classroomRoutes).use(attendanceScheduleRoutes).use(courseworkRoutes).use(studentCourseworkRoutes).use(studentAttendanceRoutes).use(quizRoutes).use(studentQuizRoutes).use(gradebookRoutes).use(groupSetRoutes).use(lessonPageApiRoutes).use(galleryRoutes);
+    const app = new Elysia().onError(handleAppError).use(authRoutes).use(studentAuthRoutes).use(classroomRoutes).use(attendanceScheduleRoutes).use(courseworkRoutes).use(studentCourseworkRoutes).use(studentAttendanceRoutes).use(quizRoutes).use(studentQuizRoutes).use(gradebookRoutes).use(groupSetRoutes).use(lessonPageApiRoutes).use(worksheetRoutes).use(studentWorksheetRoutes).use(galleryRoutes);
     const teacherId = randomUUID(); const accountId = randomUUID();
     const roomA = randomUUID(); const roomB = randomUUID(); const emptyRoom = randomUUID();
     const studentA = randomUUID(); const studentB = randomUUID(); const studentC = randomUUID(); const studentD = randomUUID();
@@ -327,6 +328,7 @@ describe("student submission API", () => {
       expect(lessonResponse.status).toBe(200);
       const quizLesson = await lessonResponse.json() as { id: string; revision: number; blocks: unknown[] };
       lessonPageIds.push(quizLesson.id);
+      await sql`UPDATE classroom.lesson_pages SET legacy_public = TRUE WHERE id = ${quizLesson.id}`;
       const draftLessonBody = { title: "Quiz link lesson", blocks: [], quizLinks: [{ quizId: createdQuizBody.id, label: "Start quiz" }], expectedRevision: quizLesson.revision };
       const savedLessonDraft = await app.handle(new Request(`http://localhost/api/lesson-pages/${quizLesson.id}/draft`, {
         method: "PUT", headers: { ...teacherHeaders, "content-type": "application/json" }, body: JSON.stringify(draftLessonBody),
@@ -766,6 +768,7 @@ describe("student submission API", () => {
       expect(lessonCreate.status).toBe(200);
       const lesson = await lessonCreate.json() as { id: string; revision: number };
       lessonPageIds.push(lesson.id);
+      await sql`UPDATE classroom.lesson_pages SET legacy_public = TRUE WHERE id = ${lesson.id}`;
       expect((await (await app.handle(new Request("http://localhost/api/lesson-pages", { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).json() as { id: string }[]).some((item) => item.id === lesson.id)).toBe(false);
       const png = await sharp({ create: { width: 32, height: 24, channels: 3, background: { r: 35, g: 120, b: 95 } } }).png().toBuffer();
       const invalidImageForm = new FormData(); invalidImageForm.set("file", new File(["not an image"], "fake.png", { type: "image/png" }));
@@ -790,6 +793,7 @@ describe("student submission API", () => {
       expect(codeCreate.status).toBe(200);
       const codeLesson = await codeCreate.json() as { id: string; revision: number; editorMode: string; blocks: { type: string }[] };
       lessonPageIds.push(codeLesson.id);
+      await sql`UPDATE classroom.lesson_pages SET legacy_public = TRUE WHERE id = ${codeLesson.id}`;
       expect(codeLesson).toMatchObject({ editorMode: "code", blocks: [{ type: "code", framework: "none" }] });
       expect((await app.handle(new Request(`http://localhost/api/lesson-pages/${codeLesson.id}/images`, { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).status).toBe(404);
       const codeImageForm = new FormData(); codeImageForm.set("file", new File([png], "code-image.png", { type: "image/png" }));
@@ -898,6 +902,99 @@ describe("student submission API", () => {
       await cleanupUnusedLessonImages();
       expect(await sql`SELECT id FROM classroom.lesson_page_images WHERE id = ${image.id}`).toHaveLength(0);
       expect(await Bun.file(resolve(uploadDir, image.id)).exists()).toBe(false);
+
+      const learningRequest = (path: string, method = "GET", headers: HeadersInit = teacherHeaders, body?: unknown) => {
+        const merged = new Headers(headers);
+        if (body !== undefined) merged.set("content-type", "application/json");
+        return app.handle(new Request(`http://localhost/api${path}`, { method, headers: merged, body: body === undefined ? undefined : JSON.stringify(body) }));
+      };
+      const classLesson = `/student/classrooms/${roomB}/lesson-pages/${lesson.id}`;
+      const assignLesson = `/lesson-pages/${lesson.id}/classrooms/${roomB}`;
+      const peerHeaders = { cookie: peerSessionCookie, origin: "http://localhost:3000" };
+      expect((await learningRequest(assignLesson, "PUT")).status).toBe(422);
+      const privateLessonResponse = await learningRequest("/lesson-pages", "POST", teacherHeaders, { title: "Classroom private lesson" });
+      const privateLesson = await privateLessonResponse.json() as { id: string; revision: number };
+      lessonPageIds.push(privateLesson.id);
+      expect((await learningRequest(`/lesson-pages/${privateLesson.id}/publish`, "POST", teacherHeaders,
+        { title: "Classroom private lesson", blocks: [{type: "text", text: "Private lesson body"}], expectedRevision: 0 })).status).toBe(200);
+      expect((await learningRequest(`/public/lesson-pages/${privateLesson.id}`, "GET", {})).status).toBe(404);
+      const restrictedImageForm = new FormData(); restrictedImageForm.set("file", new File([png], "restricted.png", { type: "image/png" }));
+      const restrictedUpload = await app.handle(new Request(`http://localhost/api/lesson-pages/${lesson.id}/images`, { method: "POST", headers: teacherHeaders, body: restrictedImageForm }));
+      const restrictedImage = await restrictedUpload.json() as { id: string };
+      expect((await learningRequest(`/lesson-pages/${lesson.id}/publish`, "POST", teacherHeaders, {
+        title: "Classroom lesson", blocks: [{type: "image", imageId: restrictedImage.id, alt: "Private image"}], expectedRevision: 7,
+      })).status).toBe(200);
+      expect((await learningRequest(`/public/lesson-pages/${lesson.id}/images/${restrictedImage.id}/content`, "GET", {})).status).toBe(200);
+      expect((await learningRequest(assignLesson, "PUT", { cookie: `classroom_session=${otherTeacherToken}`, origin: "http://localhost:3000" })).status).toBe(404);
+      expect((await learningRequest(assignLesson, "PUT")).status).toBe(200);
+      const imagePath = `${classLesson}/images/${restrictedImage.id}/content`;
+      expect((await learningRequest(`/public/lesson-pages/${lesson.id}`, "GET", {})).status).toBe(404);
+      expect((await learningRequest(`/public/lesson-pages/${lesson.id}/images/${restrictedImage.id}/content`, "GET", {})).status).toBe(404);
+      expect((await learningRequest(imagePath, "GET", {})).status).toBe(401);
+      expect((await learningRequest(imagePath, "GET", peerHeaders)).status).toBe(404);
+      expect((await learningRequest(imagePath, "GET", studentHeaders)).status).toBe(200);
+      expect(await (await learningRequest("/student/lesson-pages", "GET", studentHeaders)).json()).toEqual([
+        { id: lesson.id, title: "Classroom lesson", classroomId: roomB, classroomName: "Room B" },
+      ]);
+      await sql`UPDATE classroom.students SET archived_at = NOW() WHERE id = ${studentC}`;
+      expect((await learningRequest(classLesson, "GET", studentHeaders)).status).toBe(404);
+      expect((await learningRequest(imagePath, "GET", studentHeaders)).status).toBe(404);
+      await sql`UPDATE classroom.students SET archived_at = NULL WHERE id = ${studentC}`;
+
+      const worksheet = await (await learningRequest("/worksheets", "POST", teacherHeaders, { title: "กิจกรรมทดสอบ" })).json() as { id: string };
+      const blankId = randomUUID();
+      const worksheetContent = { title: "กิจกรรมทดสอบ", questions: [{ id: blankId, type: "blank", prompt: "ชื่อโปรแกรม", points: 3, acceptedAnswers: ["Blender", "เบลนเดอร์"] }] };
+      const saveWorksheet = (revision: number, publish: boolean, content = worksheetContent) => learningRequest(`/worksheets/${worksheet.id}`, "PUT", teacherHeaders,
+        { ...content, expectedRevision: revision, publish });
+      const createRound = (roomId: string, lessonId: string | null) => learningRequest(`/classrooms/${roomId}/worksheets`, "POST", teacherHeaders, { worksheetId: worksheet.id, lessonId });
+      expect((await createRound(roomB, lesson.id)).status).toBe(422);
+      expect((await saveWorksheet(0, false)).status).toBe(200);
+      expect((await saveWorksheet(0, true)).status).toBe(409);
+      expect((await saveWorksheet(1, true)).status).toBe(200);
+      expect((await createRound(roomA, lesson.id)).status).toBe(422);
+      const classRound = await (await createRound(roomB, lesson.id)).json() as { id: string };
+      const secondClassRound = await (await createRound(roomB, null)).json() as { id: string };
+      expect((await saveWorksheet(2, true, { ...worksheetContent, questions: [{ ...worksheetContent.questions[0], points: 11 }] })).status).toBe(200);
+      const studentRoundPath = `/student/worksheet-rounds/${classRound.id}`;
+      const teacherRoundPath = `/classrooms/${roomB}/worksheets/${classRound.id}`;
+      expect((await learningRequest(studentRoundPath, "GET", studentHeaders)).status).toBe(404);
+      expect((await learningRequest(teacherRoundPath, "PATCH", teacherHeaders, { action: "open" })).status).toBe(200);
+      expect(await (await learningRequest(classLesson, "GET", studentHeaders)).json()).toMatchObject({ worksheets: [{ id: classRound.id, title: worksheetContent.title }] });
+      expect((await learningRequest(studentRoundPath, "GET", peerHeaders)).status).toBe(404);
+      const openRequests = await Promise.all([learningRequest(studentRoundPath + "/start", "POST", studentHeaders), learningRequest(studentRoundPath + "/start", "POST", studentHeaders)]);
+      expect(openRequests.map((response) => response.status)).toEqual([200, 200]);
+      const firstAttempt = await openRequests[0].json();
+      expect(firstAttempt).toMatchObject({ maxScore: 3, questions: [{ id: blankId, points: 3 }], attempt: { revision: 0, score: null } });
+      expect(JSON.stringify(firstAttempt)).not.toContain("acceptedAnswers");
+      const worksheetAnswerBody = (revision: number, answer: string) => ({ expectedRevision: revision, answers: { [blankId]: answer } });
+      const competingAnswers = await Promise.all(["อื่น", "ไม่ถูก"].map((answer) =>
+        learningRequest(studentRoundPath + "/answers", "PUT", studentHeaders, worksheetAnswerBody(0, answer))));
+      expect(competingAnswers.map((response) => response.status).sort()).toEqual([200, 409]);
+      expect(await (await learningRequest(studentRoundPath, "GET", studentHeaders)).json()).toMatchObject({ attempt: { revision: 1, score: null } });
+      const submit = () => learningRequest(studentRoundPath + "/submit", "POST", studentHeaders, worksheetAnswerBody(1, "ผิด"));
+      const submissions = await Promise.all([submit(), submit()]);
+      expect(submissions.map((response) => response.status)).toEqual([200, 200]);
+      expect(await submissions[0].json()).toMatchObject({ attempt: { score: 0, revision: 2 } });
+      expect(await submissions[1].json()).toMatchObject({ attempt: { score: 0, revision: 2 } });
+      const secondTeacherPath = `/classrooms/${roomB}/worksheets/${secondClassRound.id}`;
+      const secondStudentPath = `/student/worksheet-rounds/${secondClassRound.id}`;
+      expect((await learningRequest(secondTeacherPath, "PATCH", teacherHeaders, { action: "open" })).status).toBe(200);
+      expect((await learningRequest(secondStudentPath + "/start", "POST", studentHeaders)).status).toBe(200);
+      expect((await learningRequest(secondStudentPath + "/answers", "PUT", studentHeaders, worksheetAnswerBody(0, "เบลนเดอร์"))).status).toBe(200);
+      expect((await learningRequest(secondTeacherPath, "PATCH", teacherHeaders, { action: "close" })).status).toBe(200);
+      expect((await learningRequest(secondStudentPath + "/submit", "POST", studentHeaders, worksheetAnswerBody(1, "เบลนเดอร์"))).status).toBe(409);
+      expect(await (await learningRequest(secondStudentPath, "GET", studentHeaders)).json()).toMatchObject({ status: "closed", attempt: { score: null, submittedAt: null } });
+      const learningGrades = await (await learningRequest(`/classrooms/${roomB}/gradebook`)).json() as { items: Record<string, unknown>[]; scores: { studentId: string; itemId: string; score: number; maxScore: number }[] };
+      expect(learningGrades.items).toContainEqual(expect.objectContaining({ id: classRound.id, kind: "worksheet", maxScore: 3 }));
+      expect(learningGrades.scores.filter((score) => [classRound.id, secondClassRound.id].includes(score.itemId))).toEqual([{ studentId: studentC, itemId: classRound.id, maxScore: 3, score: 0 }]);
+      expect((await learningRequest(assignLesson, "DELETE")).status).toBe(200);
+      expect((await learningRequest(classLesson, "GET", studentHeaders)).status).toBe(404);
+      expect((await learningRequest(`/public/lesson-pages/${lesson.id}`, "GET", {})).status).toBe(404);
+      expect(await (await learningRequest(studentRoundPath, "GET", studentHeaders)).json()).toMatchObject({ attempt: { score: 0 } });
+      const [detached] = await sql`SELECT lesson_id FROM classroom.worksheet_rounds WHERE id = ${classRound.id}`;
+      expect(detached.lesson_id).toBeNull();
+      await sql`DELETE FROM classroom.lesson_page_images WHERE id = ${restrictedImage.id}`;
+      await rm(resolve(uploadDir, restrictedImage.id));
 
       const form = new FormData();
       form.set("file", new File(["%PDF-1.7\nstudent work"], "work.pdf", { type: "application/pdf" }));
@@ -1279,6 +1376,7 @@ describe("student submission API", () => {
         if (peerAccountId) await tx`DELETE FROM classroom.student_accounts WHERE id = ${peerAccountId}`;
         await tx`DELETE FROM classroom.student_accounts WHERE id = ${accountId}`;
         await tx`DELETE FROM classroom.teachers WHERE id = ${otherTeacherId}`;
+        await tx`DELETE FROM classroom.worksheets WHERE owner_id = ${teacherId}`;
         await tx`DELETE FROM classroom.teachers WHERE id = ${teacherId}`;
       });
       await sql.end({ timeout: 5 });

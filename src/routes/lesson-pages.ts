@@ -4,7 +4,7 @@ import { mkdir, rename, rm } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import type postgres from "postgres";
 import sharp from "sharp";
-import { requireActor } from "../auth/session";
+import { requireActor, requireStudent } from "../auth/session";
 import { sql } from "../db/client";
 import { HttpError } from "../http-error";
 import { checkRequestOrigin, cleanText } from "../security";
@@ -23,6 +23,29 @@ const lessonBody = t.Object({ title: t.String({ minLength: 1, maxLength: 120 }),
 type LessonBlock = { type: "text"; heading?: string; text: string } | { type: "image"; imageId: string; alt: string; caption?: string } | { type: "youtube"; videoId: string; caption?: string } | { type: "code"; html: string; css: string; javascript: string; framework?: "none" | "bootstrap"; imageIds?: string[] };
 type StoredBlock = Exclude<LessonBlock, { type: "code" }> | Extract<LessonBlock, { type: "code" }> & { imageIds: string[] };
 const lessonImagePattern = /lesson-image:\/\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/gi;
+const uuid = t.String({ format: "uuid" });
+const classLessonParams = t.Object({ classroomId: uuid, id: uuid });
+
+async function changeClassAssignment(request: Request, lessonId: string, classroomId: string, assign: boolean) {
+  checkRequestOrigin(request);
+  const actor = await requireActor(request);
+  return sql.begin(async (tx) => {
+    const [lesson] = await tx`SELECT published_at FROM classroom.lesson_pages
+      WHERE id = ${lessonId} AND owner_id = ${actor.id} AND trashed_at IS NULL FOR UPDATE`;
+    const [room] = await tx`SELECT id FROM classroom.classrooms
+      WHERE id = ${classroomId} AND owner_id = ${actor.id} AND archived_at IS NULL FOR SHARE`;
+    if (!lesson || !room) throw new HttpError(404, "ไม่พบบทเรียนหรือห้องเรียน");
+    if (assign) {
+      if (!lesson.published_at) throw new HttpError(422, "เผยแพร่บทเรียนก่อนมอบหมาย");
+      await tx`INSERT INTO classroom.classroom_lessons (classroom_id, lesson_id)
+        VALUES (${classroomId}, ${lessonId}) ON CONFLICT DO NOTHING`;
+      await tx`UPDATE classroom.lesson_pages SET legacy_public = FALSE WHERE id = ${lessonId} AND legacy_public`;
+    } else {
+      await tx`DELETE FROM classroom.classroom_lessons WHERE classroom_id = ${classroomId} AND lesson_id = ${lessonId}`;
+    }
+    return { ok: true };
+  });
+}
 
 function cleanupLater() {
   void cleanupUnusedLessonImages().catch((error) => console.error("Lesson image cleanup deferred", error instanceof Error ? error.name : "unknown error"));
@@ -45,6 +68,30 @@ async function usedStorageBytes(tx: postgres.ISql) {
 }
 
 export const lessonPageRoutes = new Elysia({ prefix: "/api" })
+  .get("/lesson-pages/:id/classrooms", async ({ params, request }) => {
+    const actor = await requireActor(request);
+    const [lesson] = await sql`SELECT legacy_public AS "legacyPublic" FROM classroom.lesson_pages
+      WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NULL`;
+    if (!lesson) throw new HttpError(404, "ไม่พบบทเรียนนี้");
+    const classrooms = await sql`SELECT c.id, c.name, a.lesson_id IS NOT NULL AS assigned
+      FROM classroom.classrooms c LEFT JOIN classroom.classroom_lessons a ON a.classroom_id = c.id AND a.lesson_id = ${params.id}
+      WHERE c.owner_id = ${actor.id} AND c.archived_at IS NULL ORDER BY c.name, c.id`;
+    return { ...lesson, classrooms };
+  }, { params: t.Object({ id: uuid }) })
+  .put("/lesson-pages/:id/classrooms/:classroomId", ({ params, request }) =>
+    changeClassAssignment(request, params.id, params.classroomId, true), { params: classLessonParams })
+  .delete("/lesson-pages/:id/classrooms/:classroomId", ({ params, request }) =>
+    changeClassAssignment(request, params.id, params.classroomId, false), { params: classLessonParams })
+  .get("/classrooms/:classroomId/lesson-pages", async ({ params, request }) => {
+    const actor = await requireActor(request);
+    const [room] = await sql`SELECT id FROM classroom.classrooms
+      WHERE id = ${params.classroomId} AND owner_id = ${actor.id} AND archived_at IS NULL`;
+    if (!room) throw new HttpError(404, "ไม่พบห้องเรียนนี้");
+    return sql`SELECT l.id, l.published_title AS title FROM classroom.classroom_lessons a
+      JOIN classroom.lesson_pages l ON l.id = a.lesson_id
+      WHERE a.classroom_id = ${params.classroomId} AND l.trashed_at IS NULL AND l.published_blocks IS NOT NULL
+      ORDER BY l.published_title, l.id`;
+  }, { params: t.Object({ classroomId: uuid }) })
   .get("/lesson-pages", async ({ request }) => {
     const actor = await requireActor(request);
     const trashed = new URL(request.url).searchParams.get("trashed") === "true";
@@ -257,32 +304,71 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
     return imageResponse(await storedFilePath(image.storageName));
   });
 
-const publicLessonPageRoutes = new Elysia({ prefix: "/api/public/lesson-pages" })
-  .get("/:id", async ({ params, set }) => {
-    set.headers["cache-control"] = "no-store";
-    const [page] = await sql`SELECT id, published_title AS title, editor_mode AS "editorMode", published_blocks AS blocks,
-      published_quiz_links AS "quizLinks", published_at AS "publishedAt"
-      FROM classroom.lesson_pages WHERE id = ${params.id} AND trashed_at IS NULL AND published_blocks IS NOT NULL`;
-    if (!page) throw new HttpError(404, "ไม่พบบทเรียนที่เผยแพร่แล้ว");
-    if (page.quizLinks?.length) {
-      const active = await sql`SELECT id FROM classroom.quizzes WHERE id = ANY(${page.quizLinks.map((link: { quizId: string }) => link.quizId)}::uuid[]) AND trashed_at IS NULL`;
-      const activeIds = new Set(active.map((quiz) => quiz.id));
-      page.quizLinks = page.quizLinks.filter((link: { quizId: string }) => activeIds.has(link.quizId));
-    }
-    return page;
-  }, { params: t.Object({ id: t.String({ format: "uuid" }) }) })
-  .get("/:id/images/:imageId/content", async ({ params }) => {
-    const [image] = await sql`SELECT i.storage_name AS "storageName" FROM classroom.lesson_page_images i
-      JOIN classroom.lesson_pages l ON l.id = i.lesson_id
-      WHERE l.id = ${params.id} AND i.id = ${params.imageId} AND l.trashed_at IS NULL AND l.published_blocks IS NOT NULL
+function activeLessonMembership(classroomId: string, accountId: string) {
+  return sql`EXISTS (SELECT 1 FROM classroom.classroom_lessons a
+    JOIN classroom.classrooms c ON c.id = a.classroom_id AND c.archived_at IS NULL
+    JOIN classroom.students s ON s.classroom_id = c.id AND s.archived_at IS NULL
+    WHERE a.lesson_id = l.id AND a.classroom_id = ${classroomId} AND s.account_id = ${accountId})`;
+}
+
+async function readPublishedPage(id: string, access: ReturnType<typeof activeLessonMembership>) {
+  const [page] = await sql`SELECT l.id, l.published_title AS title, l.editor_mode AS "editorMode", l.published_blocks AS blocks,
+    l.published_quiz_links AS "quizLinks", l.published_at AS "publishedAt"
+    FROM classroom.lesson_pages l
+    WHERE l.id = ${id} AND l.trashed_at IS NULL AND l.published_blocks IS NOT NULL AND ${access}`;
+  if (!page) throw new HttpError(404, "ไม่พบบทเรียนที่เผยแพร่แล้ว");
+  if (page.quizLinks?.length) {
+    const active = await sql`SELECT id FROM classroom.quizzes WHERE id = ANY(${page.quizLinks.map((link: { quizId: string }) => link.quizId)}::uuid[]) AND trashed_at IS NULL`;
+    const activeIds = new Set(active.map((quiz) => quiz.id));
+    page.quizLinks = page.quizLinks.filter((link: { quizId: string }) => activeIds.has(link.quizId));
+  }
+  return page;
+}
+
+async function readPublishedImage(id: string, imageId: string, access: ReturnType<typeof activeLessonMembership>) {
+  const [image] = await sql`SELECT i.storage_name AS "storageName" FROM classroom.lesson_page_images i
+    JOIN classroom.lesson_pages l ON l.id = i.lesson_id
+    WHERE l.id = ${id} AND i.id = ${imageId} AND l.trashed_at IS NULL AND l.published_blocks IS NOT NULL AND ${access}
         AND EXISTS (SELECT 1 FROM jsonb_array_elements(l.published_blocks) block
           WHERE (block->>'type' = 'image' AND block->>'imageId' = i.id::text)
             OR (block->>'type' = 'code' AND block->'imageIds' ? i.id::text))`;
-    if (!image) throw new HttpError(404, "ไม่พบภาพนี้");
-    return imageResponse(await storedFilePath(image.storageName));
-  }, { params: t.Object({ id: t.String({ format: "uuid" }), imageId: t.String({ format: "uuid" }) }) });
+  if (!image) throw new HttpError(404, "ไม่พบภาพนี้");
+  return imageResponse(await storedFilePath(image.storageName));
+}
 
-export const lessonPageApiRoutes = new Elysia().use(lessonPageRoutes).use(publicLessonPageRoutes);
+const publicLessonPageRoutes = new Elysia({ prefix: "/api/public/lesson-pages" })
+  .get("/:id", ({ params, set }) => {
+    set.headers["cache-control"] = "no-store";
+    return readPublishedPage(params.id, sql`l.legacy_public`);
+  }, { params: t.Object({ id: uuid }) })
+  .get("/:id/images/:imageId/content", ({ params }) => readPublishedImage(params.id, params.imageId, sql`l.legacy_public`),
+    { params: t.Object({ id: uuid, imageId: uuid }) });
+
+const studentLessonPageRoutes = new Elysia({ prefix: "/api/student" })
+  .get("/lesson-pages", async ({ request, set }) => {
+    set.headers["cache-control"] = "no-store";
+    const account = (await requireStudent(request)).id;
+    return sql`SELECT l.id, l.published_title AS title, c.id AS "classroomId", c.name AS "classroomName"
+      FROM classroom.classroom_lessons a JOIN classroom.lesson_pages l ON l.id = a.lesson_id
+      JOIN classroom.classrooms c ON c.id = a.classroom_id AND c.archived_at IS NULL
+      JOIN classroom.students s ON s.classroom_id = c.id AND s.archived_at IS NULL
+      WHERE s.account_id = ${account} AND l.trashed_at IS NULL AND l.published_blocks IS NOT NULL
+      ORDER BY l.published_at DESC, c.name, l.id, c.id`;
+  })
+  .get("/classrooms/:classroomId/lesson-pages/:id", async ({ params, request, set }) => {
+    set.headers["cache-control"] = "no-store";
+    const account = (await requireStudent(request)).id;
+    const page = await readPublishedPage(params.id, activeLessonMembership(params.classroomId, account));
+    const worksheets = await sql`SELECT id, title FROM classroom.worksheet_rounds
+      WHERE classroom_id = ${params.classroomId} AND lesson_id = ${params.id} AND status IN ('open', 'closed')
+      ORDER BY created_at, id`;
+    return { ...page, worksheets };
+  }, { params: classLessonParams })
+  .get("/classrooms/:classroomId/lesson-pages/:id/images/:imageId/content", async ({ params, request }) =>
+    readPublishedImage(params.id, params.imageId, activeLessonMembership(params.classroomId, (await requireStudent(request)).id)),
+  { params: t.Object({ classroomId: uuid, id: uuid, imageId: uuid }) });
+
+export const lessonPageApiRoutes = new Elysia().use(lessonPageRoutes).use(publicLessonPageRoutes).use(studentLessonPageRoutes);
 
 function normalizeBlocks(mode: "blocks" | "code", contents: LessonBlock[]): StoredBlock[] {
   if (mode === "blocks") {

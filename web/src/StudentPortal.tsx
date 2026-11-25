@@ -4,13 +4,14 @@ import { StudentAttendance } from "./StudentAttendance";
 import { FileThumbnail } from "./FileThumbnail";
 import { generateThumbnail } from "./thumbnail-jobs";
 import { StudentGroups } from "./StudentGroups";
+import { StudentLearning } from "./StudentLearning";
 
 const ModelPreview = lazy(() => import("./ModelPreview"));
 export type StudentUser = { id: string; username: string; displayName: string; role: "student" };
 type ClassroomMembership = { classroomId: string; classroomName: string };
 type Assignment = { assignmentId: string; classroomId: string; classroomName: string; title: string; instructions: string; submissionCount: number; publishedScore: number | string | null; publishedMaxScore: number | string | null; publishedFeedback: string | null; publishedAt: string | null; newWork: boolean };
 type StudentFile = { id: string; kind: "worksheet" | "model" | "submission" | "working"; originalName: string; mediaType: string; sizeBytes: number | string; createdAt: string; studentSubmission: boolean; thumbnailAvailable: boolean; materialAvailable: boolean };
-type StudentQuiz = { quizId: string; title: string; classroomName: string; status: string; finishedAt: string | null; score: string | null };
+type StudentQuiz = { quizId: string; classroomId: string; title: string; classroomName: string; status: string; finishedAt: string | null; score: string | null };
 type GalleryClass = { classroomId: string; classroomName: string; entryMode: "submission" | "approval"; requiredAssignmentId: string | null; requiredAssignmentTitle: string | null; hasSubmission: boolean; approved: boolean; entryAllowed: boolean };
 const uploadTypes = ".pdf,.png,.jpg,.jpeg,.doc,.docx,.stl,.obj,.glb,.gltf";
 
@@ -33,6 +34,7 @@ export function StudentPortal({ user, logout, openWorld }: { user: StudentUser; 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [preview, setPreview] = useState<StudentFile | null>(null);
+  const visibleQuizzes = quizzes.filter((quiz) => !classroomFilter || quiz.classroomId === classroomFilter);
   const visibleAssignments = classroomFilter ? assignments.filter((item) => item.classroomId === classroomFilter) : assignments;
   const selected = visibleAssignments.find((item) => item.assignmentId === selectedId) ?? visibleAssignments[0];
   const assignmentId = selected?.assignmentId;
@@ -215,7 +217,8 @@ export function StudentPortal({ user, logout, openWorld }: { user: StudentUser; 
         </header>
         {worldsError ? <p className="assignment-empty muted" role="alert">ตรวจสอบสิทธิ์เข้าโลกเสมือนไม่สำเร็จ</p> : <div className="gallery-world-links">{worlds.map((world) => <article className="gallery-entry-card" key={world.classroomId}><div><strong>{world.classroomName}</strong>{world.entryAllowed ? <p className="muted">คุณมีสิทธิ์เข้าโลกเสมือน</p> : <p className="muted">{!world.requiredAssignmentTitle ? "ยังไม่มีงานที่เปิดอยู่ จึงยังเข้าโลกไม่ได้" : !world.hasSubmission ? `ส่งงานล่าสุดก่อนเข้าโลก: ${world.requiredAssignmentTitle}` : world.entryMode === "approval" && !world.approved ? `ส่งแล้ว · รอครูอนุมัติสำหรับงาน ${world.requiredAssignmentTitle}` : "สถานะสิทธิ์เข้าโลกกำลังปรับปรุง"}</p>}</div><div className="gallery-world-links">{world.entryAllowed ? <button className="button button-primary" onClick={() => openWorld(world.classroomId)}>เข้าโลก ↗</button> : world.requiredAssignmentId && <button className="button button-quiet" disabled={busy} onClick={() => { setPreview(null); setClassroomFilter((current) => current ? world.classroomId : ""); setSelectedId(world.requiredAssignmentId!); document.getElementById("student-assignments")?.scrollIntoView({ behavior: "smooth" }); }}>ไปยังงานล่าสุด</button>}</div></article>)}</div>}
       </section>}
-      {quizzes.length > 0 && <section className="panel student-quiz-list"><header className="panel-heading compact"><div><h2>แบบทดสอบ</h2><p className="muted">แบบทดสอบที่ครูเปิดหรือรอบที่คุณเริ่มแล้ว</p></div></header><div className="assignment-list">{[...new Map(quizzes.map((item) => [item.quizId, item])).values()].map((quiz) => { const related = quizzes.filter((item) => item.quizId === quiz.quizId); return <a className="assignment-select student-quiz-link" href={`/quizzes/${quiz.quizId}?role=student`} key={quiz.quizId}><strong>{quiz.title}</strong><small>{related.map((item) => item.classroomName).join(" · ")} · {related.some((item) => item.finishedAt) ? "มีผลคะแนน" : "มีรอบแบบทดสอบ"}</small></a>; })}</div></section>}
+      <StudentLearning classroomId={classroomFilter} refreshVersion={activityRevision} />
+      {visibleQuizzes.length > 0 && <section className="panel student-quiz-list"><header className="panel-heading compact"><div><h2>แบบทดสอบ</h2><p className="muted">แบบทดสอบที่ครูเปิดหรือรอบที่คุณเริ่มแล้ว</p></div></header><div className="assignment-list">{[...new Map(visibleQuizzes.map((item) => [item.quizId, item])).values()].map((quiz) => { const related = visibleQuizzes.filter((item) => item.quizId === quiz.quizId); return <a className="assignment-select student-quiz-link" href={`/quizzes/${quiz.quizId}?role=student`} key={quiz.quizId}><strong>{quiz.title}</strong><small>{related.map((item) => item.classroomName).join(" · ")} · {related.some((item) => item.finishedAt) ? "มีผลคะแนน" : "มีรอบแบบทดสอบ"}</small></a>; })}</div></section>}
       <section id="student-assignments" className="panel"><header className="panel-heading compact"><div><h2>งานที่ได้รับ <small>{visibleAssignments.length} งาน</small></h2>{classroomFilter && <p className="muted">{classrooms.find((room) => room.classroomId === classroomFilter)?.classroomName}</p>}</div><button className="text-button" disabled={loading || refreshingClassrooms} onClick={() => void loadAssignments()}>โหลดใหม่</button></header>
         {loading ? <p className="inline-loading"><i className="spinner"/>กำลังโหลดงาน…</p> : visibleAssignments.length ? <div className="assignment-list">{visibleAssignments.map((assignment) => {
           const active = assignment.assignmentId === assignmentId;
