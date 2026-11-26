@@ -3,7 +3,9 @@ import { FormEvent, lazy, Suspense, useCallback, useEffect, useMemo, useState } 
 import { api } from "./api";
 import { ClassroomWork } from "./ClassroomWork";
 import { StudentRosterImport } from "./StudentRosterImport";
-import { StudentPortal } from "./StudentPortal";
+import { classroomEntryPath } from "../../src/classroom-entry";
+import { ClassroomQrButton } from "./ClassroomQrButton";
+import { ClassroomEntryNotice, StudentPortal } from "./StudentPortal";
 import { ClassroomGroups } from "./ClassroomGroups";
 import { AttendanceTimetable } from "./AttendanceTimetable";
 import { LessonLibrary } from "./LessonLibrary";
@@ -104,6 +106,13 @@ function App() {
   const lessonMatch = pathname.match(/^\/lessons\/([0-9a-f-]{36})(?:\/classrooms\/([0-9a-f-]{36}))?\/?$/i);
   const worksheetMatch = pathname.match(/^\/worksheets\/([0-9a-f-]{36})\/?$/i);
   const studentLogin = user ? <main className="public-lesson-page"><section className="panel learning-panel"><h1>สำหรับนักเรียน</h1><p>กรุณาเข้าสู่ระบบด้วยบัญชี Google ของโรงเรียน</p><Button onClick={() => void logout()}>ออกจากระบบ</Button></section></main> : <Login studentOnly onLogin={setUser} />;
+  if (/^\/classrooms\/[^/]*\/join\/?$/i.test(pathname)) {
+    const classroomId = pathname.match(classroomEntryPath)?.[1]?.toLowerCase();
+    if (!classroomId) return <ClassroomEntryNotice />;
+    return user?.role === "student"
+      ? <StudentPortal key={classroomId} user={user} initialClassroomId={classroomId} logout={() => void logout()} openWorld={openWorld} />
+      : studentLogin;
+  }
   if (lessonMatch) return <PublicLessonPage key={pathname} id={lessonMatch[1]} classroomId={lessonMatch[2]} studentId={user?.role === "student" ? user.id : undefined} login={studentLogin} />;
   if (worksheetMatch) return user?.role === "student" ? <main className="public-lesson-page"><div className="public-lesson-brand"><a href="/">ห้องเรียน</a></div><StudentAttendance /><WorksheetActivity key={worksheetMatch[1]} roundId={worksheetMatch[1]} /></main> : studentLogin;
   const worldMatch = pathname.match(/^\/world\/([0-9a-f-]{36})\/?$/i);
@@ -157,7 +166,7 @@ function ClassDetail({ room, user, refresh, back, onOpenWorld, logout, onError }
   const [tab, setTab] = useState<"attendance" | "students" | "groups" | "assignments" | "gradebook" | "summary" | "world">("attendance"); const [name, setName] = useState(room.name); const [editing, setEditing] = useState(false);
   async function archive() { if (!window.confirm("เก็บห้องเรียนนี้เข้าคลังหรือไม่? ประวัติและรายชื่อจะยังอยู่")) return; try { await api("/classrooms/" + room.id, { method: "PATCH", body: JSON.stringify({ archived: true }) }); await refresh(); back(); } catch (reason) { onError(reason instanceof Error ? reason.message : "เก็บห้องเรียนไม่สำเร็จ"); } }
   async function rename(event: FormEvent) { event.preventDefault(); try { await api("/classrooms/" + room.id, { method: "PATCH", body: JSON.stringify({ name }) }); setEditing(false); await refresh(); } catch (reason) { onError(reason instanceof Error ? reason.message : "เปลี่ยนชื่อไม่สำเร็จ"); } }
-  return <><button className="back-link" onClick={back}>‹ ห้องเรียนทั้งหมด</button><div className="room-detail-heading"><div className="room-emblem">{room.name.slice(0, 1)}</div><div className="room-detail-copy"><p className="eyebrow">พื้นที่ดูแลของคุณ</p>{editing ? <form className="rename-form" onSubmit={rename}><input value={name} onChange={(e) => setName(e.target.value)} autoFocus/><Button>บันทึก</Button><Button tone="quiet" type="button" onClick={() => setEditing(false)}>ยกเลิก</Button></form> : <><h1>{room.name}</h1><p className="muted">{room.studentCount} นักเรียน</p></>}</div><div className="room-detail-actions"><button className="text-button" onClick={() => setEditing(true)}>เปลี่ยนชื่อ</button><Button tone="quiet" onClick={archive}>เก็บห้องเรียน</Button></div></div>
+  return <><button className="back-link" onClick={back}>‹ ห้องเรียนทั้งหมด</button><div className="room-detail-heading"><div className="room-emblem">{room.name.slice(0, 1)}</div><div className="room-detail-copy"><p className="eyebrow">พื้นที่ดูแลของคุณ</p>{editing ? <form className="rename-form" onSubmit={rename}><input value={name} onChange={(e) => setName(e.target.value)} autoFocus/><Button>บันทึก</Button><Button tone="quiet" type="button" onClick={() => setEditing(false)}>ยกเลิก</Button></form> : <><h1>{room.name}</h1><p className="muted">{room.studentCount} นักเรียน</p></>}</div><div className="room-detail-actions"><ClassroomQrButton classroomId={room.id} name={room.name} /><button className="text-button" onClick={() => setEditing(true)}>เปลี่ยนชื่อ</button><Button tone="quiet" onClick={archive}>เก็บห้องเรียน</Button></div></div>
     <div className="tabs" role="tablist"><button className={tab === "attendance" ? "selected" : ""} onClick={() => setTab("attendance")}>บันทึกการเข้าเรียน</button><button className={tab === "students" ? "selected" : ""} onClick={() => setTab("students")}>รายชื่อนักเรียน</button><button className={tab === "groups" ? "selected" : ""} onClick={() => setTab("groups")}>จัดกลุ่ม</button><button className={tab === "assignments" ? "selected" : ""} onClick={() => setTab("assignments")}>งานและไฟล์</button><button className={tab === "gradebook" ? "selected" : ""} onClick={() => setTab("gradebook")}>สมุดคะแนน</button><button className={tab === "summary" ? "selected" : ""} onClick={() => setTab("summary")}>สรุปผล</button><button className={tab === "world" ? "selected" : ""} onClick={() => { onOpenWorld(); setTab("world"); }}>โลกเสมือน</button></div>{tab === "attendance" && <Attendance room={room} onError={onError}/ >}{tab === "students" && <Roster room={room} refresh={refresh} onError={onError}/ >}{tab === "groups" && <ClassroomGroups classroomId={room.id} onError={onError}/ >}{tab === "assignments" && <ClassroomWork teacherId={user.id} room={room} onError={onError}/ >}{tab === "gradebook" && <ClassGradebook classroomId={room.id} onError={onError}/ >}{tab === "summary" && <RoomSummary room={room}/ >}{tab === "world" && <Suspense fallback={<p className="inline-loading"><i className="spinner"/>กำลังเปิดโลกเสมือน…</p>}><GalleryWorld classroomId={room.id} user={user} close={() => setTab("attendance")} logout={logout}/></Suspense>}</>;
 }
 

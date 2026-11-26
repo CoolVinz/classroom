@@ -17,9 +17,24 @@ type StudentQuiz = { quizId: string; classroomId: string; title: string; classro
 type GalleryClass = { classroomId: string; classroomName: string; entryMode: "submission" | "approval"; requiredAssignmentId: string | null; requiredAssignmentTitle: string | null; hasSubmission: boolean; approved: boolean; entryAllowed: boolean };
 const uploadTypes = ".pdf,.png,.jpg,.jpeg,.doc,.docx,.stl,.obj,.glb,.gltf";
 
-export function StudentPortal({ user, logout, openWorld }: { user: StudentUser; logout: () => void; openWorld: (classroomId: string) => void }) {
+export function ClassroomEntryNotice({ loading = false, error = "", retry }: { loading?: boolean; error?: string; retry?: () => void }) {
+  return <main className="public-lesson-page"><section className="panel learning-panel">
+    <h1>เข้าห้องเรียน</h1>
+    {loading ? <p role="status">กำลังตรวจสอบรายชื่อในห้องเรียน…</p> : <>
+      <p role="alert">{error || "เปิดห้องเรียนจากลิงก์นี้ไม่ได้ กรุณาตรวจสอบกับคุณครู"}</p>
+      <div className="lesson-actions">
+        <a className="button button-quiet" href="/">ดูทุกห้องเรียน</a>
+        {retry && <button className="button button-quiet" type="button" onClick={retry}>ลองอีกครั้ง</button>}
+      </div>
+    </>}
+  </section></main>;
+}
+
+export function StudentPortal({ user, logout, openWorld, initialClassroomId }: {
+  user: StudentUser; logout: () => void; openWorld: (classroomId: string) => void; initialClassroomId?: string;
+}) {
   const [classrooms, setClassrooms] = useState<ClassroomMembership[]>([]);
-  const [classroomFilter, setClassroomFilter] = useState("");
+  const [classroomFilter, setClassroomFilter] = useState(initialClassroomId ?? "");
   const [refreshingClassrooms, setRefreshingClassrooms] = useState(true);
   const [classroomError, setClassroomError] = useState("");
   const [activityRevision, setActivityRevision] = useState(0);
@@ -36,6 +51,8 @@ export function StudentPortal({ user, logout, openWorld }: { user: StudentUser; 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [preview, setPreview] = useState<StudentFile | null>(null);
+  const classroomAccessible = !initialClassroomId || classrooms.some((room) => room.classroomId === initialClassroomId);
+  const activityReady = activityRevision > 0 && classroomAccessible;
   const visibleQuizzes = quizzes.filter((quiz) => !classroomFilter || quiz.classroomId === classroomFilter);
   const visibleAssignments = classroomFilter ? assignments.filter((item) => item.classroomId === classroomFilter) : assignments;
   const selected = visibleAssignments.find((item) => item.assignmentId === selectedId) ?? visibleAssignments[0];
@@ -56,7 +73,7 @@ export function StudentPortal({ user, logout, openWorld }: { user: StudentUser; 
       const next = await api<ClassroomMembership[]>("/student/classrooms/refresh", { method: "POST", signal });
       if (signal?.aborted) return;
       setClassrooms(next);
-      setClassroomFilter((current) => next.some((room) => room.classroomId === current) ? current : "");
+      setClassroomFilter((current) => current === initialClassroomId || next.some((room) => room.classroomId === current) ? current : "");
       setActivityRevision((current) => current + 1);
     } catch {
       if (signal?.aborted) return;
@@ -65,7 +82,7 @@ export function StudentPortal({ user, logout, openWorld }: { user: StudentUser; 
     } finally {
       if (!signal?.aborted) setRefreshingClassrooms(false);
     }
-  }, []);
+  }, [initialClassroomId]);
   useEffect(() => {
     const controller = new AbortController();
     void refreshClassrooms(controller.signal);
@@ -84,11 +101,11 @@ export function StudentPortal({ user, logout, openWorld }: { user: StudentUser; 
     }
   }, []);
   useEffect(() => {
-    if (activityRevision) void loadAssignments();
+    if (activityReady) void loadAssignments();
     return () => { assignmentsRequest.current++; };
-  }, [activityRevision, loadAssignments]);
+  }, [activityReady, activityRevision, loadAssignments]);
   useEffect(() => {
-    if (!activityRevision) return;
+    if (!activityReady) return;
     const controller = new AbortController();
     void api<StudentQuiz[]>("/student/quizzes", { signal: controller.signal }).then((next) => {
       if (!controller.signal.aborted) setQuizzes(next);
@@ -96,7 +113,7 @@ export function StudentPortal({ user, logout, openWorld }: { user: StudentUser; 
       if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "โหลดแบบทดสอบไม่สำเร็จ");
     });
     return () => controller.abort();
-  }, [activityRevision]);
+  }, [activityReady, activityRevision]);
   const loadWorlds = useCallback(async () => {
     const request = ++worldsRequest.current;
     try {
@@ -108,8 +125,7 @@ export function StudentPortal({ user, logout, openWorld }: { user: StudentUser; 
       if (request === worldsRequest.current) setWorldsError(true);
     }
   }, []);
-  const activityReady = activityRevision > 0;
-  useEffect(() => { if (activityRevision) void loadWorlds(); }, [activityRevision, loadWorlds]);
+  useEffect(() => { if (activityReady) void loadWorlds(); }, [activityReady, activityRevision, loadWorlds]);
   useEffect(() => {
     if (!activityReady) return;
     const refresh = () => { if (document.visibilityState === "visible") void loadWorlds(); };
@@ -118,7 +134,7 @@ export function StudentPortal({ user, logout, openWorld }: { user: StudentUser; 
   }, [activityReady, loadWorlds]);
 
   useEffect(() => {
-    if (!classroomId || !assignmentId) return;
+    if (!classroomAccessible || !classroomId || !assignmentId) return;
     const controller = new AbortController();
     void api<StudentFile[]>(`/student/classrooms/${classroomId}/assignments/${assignmentId}/files`, { signal: controller.signal }).then((next) => {
       if (!controller.signal.aborted) setFileList({ assignmentId, files: next });
@@ -126,7 +142,7 @@ export function StudentPortal({ user, logout, openWorld }: { user: StudentUser; 
       if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "โหลดไฟล์ไม่สำเร็จ");
     });
     return () => controller.abort();
-  }, [classroomId, assignmentId, fileRevision, activityRevision]);
+  }, [classroomAccessible, classroomId, assignmentId, fileRevision, activityRevision]);
 
   async function uploadAssignmentFile(target: Assignment, file: File, materialFile?: File) {
     const body = new FormData();
@@ -194,6 +210,9 @@ export function StudentPortal({ user, logout, openWorld }: { user: StudentUser; 
     } catch (reason) { setError(reason instanceof Error ? reason.message : "ลบไฟล์ทำงานไม่สำเร็จ"); }
     finally { setFileRevision((current) => current + 1); setBusy(false); }
   }
+
+  if (!classroomAccessible) return <ClassroomEntryNotice loading={refreshingClassrooms} error={classroomError}
+    retry={() => void refreshClassrooms()} />;
 
   return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark">ค</div><div><strong>ห้องเรียน</strong><span>พื้นที่นักเรียน</span></div></div><div className="sidebar-bottom"><div className="profile"><div className="avatar">{user.displayName.slice(0, 1)}</div><div className="profile-copy"><strong>{user.displayName}</strong><span>นักเรียน</span></div><button className="icon-button" onClick={logout} aria-label="ออกจากระบบ" title="ออกจากระบบ">↗</button></div></div></aside>
     <main className="main-area"><header className="topbar"><div className="breadcrumb">ห้องเรียน <span>/</span> งานของฉัน</div></header><div className="page-content">

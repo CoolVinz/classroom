@@ -1,3 +1,4 @@
+import { classroomEntryPath } from "../classroom-entry";
 import { timingSafeEqual } from "node:crypto";
 import { OAuth2Client } from "google-auth-library";
 import { Elysia } from "elysia";
@@ -11,9 +12,12 @@ const appUrl = process.env.APP_URL ?? "http://localhost:3000";
 const clientId = () => process.env.GOOGLE_CLIENT_ID?.trim() ?? "";
 const contentPath = /^\/(?:(?:quizzes|worksheets)\/[0-9a-f-]{36}|lessons\/[0-9a-f-]{36}(?:\/classrooms\/[0-9a-f-]{36})?)\/?$/i;
 
+function studentDestination(path: string) {
+  return contentPath.test(path) || classroomEntryPath.test(path) ? path : "/";
+}
+
 function loginRedirect(reason: "config" | "signin" | "domain" | "roster", returnPath = "/") {
-  const safeReturn = contentPath.test(returnPath) ? returnPath : "/";
-  const url = new URL(safeReturn, appUrl);
+  const url = new URL(studentDestination(returnPath), appUrl);
   url.searchParams.set("role", "student");
   url.searchParams.set("error", reason);
   return new Response(null, { status: 303, headers: { Location: url.href } });
@@ -116,7 +120,7 @@ export const studentAuthRoutes = new Elysia({ prefix: "/api/auth/student" })
     const token = await createStudentSession(signedIn.id);
     return new Response(null, {
       status: 303,
-      headers: { Location: new URL(contentPath.test(returnPath) ? returnPath : "/", appUrl).href, "Set-Cookie": sessionCookie(token) },
+      headers: { Location: new URL(studentDestination(returnPath), appUrl).href, "Set-Cookie": sessionCookie(token) },
     });
   })
   .post("/login", () => { throw new HttpError(410, "Student password login was retired. Use Google sign-in."); })

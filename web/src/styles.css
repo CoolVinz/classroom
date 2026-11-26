@@ -159,3 +159,22 @@
 
 .panel:not(.learning-panel) > .wio-demo { padding: 0 24px 14px; }
 .wio-demo > div > label { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-top: .75rem; }
+
+
+.classroom-qr-dialog {
+  width: min(35rem, calc(100% - 2rem));
+  max-height: calc(100dvh - 2rem);
+  padding: clamp(1rem, 4vw, 2rem);
+  border: 0;
+  border-radius: 1rem;
+  background: var(--surface);
+  color: var(--ink);
+  text-align: center;
+}
+.classroom-qr-dialog::backdrop { background: rgb(13 30 34 / .76); }
+.classroom-qr-dialog h2 { margin: 0; overflow-wrap: anywhere; }
+.classroom-qr-image { margin: .8rem auto; width: min(100%, 58dvh, 440px); aspect-ratio: 1; display: grid; place-items: center; background: #fff; }
+.classroom-qr-image svg { display: block; width: 100%; height: auto; }
+.classroom-qr-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: .5rem; }
+.classroom-qr-link { display: grid; gap: .25rem; margin-top: .7rem; }
+.classroom-qr-link input { width: 100%; padding: .45rem; border: 1px solid var(--line); border-radius: .4rem; }

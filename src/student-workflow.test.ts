@@ -172,6 +172,20 @@ describe("student submission API", () => {
       studentToken = signedIn.headers.get("set-cookie")!.split(";")[0].split("=")[1];
       let studentHeaders = { cookie: signedIn.headers.get("set-cookie")!.split(";")[0], origin: "http://localhost:3000" };
       const teacherHeaders = { cookie: `classroom_session=${teacherToken}`, origin: "http://localhost:3000" };
+      const classroomEntry = `/classrooms/${roomB}/join`;
+      const retryEntry = await googleLogin(studentIdentityToken, "csrf-token", "wrong-token", classroomEntry);
+      const retryUrl = new URL(retryEntry.headers.get("location")!);
+      expect(retryUrl.pathname).toBe(classroomEntry);
+      expect(retryUrl.searchParams.get("error")).toBe("signin");
+      for (const path of ["//example.invalid" + classroomEntry, "/classrooms/invalid/join", classroomEntry + "?next=//example.invalid"]) {
+        const invalid = await googleLogin(studentIdentityToken, "csrf-token", "wrong-token", path);
+        expect(new URL(invalid.headers.get("location")!).pathname).toBe("/");
+      }
+      const entrySuccess = await googleLogin(studentIdentityToken, "csrf-token", "csrf-token", classroomEntry);
+      expect(entrySuccess.status).toBe(303);
+      expect(new URL(entrySuccess.headers.get("location")!).pathname).toBe(classroomEntry);
+      const entryToken = entrySuccess.headers.get("set-cookie")!.split(";")[0].split("=")[1];
+      await sql`DELETE FROM classroom.student_sessions WHERE token_hash = ${createHash("sha256").update(entryToken).digest("hex")}`;
       const pointBalance = (headers?: HeadersInit) => app.handle(new Request("http://localhost/api/student/gallery-points", { headers }));
       expect((await pointBalance()).status).toBe(401);
       expect((await pointBalance(teacherHeaders)).status).toBe(401);
