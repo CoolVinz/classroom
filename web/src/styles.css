@@ -140,3 +140,18 @@
 }
 .lesson-class-room .lesson-actions { justify-content: flex-start; align-items: center; }
 .lesson-class-room h3 { margin: .75rem 0 .45rem; font-size: 1rem; }
+
+
+.assessment-file { min-width: 0; }
+.assessment-sketch {
+  margin: 0 0 .8rem;
+  max-width: 100%;
+  max-height: 16rem;
+  overflow: auto;
+  padding: .8rem;
+  border-radius: .5rem;
+  background: #142631;
+  color: #edfdf6;
+  font: .85rem/1.5 ui-monospace, Menlo, Consolas, monospace;
+  tab-size: 4;
+}

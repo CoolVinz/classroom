@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { wioSketchMediaType } from "../../src/wio-labs";
 import { api } from "./api";
 import { FileThumbnail } from "./FileThumbnail";
 
@@ -26,6 +27,7 @@ export function AssignmentAssessment({ classroomId, assignmentId, maxScore, onPr
   const [total, setTotal] = useState(0);
   const [reload, setReload] = useState(0);
   const [expanded, setExpanded] = useState("");
+  const [previewedSketchId, setPreviewedSketchId] = useState("");
   const [files, setFiles] = useState<WorkFile[]>([]);
   const [filesRefresh, setFilesRefresh] = useState(0);
   const [filesLoading, setFilesLoading] = useState(false);
@@ -102,6 +104,7 @@ export function AssignmentAssessment({ classroomId, assignmentId, maxScore, onPr
     if (!window.confirm("ลบไฟล์ “" + file.originalName + "” หรือไม่?")) return;
     try {
       await api("/files/" + file.id, { method: "DELETE" });
+      if (previewedSketchId === file.id) setPreviewedSketchId("");
       setFilesRefresh((value) => value + 1); setReload((value) => value + 1); onFilesChanged();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "ลบไฟล์ไม่สำเร็จ"); }
   }
@@ -118,7 +121,7 @@ export function AssignmentAssessment({ classroomId, assignmentId, maxScore, onPr
       return <article className="assessment-student" key={student.studentId}>
         <div className="assessment-summary">
           <button className="assessment-toggle" type="button" aria-expanded={isExpanded} onClick={() => {
-            setExpanded(isExpanded ? "" : student.studentId); setFiles([]); setError("");
+            setExpanded(isExpanded ? "" : student.studentId); setPreviewedSketchId(""); setFiles([]); setError("");
           }}><span className="assessment-number">{student.studentNumber ?? "—"}</span><span className="assessment-name"><strong>{student.studentName}</strong><small>{student.studentCode ?? ""}{student.archived ? " · เก็บรายชื่อแล้ว" : ""}</small></span><span aria-hidden="true">{isExpanded ? "⌃" : "⌄"}</span></button>
           {student.latestFile && <FileThumbnail file={student.latestFile} onPreview={() => onPreview(student.latestFile!)}/>}
           <span className="assessment-work-count">{student.submissionCount} ไฟล์</span>
@@ -128,10 +131,28 @@ export function AssignmentAssessment({ classroomId, assignmentId, maxScore, onPr
         {isExpanded && <div className="assessment-detail">
           {filesLoading ? <p className="inline-loading"><i className="spinner"/>กำลังโหลดไฟล์…</p> : <>
           {workingFile && <><h4>ไฟล์ทำงาน Blender — ยังไม่ใช่การส่งงาน</h4><article className="work-file"><span className="file-kind">BLEND</span><div className="work-file-copy"><strong>{workingFile.originalName}</strong><small>ไฟล์ทำงาน · {formatBytes(Number(workingFile.sizeBytes))}</small></div><div className="work-file-actions"><a className="text-button" href={`/api/files/${workingFile.id}/content`} download>ดาวน์โหลด</a><button className="text-button subdued" onClick={() => void remove(workingFile)}>ลบ</button></div></article></>}
-          {assessedFiles.length ? <div className="work-file-list">{assessedFiles.map((file) => <article className="work-file" key={file.id}>
-            <FileThumbnail file={file} onPreview={() => onPreview(file)}/><div className="work-file-copy"><strong>{file.originalName}</strong><small>{file.studentSubmission ? "ส่งโดยนักเรียน" : "ครูอัปโหลดให้"} · {formatBytes(Number(file.sizeBytes))}</small></div>
-            <div className="work-file-actions">{file.mediaType.startsWith("model/") && <button className="text-button" onClick={() => onPreview(file)}>แสดงตัวอย่าง</button>}<a className="text-button" href={`/api/files/${file.id}/content`} download>ดาวน์โหลด</a><button className="text-button subdued" onClick={() => void remove(file)}>ลบ</button></div>
-          </article>)}</div> : <p className="muted">ยังไม่มีไฟล์ที่ส่งเพื่อตรวจและให้คะแนน</p>}
+          {assessedFiles.length ? <div className="work-file-list">{assessedFiles.map((file) => {
+            const contentUrl = `/api/files/${file.id}/content`;
+            const sketch = file.mediaType === wioSketchMediaType && file.originalName.toLowerCase().endsWith(".ino");
+            const showingCode = previewedSketchId === file.id;
+            const previewId = "sketch-preview-" + file.id;
+            return <article className="assessment-file" key={file.id}>
+              <div className="work-file">
+                <FileThumbnail file={file} onPreview={() => onPreview(file)}/>
+                <div className="work-file-copy"><strong>{file.originalName}</strong><small>{file.studentSubmission ? "ส่งโดยนักเรียน" : "ครูอัปโหลดให้"} · {formatBytes(Number(file.sizeBytes))}</small></div>
+                <div className="work-file-actions">
+                  {file.mediaType.startsWith("model/") && <button className="text-button" type="button" onClick={() => onPreview(file)}>แสดงตัวอย่าง</button>}
+                  {sketch && <button className="text-button" type="button" aria-expanded={showingCode} aria-controls={previewId}
+                    onClick={() => setPreviewedSketchId(showingCode ? "" : file.id)}>{showingCode ? "ซ่อนโค้ด" : "ดูโค้ด"}</button>}
+                  <a className="text-button" href={contentUrl} download>ดาวน์โหลด</a>
+                  <button className="text-button subdued" type="button" onClick={() => void remove(file)}>ลบ</button>
+                </div>
+              </div>
+              {sketch && <div id={previewId} hidden={!showingCode}>
+                {showingCode && <SketchPreview url={contentUrl} name={file.originalName} />}
+              </div>}
+            </article>;
+          })}</div> : <p className="muted">ยังไม่มีไฟล์ที่ส่งเพื่อตรวจและให้คะแนน</p>}
           </>}
           <form className="assessment-form" onSubmit={(event) => void saveDraft(event)}>
             <label>คะแนน<input type="number" min="0" max={max} step="0.01" value={score} onChange={(event) => setScore(event.target.value)} required/><small>จาก {max} คะแนน</small></label>
@@ -142,8 +163,37 @@ export function AssignmentAssessment({ classroomId, assignmentId, maxScore, onPr
         </div>}
       </article>;
     })}</div> : <p className="muted">ไม่พบนักเรียนในห้องเรียนนี้</p>}
-    {pageCount > 1 && <footer className="assessment-pagination"><button className="button button-quiet" disabled={page <= 1} onClick={() => { setExpanded(""); setPage((value) => value - 1); }}>ก่อนหน้า</button><span>หน้า {page} / {pageCount} · นักเรียน {total} คน</span><button className="button button-quiet" disabled={page >= pageCount} onClick={() => { setExpanded(""); setPage((value) => value + 1); }}>ถัดไป</button></footer>}
+    {pageCount > 1 && <footer className="assessment-pagination"><button className="button button-quiet" disabled={page <= 1} onClick={() => { setExpanded(""); setPreviewedSketchId(""); setPage((value) => value - 1); }}>ก่อนหน้า</button><span>หน้า {page} / {pageCount} · นักเรียน {total} คน</span><button className="button button-quiet" disabled={page >= pageCount} onClick={() => { setExpanded(""); setPreviewedSketchId(""); setPage((value) => value + 1); }}>ถัดไป</button></footer>}
   </section>;
+}
+
+function SketchPreview({ url, name }: { url: string; name: string }) {
+  const [source, setSource] = useState<string | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    async function load() {
+      const fallback = "โหลดโค้ดไม่สำเร็จ กรุณาลองอีกครั้ง";
+      try {
+        const response = await fetch(url, { signal: controller.signal });
+        if (!response.ok) {
+          const detail = await response.json().catch(() => null);
+          throw new Error(typeof detail?.error === "string" ? detail.error : fallback);
+        }
+        const text = await response.text();
+        if (!controller.signal.aborted) setSource(text);
+      } catch (reason) {
+        if (!controller.signal.aborted) setError(reason instanceof Error && !(reason instanceof TypeError) ? reason.message : fallback);
+      }
+    }
+    void load();
+    return () => controller.abort();
+  }, [url]);
+
+  if (error) return <p className="form-error" role="alert">{error}</p>;
+  if (source === null) return <p className="inline-loading" role="status"><i className="spinner" aria-hidden="true" />กำลังโหลดโค้ด…</p>;
+  return <pre className="assessment-sketch" tabIndex={0} aria-label={"โค้ด " + name}><code>{source}</code></pre>;
 }
 
 function formatBytes(bytes: number) {

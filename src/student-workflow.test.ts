@@ -1178,7 +1178,12 @@ describe("student submission API", () => {
       expect(await download.text()).toBe(sketch);
       expect((await app.handle(new Request("http://localhost" + studentDownload, { headers: peerHeaders }))).status).toBe(404);
       expect((await app.handle(new Request("http://localhost" + teacherDownload, { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).status).toBe(404);
-      expect(await (await app.handle(new Request("http://localhost" + teacherDownload, { headers: teacherHeaders }))).text()).toBe(sketch);
+      expect((await app.handle(new Request("http://localhost" + teacherDownload, { headers: studentHeaders }))).status).toBe(401);
+      const teacherSketch = await app.handle(new Request("http://localhost" + teacherDownload, { headers: teacherHeaders }));
+      expect(teacherSketch.status).toBe(200);
+      expect(teacherSketch.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+      expect(teacherSketch.headers.get("cache-control")).toBe("private, no-store");
+      expect(await teacherSketch.text()).toBe(sketch);
       expect((await patchLab({ wioLab: null })).status).toBe(200);
       expect((await submitIno(roomA, lab.id)).status).toBe(422);
       expect((await patchLab({ wioLab: "blink", archived: true })).status).toBe(200);
