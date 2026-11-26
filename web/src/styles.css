@@ -155,3 +155,7 @@
   font: .85rem/1.5 ui-monospace, Menlo, Consolas, monospace;
   tab-size: 4;
 }
+
+
+.panel:not(.learning-panel) > .wio-demo { padding: 0 24px 14px; }
+.wio-demo > div > label { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-top: .75rem; }

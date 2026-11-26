@@ -14,6 +14,15 @@ export function validWioMaxScore(value: unknown): value is number {
 export const wioSketchMaxBytes = 16 * 1024;
 export const wioSketchMediaType = "text/plain; charset=utf-8";
 
+export const wioSupportedCode = [
+  { label: "โครงสร้าง Arduino", commands: "void setup(), void loop(), ฟังก์ชันช่วยแบบ void หรือคืนค่าจำนวนเต็ม/บูลีนพร้อมพารามิเตอร์, return, int, long, unsigned long, bool, byte, uint8_t, uint16_t, uint32_t, const" },
+  { label: "เงื่อนไขและลูป", commands: "if/else, for, while, break, continue, ++, --, +=, -=, +, -, *, /, %, การเปรียบเทียบ, &&, ||, !" },
+  { label: "เวลาและข้อมูล", commands: "delay(ms), millis(), map(), constrain(), Serial.begin(), Serial.print(), Serial.println()" },
+  { label: "อุปกรณ์บนบอร์ด", commands: "pinMode(), digitalWrite(LED_BUILTIN, value), digitalRead() กับ WIO_KEY_A/B/C และ WIO_5S_*, analogRead(WIO_LIGHT), analogWrite(WIO_BUZZER, value)" },
+  { label: "จอ LCD", commands: "#include <TFT_eSPI.h>, TFT_eSPI tft;, begin(), init(), setRotation(), fillScreen(), fillRect(), drawPixel(), drawLine(), drawRect(), drawCircle(), fillCircle(), setCursor(), setTextSize(), setTextColor(), print(), println(), drawString(text, x, y), drawNumber(number, x, y), color565(), width(), height()" },
+  { label: "ขอบเขตตัวจำลอง", commands: "ใช้ Arduino.h และ TFT_eSPI.h ได้ รองรับข้อความในเครื่องหมายคำพูด ตัวแปรจำนวนเต็มและบูลีน คลาสที่เขียนเอง อาร์เรย์ float และไลบรารีอื่นต้องเปิดด้วย Arduino IDE" },
+] as const;
+
 export const wioLabs: Record<WioLabId, { title: string; instructions: string; starter: string }> = {
   blink: {
     title: "ไฟ LED กะพริบ",

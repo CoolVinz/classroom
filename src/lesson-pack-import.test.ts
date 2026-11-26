@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { aiImportTemplate, parseLessonPackImportText, parseWorksheetImportText } from "./lesson-pack-import";
+import { wioSupportedCode } from "./wio-labs";
 import { gradeWorksheet } from "./worksheet-core";
 
 function example(kind: "worksheet" | "pack" | "wio") {
@@ -95,4 +96,11 @@ test("the Wio AI prompt and paste validator accept every built-in project", () =
     const pack = parseLessonPackImportText(JSON.stringify({ ...sample, lab: { ...sample.lab, preset } }));
     expect(pack.lab?.preset).toBe(preset);
   }
+});
+
+test("the Wio lesson prompt gives AI the same compatibility guide used by the simulator", () => {
+  const prompt = aiImportTemplate("wio", "ทดสอบจอ", "ม.3");
+  expect(prompt).toContain("<pre><code>");
+  expect(prompt).toContain("HTML entities");
+  for (const { commands } of wioSupportedCode) expect(prompt).toContain(commands);
 });

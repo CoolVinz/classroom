@@ -50,7 +50,7 @@ export function LessonClassAssignments({ id, published, publishedRevision, onErr
     <p className="muted">{published ? "นักเรียนในห้องที่เลือกจะเห็นบทเรียนในหน้าห้องเรียนของตน" : "เผยแพร่บทเรียนก่อนเพิ่มห้องเรียน"}</p>
     {data?.legacyPublic && published && <p className="muted">ลิงก์นี้เปิดสาธารณะอยู่ การมอบหมายครั้งแรกจะจำกัดให้เฉพาะนักเรียนในห้องที่เลือก <a href={`/lessons/${id}`} target="_blank" rel="noreferrer">ดูหน้าสาธารณะ</a></p>}
     {data ? data.classrooms.length ? data.classrooms.map((room) =>
-      <ClassroomLabRow key={room.id} room={room} published={published} busy={busy} template={data.publishedWioLab}
+      <ClassroomLabRow key={room.id} lessonId={id} room={room} published={published} busy={busy} template={data.publishedWioLab}
         assign={(existingLabId) => assign(room, existingLabId)}
         saveLab={(changes) => mutate(`${path}/${room.id}/wio-lab`, {
           method: "PUT", body: JSON.stringify({ expectedAssignmentId: room.wioLab?.id ?? null, ...changes }),
@@ -59,11 +59,12 @@ export function LessonClassAssignments({ id, published, publishedRevision, onErr
   </section>;
 }
 
-function ClassroomLabRow({ room, published, busy, template, assign, saveLab }: {
-  room: Classroom; published: boolean; busy: boolean; template: WioLabSettings | null;
+function ClassroomLabRow({ lessonId, room, published, busy, template, assign, saveLab }: {
+  lessonId: string; room: Classroom; published: boolean; busy: boolean; template: WioLabSettings | null;
   assign: (existingLabId?: string) => Promise<void>;
   saveLab: (changes: { assignmentId: string | null } | { create: WioLabSettings }) => Promise<boolean>;
 }) {
+  const [copy, setCopy] = useState<"copied" | "manual">();
   const [choice, setChoice] = useState("");
   const [creating, setCreating] = useState<WioLabSettings | null>(null);
   const selectedId = room.wioChoices.some((lab) => lab.id === choice) ? choice : "";
@@ -76,6 +77,20 @@ function ClassroomLabRow({ room, published, busy, template, assign, saveLab }: {
     </select>
   </label>;
 
+  const studentUrl = published && room.assigned && room.wioLab?.active
+    ? `${location.origin}/lessons/${lessonId}/classrooms/${room.id}` : null;
+  const status = !published ? "เผยแพร่บทเรียนก่อน"
+    : !room.assigned ? "ยังไม่ได้มอบหมายให้ห้องนี้"
+    : !room.wioLab ? "แนบงาน Wio Terminal เพื่อให้นักเรียนเปิดตัวจำลอง"
+    : !room.wioLab.active ? "เปิดใช้งานหรือเปลี่ยนงาน Wio Terminal ที่แนบ"
+    : "นักเรียนในห้องนี้เปิดตัวจำลองได้";
+
+  async function copyStudentLink() {
+    if (!studentUrl) return;
+    try { await navigator.clipboard.writeText(studentUrl); setCopy("copied"); }
+    catch { setCopy("manual"); }
+  }
+
   return <section className="lesson-class-room" aria-label={room.name}>
     <div className="lesson-actions">
       <strong>{room.name}</strong>
@@ -85,6 +100,12 @@ function ClassroomLabRow({ room, published, busy, template, assign, saveLab }: {
         {room.assigned ? "นำบทเรียนออกจากห้อง" : template && !selectedId ? "มอบหมายและสร้างงาน Wio" : "มอบหมายบทเรียน"}
       </button>
     </div>
+    <p className="muted">{status}</p>
+    {studentUrl && <div className="lesson-actions">
+      <button className="button button-quiet" type="button" onClick={() => void copyStudentLink()}>คัดลอกลิงก์สำหรับนักเรียน</button>
+      {copy === "copied" && <span role="status">คัดลอกลิงก์แล้ว</span>}
+      {copy === "manual" && <label>ลิงก์สำหรับนักเรียน<input readOnly value={studentUrl} onFocus={(event) => event.currentTarget.select()} /></label>}
+    </div>}
     {room.assigned && <div>
       <h3>ห้องปฏิบัติการ Wio Terminal</h3>
       {room.wioLab ? <div className="lesson-actions">

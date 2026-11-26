@@ -1,4 +1,5 @@
 import type { WioLabSettings } from "../../src/wio-labs";
+import { WioDemo } from "./WioDemo";
 import { WioLabSettingsFields } from "./WioLabSettingsFields";
 import { AiImportPanel } from "./AiImportPanel";
 import { LessonClassAssignments } from "./LessonClassAssignments";
@@ -15,7 +16,7 @@ type LessonImage = { id: string; originalName: string; sizeBytes: number };
 type QuizLink = { quizId: string; label: string };
 type QuizOption = { id: string; title: string; publishedTitle: string | null; publishedAt: string | null; trashed?: boolean };
 
-export function LessonLibrary({ onError, onDirtyChange }: { onError: (message: string) => void; onDirtyChange: (dirty: boolean) => void }) {
+export function LessonLibrary({ teacherId, onError, onDirtyChange }: { teacherId: string; onError: (message: string) => void; onDirtyChange: (dirty: boolean) => void }) {
   const [lessons, setLessons] = useState<LessonRow[]>([]);
   const [showTrash, setShowTrash] = useState(false);
   const [title, setTitle] = useState("");
@@ -168,6 +169,11 @@ export function LessonLibrary({ onError, onDirtyChange }: { onError: (message: s
       <p className="muted">การมอบหมายบทเรียนที่เผยแพร่แล้วจะสร้างงานจากแบบฝึกนี้ หรือเลือกงานที่มีอยู่ในห้องได้</p>
       <div className="assignment-form"><WioLabSettingsFields lab={wioLab} change={setWioLab} /></div>
     </section>}
+    <section className="panel learning-panel">
+      <h2>ทดสอบตัวอย่าง Arduino</h2>
+      <p className="muted">วางโค้ดตัวอย่างเพื่อตรวจสอบก่อนเผยแพร่ แล้วใส่โค้ดเป็นข้อความที่นักเรียนคัดลอกได้</p>
+      <WioDemo key={lesson.id} draftScope={`${teacherId}:lesson:${lesson.id}`} preset={wioLab?.preset} />
+    </section>
     <LessonClassAssignments key={lesson.id} id={lesson.id} published={Boolean(lesson.publishedAt)} publishedRevision={lesson.publishedRevision} onError={onError} />
     <section className="panel lesson-quiz-links"><h2>ปุ่มแบบทดสอบในบทเรียน</h2><p className="muted">ปุ่มจะแสดงนอกเนื้อหา HTML และเปิดแบบทดสอบสำหรับนักเรียนที่เข้าสู่ระบบแล้ว</p>
       {quizLinks.map((link, index) => <div className="lesson-quiz-link" key={link.quizId}><label>แบบทดสอบ<select value={link.quizId} onChange={(event) => setQuizLinks((all) => all.map((item, i) => i === index ? { ...item, quizId: event.target.value } : item))}>{quizzes.filter((quiz) => quiz.id === link.quizId || !quiz.trashed).map((quiz) => <option key={quiz.id} value={quiz.id}>{quiz.publishedTitle ?? quiz.title}{quiz.trashed ? " · อยู่ในถังขยะชั่วคราว" : quiz.publishedAt ? " · เผยแพร่แล้ว" : " · ยังไม่เผยแพร่"}</option>)}</select></label><label>ข้อความบนปุ่ม<input value={link.label} maxLength={100} onChange={(event) => setQuizLinks((all) => all.map((item, i) => i === index ? { ...item, label: event.target.value } : item))}/></label><button className="text-button danger" onClick={() => setQuizLinks((all) => all.filter((_, i) => i !== index))}>นำออก</button></div>)}

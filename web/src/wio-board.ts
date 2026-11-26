@@ -1,5 +1,5 @@
 import type { WioLabId } from "../../src/wio-labs";
-import { parseSketch, sketchError, type Sketch, type Value } from "./wio-sketch";
+import { parseSketch, sketchError, type Expression, type ScalarType, type SketchFunction, type Statement, type Value } from "./wio-sketch";
 
 const pins = {
   LED_BUILTIN: 1, WIO_KEY_A: 2, WIO_KEY_B: 3, WIO_KEY_C: 4, WIO_LIGHT: 5,
@@ -16,17 +16,68 @@ const buttonPins = new Map<number, BoardButton>([
 ]);
 type Glyph = { kind: "glyph"; x: number; y: number; size: number; color: number; char: string };
 type Rectangle = { kind: "rect"; x: number; y: number; width: number; height: number; color: number };
-type Draw = Glyph | Rectangle;
+type Line = { kind: "line"; x: number; y: number; x2: number; y2: number; color: number };
+type Circle = { kind: "circle"; x: number; y: number; radius: number; filled: boolean; color: number };
+type Draw = Glyph | Rectangle | Line | Circle;
 export type BoardSnapshot = { led: boolean; buzzer: boolean; serial: string; width: number; height: number; background: number; draws: Draw[] };
 export type BoardInput = { buttons: Partial<Record<BoardButton, boolean>>; light: number };
 export const defaultBoardInput: BoardInput = { buttons: {}, light: 512 };
 export const blankBoard: BoardSnapshot = { led: false, buzzer: false, serial: "", width: 320, height: 240, background: 0, draws: [] };
 
-type Variable = { value: number; type: "int" | "bool"; constant: boolean };
+type Variable = { value: Value; type: ScalarType; constant: boolean };
 type Scope = Map<string, Variable>;
-type Statement = Sketch["setup"];
-type Expression = Extract<Statement, { kind: "assign" }>["value"];
-const isTrue = (value: Value) => value !== 0;
+type Execution<T> = Generator<number, T, void>;
+type Flow = "break" | "continue" | { value?: Value; line: number } | undefined;
+
+function integer(value: Value | undefined, line: number) {
+  if (typeof value === "object") return value.unsigned;
+  if (typeof value !== "number") sketchError(line, "คำสั่งนี้ต้องใช้จำนวนเต็ม");
+  return value;
+}
+
+function convert(value: Value, type: ScalarType, line: number): Value {
+  const number = integer(value, line);
+  switch (type) {
+    case "bool": return Number(number !== 0);
+    case "u32": return { unsigned: number >>> 0 };
+    case "u16": return number & 0xffff;
+    case "u8": return number & 0xff;
+    case "int": return number | 0;
+  }
+}
+
+function isTrue(value: Value, line: number) {
+  return integer(value, line) !== 0;
+}
+
+function binaryOperation(operator: string, left: Value, right: Value, line: number): Value {
+  const unsigned = typeof left === "object" || typeof right === "object";
+  const a = integer(left, line);
+  const b = integer(right, line);
+  const x = unsigned ? a >>> 0 : a;
+  const y = unsigned ? b >>> 0 : b;
+  const result = (value: number) => unsigned ? { unsigned: value >>> 0 } : value | 0;
+  switch (operator) {
+    case "+": return result(x + y);
+    case "-": return result(x - y);
+    case "*": return result(Math.imul(x, y));
+    case "/":
+    case "%":
+      if (!y) sketchError(line, "หารด้วยศูนย์ไม่ได้");
+      return result(operator === "/" ? x / y : x % y);
+    case "==": return Number(x === y);
+    case "!=": return Number(x !== y);
+    case "<": return Number(x < y);
+    case "<=": return Number(x <= y);
+    case ">": return Number(x > y);
+    case ">=": return Number(x >= y);
+    default: return Number(y !== 0);
+  }
+}
+
+function printable(value: Value | undefined) {
+  return typeof value === "object" ? String(value.unsigned) : String(value ?? "");
+}
 
 export function createBoard(source: string) {
   const program = parseSketch(source);
@@ -35,12 +86,13 @@ export function createBoard(source: string) {
   const transitions: { at: number; on: boolean }[] = [];
   const buzzerTransitions: typeof transitions = [];
   const globals: Scope = new Map();
-  const lcd = { begun: false, x: 0, y: 0, size: 1, color: colors.TFT_WHITE };
+  const lcd = { begun: false, x: 0, y: 0, size: 1, color: colors.TFT_WHITE, textBackground: null as number | null };
   let inputs = defaultBoardInput;
   let now = 0;
   let wake = 0;
   let steps = 0;
   let revision = 0;
+  let callDepth = 0;
 
   function step(line: number) {
     if (++steps > 20_000) sketchError(line, "โปรแกรมทำงานนานเกินไป ลองเพิ่ม delay() หรือตรวจสอบเงื่อนไขของลูป");
@@ -50,10 +102,6 @@ export function createBoard(source: string) {
       const item = scope[index].get(name);
       if (item) return item;
     }
-  }
-  function integer(value: Value | undefined, line: number) {
-    if (typeof value !== "number") sketchError(line, "คำสั่งนี้ต้องใช้จำนวนเต็ม");
-    return value;
   }
   function setOutput(output: "led" | "buzzer", on: boolean) {
     if (board[output] === on) return;
@@ -83,6 +131,34 @@ export function createBoard(source: string) {
     }
     draw({ kind: "rect", x: left, y: top, width: right - left, height: bottom - top, color });
   }
+  function drawLine(x: number, y: number, x2: number, y2: number, color: number) {
+    const dx = x2 - x, dy = y2 - y;
+    let entry = 0, exit = 1;
+    for (const [travel, distance] of [[-dx, x], [dx, board.width - 1 - x], [-dy, y], [dy, board.height - 1 - y]]) {
+      if (travel === 0) {
+        if (distance < 0) return;
+        continue;
+      }
+      const edge = distance / travel;
+      if (travel < 0) entry = Math.max(entry, edge);
+      else exit = Math.min(exit, edge);
+      if (entry > exit) return;
+    }
+    const startX = Math.round(x + dx * entry), startY = Math.round(y + dy * entry);
+    const endX = Math.round(x + dx * exit), endY = Math.round(y + dy * exit);
+    if (startX === endX && startY === endY) fillRectangle(startX, startY, 1, 1, color);
+    else draw({ kind: "line", x: startX, y: startY, x2: endX, y2: endY, color });
+  }
+  function drawCircle(x: number, y: number, radius: number, color: number, filled: boolean) {
+    if (radius < 0 || x + radius < 0 || y + radius < 0 || x - radius >= board.width || y - radius >= board.height) return;
+    if (radius === 0) { fillRectangle(x, y, 1, 1, color); return; }
+    const farthest = Math.hypot(Math.max(Math.abs(x), Math.abs(x - board.width)), Math.max(Math.abs(y), Math.abs(y - board.height)));
+    if (radius > farthest + 1) {
+      if (filled) fillRectangle(0, 0, board.width, board.height, color);
+      return;
+    }
+    draw({ kind: "circle", x, y, radius, color, filled });
+  }
   function printLcd(text: string) {
     for (const char of text.slice(0, 1024)) {
       if (char === "\r") continue;
@@ -92,21 +168,35 @@ export function createBoard(source: string) {
       }
       if (char === "\n") continue;
       if (lcd.x >= 0 && lcd.y >= 0 && lcd.y + 8 * lcd.size <= board.height) {
+        if (lcd.textBackground !== null) fillRectangle(lcd.x, lcd.y, 6 * lcd.size, 8 * lcd.size, lcd.textBackground);
         draw({ kind: "glyph", x: lcd.x, y: lcd.y, color: lcd.color, size: lcd.size, char });
       }
       lcd.x += 6 * lcd.size;
     }
   }
   function call(name: string, args: Value[], line: number): Value {
+    if (program.tft && name.startsWith(program.tft + ".")) name = "tft" + name.slice(program.tft.length);
+    else if (name.includes(".") && !name.startsWith("Serial.")) sketchError(line, `ไม่รู้จักออบเจ็กต์ ${name.split(".")[0]}`);
     const n = (index: number) => integer(args[index], line);
     const arity = (count: number) => {
       if (args.length !== count) sketchError(line, `${name} ต้องมี ${count} อาร์กิวเมนต์`);
     };
     if (name.startsWith("tft.")) {
-      if (!program.tft) sketchError(line, "ต้องประกาศ TFT_eSPI tft;");
-      if (!lcd.begun && name !== "tft.begin") sketchError(line, "ต้องเรียก tft.begin() ก่อนใช้ LCD");
+      if (!lcd.begun && name !== "tft.begin" && name !== "tft.init" && name !== "tft.color565") sketchError(line, "เรียก tft.begin() หรือ tft.init() ก่อนใช้ LCD");
     }
     switch (name) {
+      case "millis":
+        arity(0);
+        return { unsigned: now >>> 0 };
+      case "map": {
+        arity(5);
+        const span = (n(2) - n(1)) | 0;
+        if (!span) sketchError(line, "map() ต้องใช้ช่วงอินพุตที่กว้างกว่าศูนย์");
+        return (Math.trunc(Math.imul(n(0) - n(1), n(4) - n(3)) / span) + n(3)) | 0;
+      }
+      case "constrain":
+        arity(3);
+        return Math.min(Math.max(n(0), n(1)), n(2));
       case "pinMode": {
         arity(2);
         if (!Object.values(pins).includes(n(0))) sketchError(line, "พินนี้ไม่อยู่บนแผงจำลอง");
@@ -143,10 +233,11 @@ export function createBoard(source: string) {
       case "Serial.print":
       case "Serial.println":
         if (name === "Serial.print" || args.length !== 0) arity(1);
-        board.serial = (board.serial + (args[0] ?? "") + (name === "Serial.println" ? "\n" : "")).slice(-4096);
+        board.serial = (board.serial + printable(args[0]) + (name === "Serial.println" ? "\n" : "")).slice(-4096);
         revision++;
         break;
       case "tft.begin":
+      case "tft.init":
         arity(0);
         lcd.begun = true;
         board.width = 240;
@@ -171,6 +262,49 @@ export function createBoard(source: string) {
         arity(5);
         fillRectangle(n(0), n(1), n(2), n(3), n(4) & 0xffff);
         break;
+      case "tft.drawPixel":
+        arity(3);
+        fillRectangle(n(0), n(1), 1, 1, n(2) & 0xffff);
+        break;
+      case "tft.drawLine":
+        arity(5);
+        drawLine(n(0), n(1), n(2), n(3), n(4) & 0xffff);
+        break;
+      case "tft.drawRect": {
+        arity(5);
+        const x = n(0), y = n(1), width = n(2), height = n(3), color = n(4) & 0xffff;
+        if (width <= 0 || height <= 0) break;
+        fillRectangle(x, y, width, 1, color);
+        fillRectangle(x, y + height - 1, width, 1, color);
+        fillRectangle(x, y, 1, height, color);
+        fillRectangle(x + width - 1, y, 1, height, color);
+        break;
+      }
+      case "tft.drawCircle":
+      case "tft.fillCircle":
+        arity(4);
+        drawCircle(n(0), n(1), n(2), n(3) & 0xffff, name === "tft.fillCircle");
+        break;
+      case "tft.width":
+      case "tft.height":
+        arity(0);
+        return name === "tft.width" ? board.width : board.height;
+      case "tft.color565":
+        arity(3);
+        return ((n(0) & 0xf8) << 8) | ((n(1) & 0xfc) << 3) | ((n(2) & 0xf8) >> 3);
+      case "tft.drawString":
+      case "tft.drawNumber": {
+        if (args.length !== 3 && (args.length !== 4 || n(3) !== 1)) sketchError(line, `${name} ใช้ข้อความ/ตัวเลข พิกัด x, y และเลือกใช้ฟอนต์ 1 ได้`);
+        if (name === "tft.drawString" && typeof args[0] !== "string") sketchError(line, "drawString() ต้องใช้ข้อความ");
+        const text = name === "tft.drawNumber" ? String(n(0) | 0) : printable(args[0]);
+        const { x, y } = lcd;
+        lcd.x = n(1);
+        lcd.y = n(2);
+        printLcd(text);
+        lcd.x = x;
+        lcd.y = y;
+        return text.length * 6 * lcd.size;
+      }
       case "tft.setCursor":
         arity(2);
         lcd.x = n(0);
@@ -182,21 +316,45 @@ export function createBoard(source: string) {
         lcd.size = n(0);
         break;
       case "tft.setTextColor":
-        arity(1);
+        if (args.length !== 2) arity(1);
         lcd.color = n(0) & 0xffff;
+        lcd.textBackground = args.length === 2 ? n(1) & 0xffff : null;
         break;
       case "tft.print":
       case "tft.println":
         if (name === "tft.print" || args.length !== 0) arity(1);
-        printLcd(String(args[0] ?? "") + (name === "tft.println" ? "\n" : ""));
+        printLcd(printable(args[0]) + (name === "tft.println" ? "\n" : ""));
         break;
       default:
-        sketchError(line, `ไม่รองรับคำสั่ง ${name}()`);
+        sketchError(line, `ตัวจำลองไม่รองรับคำสั่ง ${name}() ดูรายการคำสั่งที่รองรับด้านล่าง`);
     }
     return 0;
   }
 
-  function evaluate(expr: Expression, scope: Scope[]): Value {
+  function writable(name: string, line: number, scope: Scope[]) {
+    const item = variable(name, scope);
+    if (!item || item.constant) sketchError(line, `แก้ไขตัวแปร ${name} ไม่ได้`);
+    return item;
+  }
+
+  function* runFunction(fn: SketchFunction, args: Value[], line: number): Execution<Value | undefined> {
+    if (fn.parameters.length !== args.length) sketchError(line, `${fn.name.text} ต้องมี ${fn.parameters.length} อาร์กิวเมนต์`);
+    if (++callDepth > 32) sketchError(line, "เรียกฟังก์ชันซ้อนกันเกินขีดจำกัด");
+    const locals: Scope = new Map(fn.parameters.map(({ token, type, constant }, index) => [
+      token.text, { type, constant, value: convert(args[index], type, line) },
+    ]));
+    try {
+      const scope = [globals, locals];
+      const flow = fn.body.kind === "block" ? yield* executeAll(fn.body.body, scope) : yield* execute(fn.body, scope);
+      if (fn.type === "void") return;
+      if (!flow || typeof flow === "string" || flow.value === undefined) sketchError(fn.name.line, `ฟังก์ชัน ${fn.name.text} ต้องคืนค่า`);
+      return convert(flow.value, fn.type, flow.line);
+    } finally {
+      callDepth--;
+    }
+  }
+
+  function* evaluate(expr: Expression, scope: Scope[], allowVoid = false): Execution<Value> {
     if ("token" in expr) step(expr.token.line);
     switch (expr.kind) {
       case "value": return expr.value;
@@ -205,91 +363,105 @@ export function createBoard(source: string) {
         if (value === undefined) sketchError(expr.token.line, `ไม่รู้จัก ${expr.token.text}`);
         return value;
       }
-      case "call": return call(expr.token.text, expr.args.map((item) => evaluate(item, scope)), expr.token.line);
+      case "call": {
+        const { text, line } = expr.token;
+        const args: Value[] = [];
+        for (const arg of expr.args) args.push(yield* evaluate(arg, scope));
+        if (text === "delay") {
+          if (!allowVoid || args.length !== 1) sketchError(line, "เรียก delay() เป็นคำสั่งพร้อมเวลา 1 ค่า");
+          const ms = integer(args[0], line);
+          if (ms < 0) sketchError(line, "delay() ห้ามติดลบ");
+          if (ms) yield ms;
+          return 0;
+        }
+        const fn = program.functions.get(text);
+        if (!fn) return call(text, args, line);
+        if (fn.type === "void" && !allowVoid) sketchError(line, `${text}() เป็นฟังก์ชัน void และไม่มีค่าคืน`);
+        return (yield* runFunction(fn, args, line)) ?? 0;
+      }
       case "unary": {
-        const value = integer(evaluate(expr.operand, scope), expr.token.line);
-        if (expr.token.text === "!") return Number(!value);
-        return (expr.token.text === "-" ? -value : value) | 0;
+        const value = yield* evaluate(expr.operand, scope);
+        const line = expr.token.line;
+        if (expr.token.text === "!") return Number(!isTrue(value, line));
+        if (expr.token.text === "+") { integer(value, line); return value; }
+        return binaryOperation("-", 0, value, line);
       }
       case "binary": {
-        const line = expr.token.line;
-        const left = integer(evaluate(expr.left, scope), line);
-        if (expr.token.text === "&&" && !left) return 0;
-        if (expr.token.text === "||" && left) return 1;
-        const right = integer(evaluate(expr.right, scope), line);
-        switch (expr.token.text) {
-          case "+": return (left + right) | 0;
-          case "-": return (left - right) | 0;
-          case "*": return Math.imul(left, right);
-          case "/":
-          case "%":
-            if (right === 0) sketchError(line, "หารด้วยศูนย์ไม่ได้");
-            return (expr.token.text === "/" ? left / right : left % right) | 0;
-          case "==": return Number(left === right);
-          case "!=": return Number(left !== right);
-          case "<": return Number(left < right);
-          case "<=": return Number(left <= right);
-          case ">": return Number(left > right);
-          case ">=": return Number(left >= right);
-          default: return Number(Boolean(right));
-        }
+        const { text, line } = expr.token;
+        const left = yield* evaluate(expr.left, scope);
+        if (text === "&&" && !isTrue(left, line)) return 0;
+        if (text === "||" && isTrue(left, line)) return 1;
+        return binaryOperation(text, left, yield* evaluate(expr.right, scope), line);
+      }
+      case "assign": {
+        const { line, text } = expr.token;
+        const item = writable(expr.target.text, line, scope);
+        const right = yield* evaluate(expr.value, scope);
+        item.value = convert(text === "=" ? right : binaryOperation(text[0], item.value, right, line), item.type, line);
+        return item.value;
+      }
+      case "increment": {
+        const { text, line } = expr.token;
+        const item = writable(expr.target.text, line, scope);
+        if (item.type === "bool") sketchError(line, "ใช้ ++ หรือ -- กับ bool ไม่ได้");
+        const previous = item.value;
+        item.value = convert(binaryOperation(text[0], previous, 1, line), item.type, line);
+        return expr.post ? previous : item.value;
       }
     }
   }
 
-  function* execute(stmt: Statement, scope: Scope[]): Generator<number, void, void> {
+  function* executeAll(statements: Statement[], scope: Scope[]): Execution<Flow> {
+    for (const statement of statements) {
+      const flow = yield* execute(statement, scope);
+      if (flow) return flow;
+    }
+  }
+
+  function* execute(stmt: Statement, scope: Scope[]): Execution<Flow> {
     switch (stmt.kind) {
       case "declare": {
         const { text, line } = stmt.token;
         const currentScope = scope[scope.length - 1];
         if (constants.has(text) || currentScope.has(text)) sketchError(line, `ตัวแปร ${text} ถูกประกาศแล้ว`);
-        const value = integer(evaluate(stmt.value, scope), line);
-        currentScope.set(text, { value: stmt.type === "bool" ? Number(Boolean(value)) : value, type: stmt.type, constant: stmt.constant });
+        const value = convert(yield* evaluate(stmt.value, scope), stmt.type, line);
+        currentScope.set(text, { value, type: stmt.type, constant: stmt.constant });
         break;
       }
-      case "assign": {
-        const { text, line } = stmt.token;
-        const item = variable(text, scope);
-        if (!item || item.constant) sketchError(line, `แก้ไขตัวแปร ${text} ไม่ได้`);
-        const value = integer(evaluate(stmt.value, scope), line);
-        item.value = item.type === "bool" ? Number(Boolean(value)) : value;
-        break;
-      }
-      case "call": {
-        const { token, args } = stmt.expression;
-        if (token.text === "delay") {
-          if (args.length !== 1) sketchError(token.line, "delay() ต้องมี 1 อาร์กิวเมนต์");
-          const ms = integer(evaluate(args[0], scope), token.line);
-          if (ms < 0) sketchError(token.line, "delay() ห้ามติดลบ");
-          if (ms) yield ms;
-        } else evaluate(stmt.expression, scope);
-        break;
-      }
-      case "block": {
-        const inner = [...scope, new Map<string, Variable>()];
-        for (const item of stmt.body) yield* execute(item, inner);
-        break;
-      }
+      case "expression": yield* evaluate(stmt.expression, scope, true); break;
+      case "block": return yield* executeAll(stmt.body, [...scope, new Map()]);
       case "if": {
-        const branch = isTrue(evaluate(stmt.condition, scope)) ? stmt.yes : stmt.no;
-        if (branch) yield* execute(branch, [...scope, new Map()]);
+        const condition = yield* evaluate(stmt.condition, scope);
+        const branch = isTrue(condition, "token" in stmt.condition ? stmt.condition.token.line : 1) ? stmt.yes : stmt.no;
+        if (branch) return yield* execute(branch, [...scope, new Map()]);
         break;
       }
-      case "while":
-        while (isTrue(evaluate(stmt.condition, scope))) {
+      case "loop": {
+        const inside = [...scope, new Map()];
+        if (stmt.initial) yield* execute(stmt.initial, inside);
+        while (!stmt.condition || isTrue(yield* evaluate(stmt.condition, inside), stmt.line)) {
           step(stmt.line);
-          yield* execute(stmt.body, [...scope, new Map()]);
+          const flow = yield* execute(stmt.body, [...inside, new Map()]);
+          if (flow === "break") break;
+          if (flow && flow !== "continue") return flow;
+          if (stmt.update) yield* evaluate(stmt.update, inside, true);
         }
         break;
+      }
+      case "return": return { line: stmt.line, value: stmt.value ? yield* evaluate(stmt.value, scope) : undefined };
+      case "break":
+      case "continue": return stmt.kind;
     }
   }
 
   function* run() {
-    for (const declaration of program.globals) yield* execute(declaration, [globals]);
-    yield* execute(program.setup, [globals]);
+    yield* executeAll(program.globals, [globals]);
+    const setup = program.functions.get("setup")!;
+    const loop = program.functions.get("loop")!;
+    yield* runFunction(setup, [], setup.name.line);
     while (true) {
       const started = now;
-      yield* execute(program.loop, [globals]);
+      yield* runFunction(loop, [], loop.name.line);
       if (now === started) yield 1;
     }
   }
@@ -314,18 +486,27 @@ export function createBoard(source: string) {
   };
 }
 
-function covers(rect: Rectangle, x: number, y: number) {
-  return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
+type Shape = Exclude<Draw, Glyph>;
+
+function covers(shape: Shape, x: number, y: number) {
+  if (shape.kind === "rect") return x >= shape.x && x < shape.x + shape.width && y >= shape.y && y < shape.y + shape.height;
+  if (shape.kind === "circle") {
+    const distance = Math.hypot(x - shape.x, y - shape.y);
+    return shape.filled ? distance <= shape.radius : Math.abs(distance - shape.radius) <= 0.5;
+  }
+  const dx = shape.x2 - shape.x, dy = shape.y2 - shape.y;
+  const t = ((x - shape.x) * dx + (y - shape.y) * dy) / (dx * dx + dy * dy);
+  return t >= 0 && t <= 1 && Math.hypot(x - shape.x - t * dx, y - shape.y - t * dy) <= 0.5;
 }
 
 function lcdShowsMessage(board: BoardSnapshot, text: string, completeLine = false) {
   const glyphs = new Map<string, { glyph: Glyph; index: number }>();
-  const rectangles: { rect: Rectangle; index: number }[] = [];
+  const shapes: { shape: Shape; index: number }[] = [];
   for (const [index, item] of board.draws.entries()) {
     if (item.kind === "glyph") glyphs.set(`${item.x},${item.y},${item.size}`, { glyph: item, index });
-    else rectangles.push({ rect: item, index });
+    else shapes.push({ shape: item, index });
   }
-  rectangles.reverse();
+  shapes.reverse();
   return [...glyphs.values()].some(({ glyph: { x, y, size, char } }) => {
     if (char !== text[0]) return false;
     const last = glyphs.get(`${x + text.length * 6 * size},${y},${size}`);
@@ -333,19 +514,19 @@ function lcdShowsMessage(board: BoardSnapshot, text: string, completeLine = fals
     return [...text].every((letter, offset) => {
       const cell = glyphs.get(`${x + offset * 6 * size},${y},${size}`);
       if (cell?.glyph.char !== letter) return false;
-      const rect = rectangles.find(({ rect }) => covers(rect, cell.glyph.x + 3 * size, y + 4 * size));
-      return (!rect || rect.index < cell.index) && cell.glyph.color !== (rect?.rect.color ?? board.background);
+      const backdrop = shapes.find(({ shape }) => covers(shape, cell.glyph.x + 3 * size, y + 4 * size));
+      return (!backdrop || backdrop.index < cell.index) && cell.glyph.color !== (backdrop?.shape.color ?? board.background);
     });
   });
 }
 
 function lcdShowsLightBar(board: BoardSnapshot, reading: number) {
   const width = Math.floor(reading * 200 / 1023);
-  const rectangles = board.draws.filter((item): item is Rectangle => item.kind === "rect").reverse();
+  const shapes = board.draws.filter((item): item is Shape => item.kind !== "glyph").reverse();
   for (let offset = 0; offset <= 200; offset++) {
     for (const y of [56, 71]) {
-      const rect = rectangles.find((rect) => covers(rect, 24 + offset, y));
-      if (((rect?.color ?? board.background) === colors.TFT_GREEN) !== (offset < width)) return false;
+      const shape = shapes.find((shape) => covers(shape, 24 + offset, y));
+      if (((shape?.color ?? board.background) === colors.TFT_GREEN) !== (offset < width)) return false;
     }
   }
   return true;

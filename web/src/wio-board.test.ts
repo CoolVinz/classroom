@@ -130,3 +130,78 @@ test("buzzer sounds for exactly 200 ms per press and enforces its pin and PWM ra
   expect(() => createBoard(source.replace("128", "256")).advance(0, { light: 512, buttons: { A: true } })).toThrow("0 ถึง 255");
   expect(() => createBoard(source.replace("pinMode(WIO_BUZZER, OUTPUT);", "")).advance(0, { light: 512, buttons: { A: true } })).toThrow("OUTPUT");
 });
+
+test("runs a full Arduino lesson with millis, typed helper functions and for-loop controls", () => {
+  const board = createBoard(solution("timed-lesson"));
+  for (let tick = 0; tick < 9; tick++) board.advance(100);
+  expect(board.transitions.map(({ at }) => at)).toEqual([100, 200, 300, 400, 500, 600, 700, 800, 900]);
+  expect(board.snapshot().serial).toBe("1\n1\n4\n4\n9\n9\n9\n9\n9\n");
+});
+
+test("runs Wio LCD lesson methods, colors and integer sensor mapping", () => {
+  const board = createBoard(solution("lcd-lesson"));
+  board.advance(0, { light: 512, buttons: {} });
+  expect(board.snapshot()).toMatchObject({ width: 320, height: 240 });
+  const draws = board.snapshot().draws;
+  expect(draws).toContainEqual({ kind: "rect", x: 3, y: 4, width: 1, height: 1, color: 0xffe0 });
+  expect(draws).toContainEqual({ kind: "line", x: 12, y: 36, x2: 308, y2: 36, color: 0xffff });
+  expect(draws).toContainEqual({ kind: "rect", x: 12, y: 47, width: 202, height: 1, color: 0xffff });
+  expect(draws).toContainEqual({ kind: "circle", x: 262, y: 53, radius: 10, filled: false, color: 0x07ff });
+  expect(draws).toContainEqual({ kind: "circle", x: 262, y: 53, radius: 4, filled: true, color: 0x07ff });
+  expect(draws.at(-1)).toEqual({ kind: "rect", x: 13, y: 48, width: 100, height: 11, color: 0x07e0 });
+  expect(draws.flatMap((item) => item.kind === "glyph" ? [item.char] : []).join("")).toBe("Light:512");
+});
+
+test("normalizes millis subtraction with unsigned arithmetic and nested helper delays", () => {
+  const board = createBoard(`unsigned long previous = 4294967290UL;
+void setup() { pinMode(LED_BUILTIN, OUTPUT); }
+int prepared() { delay(3); return HIGH; }
+void loop() {
+  if (millis() - previous < 10UL) return;
+  int value = prepared();
+  digitalWrite(LED_BUILTIN, value);
+  delay(500);
+}`);
+  board.advance(6);
+  expect(board.transitions).toEqual([]);
+  board.advance(1);
+  expect(board.transitions).toEqual([{ at: 7, on: true }]);
+});
+
+test("scopes helper parameters and supports signed and unsigned integer updates", () => {
+  const board = createBoard(`int x = 9;
+void setup() {
+  int x = 2;
+  int a = x++;
+  int b = ++x;
+  x += a + b;
+  for (int i = 3; i > 0; --i) x -= 1;
+  uint8_t byteValue = 255;
+  byteValue++;
+  Serial.println(x);
+  Serial.println(valueFromGlobal());
+  Serial.println(byteValue);
+}
+void loop() {}
+int valueFromGlobal() { return x; }`);
+  board.advance(0);
+  expect(board.snapshot().serial).toBe("7\n9\n0\n");
+});
+
+test("clips huge drawing coordinates and keeps infinite loops and recursion bounded", () => {
+  const board = createBoard(`#include <TFT_eSPI.h>
+TFT_eSPI tft;
+void setup() {
+  tft.init();
+  tft.setRotation(3);
+  tft.drawLine(-2000000000, 5, 2000000000, 5, TFT_WHITE);
+  tft.drawCircle(160, 120, 2000000000, TFT_WHITE);
+}
+void loop() {}`);
+  board.advance(0);
+  expect(board.snapshot().draws).toEqual([{ kind: "line", x: 0, y: 5, x2: 319, y2: 5, color: 0xffff }]);
+  expect(() => createBoard("void setup() {}\nvoid loop() { for (;;) {} }").advance(1)).toThrow("บรรทัด 2");
+  expect(() => createBoard("void setup() {}\nvoid loop() { rec(); }\nvoid rec() { rec(); }").advance(1)).toThrow("บรรทัด 3");
+  expect(() => createBoard("class Example {};\nvoid setup() {}\nvoid loop() {}")).toThrow("บรรทัด 1");
+  expect(() => createBoard("void setup() {}\nvoid loop() { break; }")).toThrow("บรรทัด 2");
+});

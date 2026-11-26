@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { wioLabs, wioSketchMaxBytes, type WioLabId } from "../../src/wio-labs";
+import { wioLabs, wioSketchMaxBytes, wioSupportedCode, type WioLabId } from "../../src/wio-labs";
 import { blankBoard, defaultBoardInput, type BoardButton, type BoardSnapshot } from "./wio-board";
 import type { SimulatorRequest, SimulatorResponse } from "./wio-simulator.worker";
 import "./wio-lab.css";
@@ -24,9 +24,17 @@ function Display({ board }: { board: BoardSnapshot }) {
     for (const item of board.draws) {
       ctx.fillStyle = rgb565(item.color);
       if (item.kind === "rect") ctx.fillRect(item.x, item.y, item.width, item.height);
-      else {
+      else if (item.kind === "glyph") {
         ctx.font = `${8 * item.size}px monospace`;
         ctx.fillText(item.char, item.x, item.y, 6 * item.size);
+      } else {
+        ctx.beginPath();
+        if (item.kind === "line") {
+          ctx.moveTo(item.x + .5, item.y + .5);
+          ctx.lineTo(item.x2 + .5, item.y2 + .5);
+        } else ctx.arc(item.x + .5, item.y + .5, item.radius, 0, 2 * Math.PI);
+        if (item.kind === "circle" && item.filled) ctx.fill();
+        else { ctx.strokeStyle = ctx.fillStyle; ctx.lineCap = "square"; ctx.stroke(); }
       }
     }
   }, [board]);
@@ -104,7 +112,7 @@ function useBuzzerSound(on: boolean) {
 }
 
 export default function WioLab({ lab, draftKey, disabled, submit }: {
-  lab: WioLabId; draftKey: string; disabled: boolean; submit: (source: string) => Promise<void>;
+  lab: WioLabId; draftKey: string; disabled?: boolean; submit?: (source: string) => Promise<void>;
 }) {
   const preset = wioLabs[lab];
   const [source, setSource] = useState(() => readDraft(draftKey, preset.starter));
@@ -241,7 +249,7 @@ export default function WioLab({ lab, draftKey, disabled, submit }: {
   }
 
   async function sendSketch() {
-    if (!validSize || disabled || sending) return;
+    if (!submit || !validSize || disabled || sending) return;
     setSending(true);
     setNotice(undefined);
     try {
@@ -316,15 +324,17 @@ export default function WioLab({ lab, draftKey, disabled, submit }: {
         changeSource(preset.starter); setBoard(blankBoard);
       }}>คืนโค้ดเริ่มต้น</button>
       <button type="button" className="button button-quiet" disabled={!validSize} onClick={download}>ดาวน์โหลด .ino</button>
-      <button type="button" className="button button-primary" disabled={!validSize || disabled || sending} onClick={() => void sendSketch()}>{sending ? "กำลังส่ง…" : "ส่งไฟล์ .ino ให้ครู"}</button>
+      {submit && <button type="button" className="button button-primary" disabled={!validSize || disabled || sending} onClick={() => void sendSketch()}>{sending ? "กำลังส่ง…" : "ส่งไฟล์ .ino ให้ครู"}</button>}
     </div>
     {sourceBytes > wioSketchMaxBytes && <p role="alert" className="wio-notice" data-error>โค้ดต้องมีขนาดไม่เกิน 16 KiB</p>}
     {notice && <p role={notice.error ? "alert" : "status"} className="wio-notice" data-error={notice.error}>{notice.text}</p>}
     <details className="wio-help">
-      <summary>คำสั่งที่รองรับและการส่งงาน</summary>
-      <p>ตัวจำลองฝึกพื้นฐาน Arduino ใช้ <code>setup()</code>, <code>loop()</code>, ตัวแปร <code>int</code> / <code>bool</code>, <code>if</code> / <code>else</code>, <code>while</code>, <code>delay()</code>, GPIO, Serial และคำสั่ง LCD พื้นฐานของ <code>TFT_eSPI</code></p>
+      <summary>คำสั่งที่รองรับ</summary>
+      <ul>{wioSupportedCode.map(({ label, commands }) => <li key={label}><strong>{label}</strong> · {commands}</li>)}</ul>
       <p>เมื่อโฟกัสสวิตช์ห้าทิศทาง ใช้ปุ่มลูกศรเพื่อเปลี่ยนทิศ และใช้ Enter หรือ Space กดปุ่มที่เลือกอยู่ เปิดเสียงบัซเซอร์ได้จากแผงควบคุม</p>
-      <p>การตรวจฝึกไม่คิดคะแนน กดส่งได้แม้ยังตรวจไม่ผ่าน ทุกครั้งที่ส่งจะเก็บเป็นไฟล์ใหม่ ดาวน์โหลดไปลองคอมไพล์และทดสอบกับบอร์ดจริงได้</p>
+      {submit ? <p>การตรวจฝึกไม่คิดคะแนน กดส่งได้แม้ยังตรวจไม่ผ่าน ทุกครั้งที่ส่งจะเก็บเป็นไฟล์ใหม่</p>
+        : <p>โค้ดทดลองเก็บแยกจากงานของนักเรียน ใช้ทดสอบตัวอย่างก่อนนำไปใส่ในบทเรียน</p>}
+      <p>ดาวน์โหลดเพื่อลองคอมไพล์และทดสอบกับบอร์ดจริงได้</p>
     </details>
   </section>;
 }

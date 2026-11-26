@@ -1,7 +1,7 @@
 import { importFields, importObject, importString, maxAiImportBytes, readImportJson } from "./ai-import-json";
 import { parseQuizImport, quizImportExample } from "./quiz-import";
 import { normalizeWorksheetQuestions } from "./worksheet-core";
-import { isWioLabId, validWioMaxScore, wioLabIds, wioLabs, type WioLabSettings } from "./wio-labs";
+import { isWioLabId, validWioMaxScore, wioLabIds, wioLabs, wioSupportedCode, type WioLabSettings } from "./wio-labs";
 
 export function parseWorksheetImportText(source: string) {
   return parseWorksheetImport(readImportJson(source), "worksheet");
@@ -126,7 +126,7 @@ export function aiImportTemplate(kind: "worksheet" | "pack" | "wio", topic: stri
     lab: { preset: "blink", title: wioLabs.blink.title, instructions: wioLabs.blink.instructions, maxScore: 10 },
   };
   const task = kind === "wio"
-    ? `สร้างบทเรียนภาษาไทยพร้อมห้องปฏิบัติการ Wio Terminal ใช้ HTML ใน lesson.html และ framework เป็น bootstrap หรือ none เลือก lab.preset จากรายการนี้ แล้วเขียนคำชี้แจงให้ตรงกับการตรวจของ Classroom โปรแกรมจำลองมีโค้ดเริ่มต้นให้แล้ว ห้ามฝังตัวจำลองหรือเฉลยลงในบทเรียน maxScore เป็นคะแนนเต็มบวกที่มีทศนิยมไม่เกิน 2 ตำแหน่ง\n${wioLabIds.map((id) => `- ${id}: ${wioLabs[id].instructions}`).join("\n")}`
+    ? `สร้างบทเรียนภาษาไทยพร้อมห้องปฏิบัติการ Wio Terminal ใช้ HTML ใน lesson.html และ framework เป็น bootstrap หรือ none เลือก lab.preset จากรายการนี้ แล้วเขียนคำชี้แจงให้ตรงกับการตรวจของ Classroom โปรแกรมจำลองมีโค้ดเริ่มต้นให้แล้ว ห้ามฝังตัวจำลองหรือเฉลยลงในบทเรียน maxScore เป็นคะแนนเต็มบวกที่มีทศนิยมไม่เกิน 2 ตำแหน่ง\n${wioLabIds.map((id) => `- ${id}: ${wioLabs[id].instructions}`).join("\n")}\n\nถ้าใส่ตัวอย่างโค้ด ให้ใส่ Arduino sketch ที่สมบูรณ์พร้อม setup() และ loop() ใน <pre><code> และแปลง &, <, > เป็น HTML entities เพื่อให้คัดลอกไปใช้ได้ ห้ามใส่ Arduino sketch ใน <script> ใช้เฉพาะคำสั่งในรายการนี้\n${wioSupportedCode.map(({ label, commands }) => `- ${label}: ${commands}`).join("\n")}`
     : kind === "pack"
     ? `สร้างชุดบทเรียนภาษาไทยที่มีบทเรียน แบบทดสอบ และใบงานในหัวข้อเดียวกัน บทเรียนใช้ HTML ฉบับเต็มใน html พร้อม Bootstrap ที่ Classroom โหลดให้อยู่แล้ว เพิ่ม CSS ใน css และ JavaScript ใน javascript ได้เมื่อจำเป็น ห้ามเรียก API หรือใช้ไฟล์ภายนอก เก็บเฉลยจริงไว้ใน quiz และ worksheet เท่านั้น ใช้แบบทดสอบ 1–100 ข้อ แบบ multiple-choice และ true-false ตามตัวอย่าง ใส่ explanation สั้น ๆ ให้ครบทุกข้อ ${worksheetRules}`
     : `สร้างใบงานภาษาไทย ${worksheetRules}`;
