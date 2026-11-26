@@ -1,0 +1,13 @@
+export type GroundPoint = { x: number; z: number };
+export type SpaceProp = { x: number; y: number; z: number; width: number; height: number; depth: number };
+export type CollisionProp = GroundPoint & { halfWidth: number; halfDepth: number; bottom: number };
+export const avatarRadius: number;
+export const avatarHeight: number;
+export const jumpApex: number;
+export const signBoard: SpaceProp;
+export const signPost: SpaceProp;
+export const studentTreeTrunk: SpaceProp;
+export function studentSpaceCollision(count: number): CollisionProp[][];
+export function blockingProp(rows: CollisionProp[][], from: GroundPoint, to: GroundPoint, radius?: number, headHeight?: number): CollisionProp | undefined;
+export function slidePastProps(rows: CollisionProp[][], from: GroundPoint, to: GroundPoint, headHeight?: number): GroundPoint;
+export function clearGround<T extends GroundPoint>(rows: CollisionProp[][], point: T, radius?: number, headHeight?: number): T | GroundPoint;

@@ -1,7 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { knockPlayer, respawnPlayer } from "./combat.mjs";
-import { advanceVehicle, hitsMovingBody, MAX_FLIGHT_HEIGHT, trainBodies, validVehicleInput, vehicleRespawn, vehicleSpecs } from "./vehicles.mjs";
+import { advanceFuelLanding, advanceVehicle, flightFuelRemaining, hitsMovingBody, LANDING_HEIGHT, MAX_FLIGHT_HEIGHT, trainBodies, validVehicleInput, vehicleRespawn, vehicleSpecs } from "./vehicles.mjs";
+
+test("fuel is used at takeoff and while hovering, and a forced landing reaches clear ground", () => {
+  assert.equal(flightFuelRemaining(30, 0, 0, 20), 30);
+  assert.equal(flightFuelRemaining(30, 0, 1, 0.5), 29.5);
+  assert.equal(flightFuelRemaining(7, 2, 0, 4), 3);
+  assert.equal(flightFuelRemaining(3, 2, 1, 4), 0);
+  let vehicle = { x: 1, y: 1, z: 2, rotation: 0 };
+  const target = { x: 5, z: 2 };
+  for (let tick = 0; tick < 15; tick++) vehicle = advanceFuelLanding(vehicle, target, 0.05);
+  assert.ok(vehicle.y > LANDING_HEIGHT && vehicle.x < target.x);
+  for (let tick = 0; tick < 10; tick++) vehicle = advanceFuelLanding(vehicle, target, 0.05);
+  assert.deepEqual(vehicle, { ...target, y: 0, rotation: 0 });
+});
 
 test("moving train checks its engine and trailing cars across a tick, with narrow clearance at the sides", () => {
   const from = { x: 0, y: 0, z: 0, rotation: 0 }, to = { ...from, z: 2 };

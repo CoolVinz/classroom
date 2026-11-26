@@ -9,6 +9,7 @@ export const VEHICLE_BAY_Z = 11;
 export const MAX_FLIGHT_HEIGHT = 12;
 export const VEHICLE_ENTER_DISTANCE = 4;
 export const LANDING_HEIGHT = 0.3;
+const climbSpeed = 4;
 export const vehicleRespawn = { x: -8, z: 11 };
 export const trainBodies = [
   { offset: 2.3, halfWidth: 1, halfLength: 1.3, height: 2.3 },
@@ -28,9 +29,26 @@ export function advanceVehicle(vehicle, input, dt, bounds) {
   const distance = input.throttle * dt * spec.speed;
   return {
     x: clamp(vehicle.x + Math.sin(rotation) * distance, -55, 55),
-    y: spec.flying ? clamp(vehicle.y + input.lift * dt * 4, 0, MAX_FLIGHT_HEIGHT) : 0,
+    y: spec.flying ? clamp(vehicle.y + input.lift * dt * climbSpeed, 0, MAX_FLIGHT_HEIGHT) : 0,
     z: clamp(vehicle.z + Math.cos(rotation) * distance, bounds.minZ, 25),
     rotation: Math.atan2(Math.sin(rotation), Math.cos(rotation)),
+  };
+}
+
+export function flightFuelRemaining(seconds, altitude, lift, elapsed) {
+  return altitude > 0 || lift > 0 ? Math.max(0, seconds - Math.max(0, elapsed)) : seconds;
+}
+
+export function advanceFuelLanding(vehicle, target, dt) {
+  const dx = target.x - vehicle.x, dz = target.z - vehicle.z;
+  const distance = Math.hypot(dx, dz);
+  const step = Math.min(distance, climbSpeed * dt);
+  const floor = step < distance ? Math.min(vehicle.y, LANDING_HEIGHT + 0.02) : 0;
+  return {
+    x: distance ? vehicle.x + (dx / distance) * step : target.x,
+    y: Math.max(floor, vehicle.y - climbSpeed * dt),
+    z: distance ? vehicle.z + (dz / distance) * step : target.z,
+    rotation: vehicle.rotation,
   };
 }
 

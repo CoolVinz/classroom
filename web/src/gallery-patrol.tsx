@@ -6,7 +6,7 @@ import { vehicleKinds } from "../../gallery-server/src/vehicles.mjs";
 import { vehicleNames } from "./gallery-vehicles";
 
 export type WantedEntry = WantedRank & { name: string };
-export type OfficerView = { x: number; z: number; rotation: number; walking: boolean; targetId: string };
+export type OfficerView = { x: number; z: number; rotation: number; walking: boolean; targetId: string; kind?: "foot" | "car" };
 
 export function MostWanted({ entries, targetId }: { entries: WantedEntry[]; targetId: string }) {
   return <section className="gallery-management gallery-wanted" aria-label="Most Wanted">
@@ -24,11 +24,16 @@ export function PatrolSettingsForm({ settings, save }: { settings: PatrolSetting
     { key: "extraSeconds", label: "เพิ่มต่อการชนหรือยิงล้มอีกหนึ่งครั้ง (วินาที)", min: 1, max: 30 },
     { key: "maxSeconds", label: "เวลาขังสูงสุด (วินาที)", min: 5, max: 180 },
   ] as const;
-  const fields = [...vehicleKinds.map((kind) => ({ key: kind, label: vehicleNames[kind], min: 1, max: 20 })), ...jailFields];
+  const fuelFields = [
+    { key: "helicopterFuelSeconds", label: "น้ำมันเฮลิคอปเตอร์ (วินาที)", min: 5, max: 180 },
+    { key: "broomFuelSeconds", label: "พลังงานไม้กวาดบิน (วินาที)", min: 5, max: 180 },
+  ] as const;
+  const hitFields = vehicleKinds.map((kind) => ({ key: kind, label: vehicleNames[kind], min: 1, max: 20 }));
+  const groups = [["จำนวนครั้งที่ชนได้", hitFields], ["เวลาขัง", jailFields], ["เวลาบินต่อนักเรียนหนึ่งเที่ยว", fuelFields]] as const;
   return <form className="gallery-management" onSubmit={async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const next = Object.fromEntries(fields.map(({ key }) => [key, Number(form.get(key))])) as PatrolSettings;
+    const next = Object.fromEntries([...hitFields, ...jailFields, ...fuelFields].map(({ key }) => [key, Number(form.get(key))])) as PatrolSettings;
     if (next.maxSeconds < next.baseSeconds) { setMessage("เวลาขังสูงสุดต้องไม่น้อยกว่าเวลาเริ่มต้น"); return; }
     setSaving(true); setMessage("");
     try {
@@ -37,12 +42,12 @@ export function PatrolSettingsForm({ settings, save }: { settings: PatrolSetting
     } catch (error) { setMessage(error instanceof Error ? error.message : "บันทึกการตั้งค่าไม่สำเร็จ"); }
     finally { setSaving(false); }
   }}>
-    <strong>จำนวนครั้งที่ชนได้และเวลาขัง</strong>
-    <p>ยานพาหนะของนักเรียนพังเมื่อทำให้ตัวละครอื่นล้มครบตามกำหนด</p>
-    <div className="gallery-access-mode gallery-shop-prices">{fields.map(({ key, label, min, max }) =>
-      <label key={key}>{label}<input name={key} type="number" min={min} max={max} step={1} required inputMode="numeric" defaultValue={settings[key]} /></label>)}
-      <button className="button button-quiet" disabled={saving}>บันทึกการตั้งค่าสายตรวจ</button>
-    </div>
+    <strong>สายตรวจ เรือนจำ และยานพาหนะนักเรียน</strong>
+    {groups.map(([title, fields]) => <fieldset key={title} className="gallery-access-mode gallery-shop-prices gallery-settings-group">
+      <legend>{title}</legend>
+      {fields.map(({ key, label, min, max }) => <label key={key}>{label}<input name={key} type="number" min={min} max={max} step={1} required inputMode="numeric" defaultValue={settings[key]} /></label>)}
+    </fieldset>)}
+    <button className="button button-quiet" disabled={saving}>บันทึกการตั้งค่าสายตรวจ</button>
     {message && <small role="status">{message}</small>}
   </form>;
 }

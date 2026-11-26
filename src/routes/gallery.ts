@@ -6,7 +6,7 @@ import { HttpError } from "../http-error";
 import { checkRequestOrigin } from "../security";
 import { storedFilePath } from "../file-storage";
 import { trainTrack } from "../../gallery-server/src/train-layout.mjs";
-import type { PatrolSettings } from "../../gallery-server/src/patrol.mjs";
+import { defaultPatrolSettings, type PatrolSettings } from "../../gallery-server/src/patrol.mjs";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const galleryVoteLimit = 10;
@@ -145,7 +145,8 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
       SELECT w.enabled, c.name AS "classroomName", w.santa_bomb_fuse_seconds AS "fuseSeconds", w.santa_respawn_seconds AS "respawnSeconds",
         w.wand_price AS wand, w.license_price AS license,
         json_build_object('car', w.patrol_car_hits, 'bike', w.patrol_bike_hits, 'helicopter', w.patrol_helicopter_hits,
-          'broom', w.patrol_broom_hits, 'baseSeconds', w.jail_base_seconds, 'extraSeconds', w.jail_extra_seconds, 'maxSeconds', w.jail_max_seconds) AS patrol
+          'broom', w.patrol_broom_hits, 'baseSeconds', w.jail_base_seconds, 'extraSeconds', w.jail_extra_seconds, 'maxSeconds', w.jail_max_seconds,
+          'helicopterFuelSeconds', w.helicopter_fuel_seconds, 'broomFuelSeconds', w.broom_fuel_seconds) AS patrol
       FROM classroom.gallery_worlds w JOIN classroom.classrooms c ON c.id=w.classroom_id WHERE w.classroom_id=${params.classroomId}`;
     if (!world || (!teacher && !world.enabled)) throw new HttpError(404, "ยังไม่ได้เปิดโลกเสมือน");
     await ensureBlocks(params.classroomId);
@@ -209,19 +210,26 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     checkRequestOrigin(request);
     await ownedClass(await requireActor(request), params.classroomId);
     if (body.maxSeconds < body.baseSeconds) throw new HttpError(422, "เวลาขังสูงสุดต้องไม่น้อยกว่าเวลาเริ่มต้น");
-    await sql`INSERT INTO classroom.gallery_worlds(classroom_id, patrol_car_hits, patrol_bike_hits, patrol_helicopter_hits,
-        patrol_broom_hits, jail_base_seconds, jail_extra_seconds, jail_max_seconds)
-      VALUES (${params.classroomId}, ${body.car}, ${body.bike}, ${body.helicopter}, ${body.broom}, ${body.baseSeconds}, ${body.extraSeconds}, ${body.maxSeconds})
+    const helicopterFuel = body.helicopterFuelSeconds ?? null, broomFuel = body.broomFuelSeconds ?? null;
+    const [fuel] = await sql<{ helicopterFuelSeconds: number; broomFuelSeconds: number }[]>`
+      INSERT INTO classroom.gallery_worlds(classroom_id, patrol_car_hits, patrol_bike_hits, patrol_helicopter_hits,
+        patrol_broom_hits, jail_base_seconds, jail_extra_seconds, jail_max_seconds, helicopter_fuel_seconds, broom_fuel_seconds)
+      VALUES (${params.classroomId}, ${body.car}, ${body.bike}, ${body.helicopter}, ${body.broom}, ${body.baseSeconds}, ${body.extraSeconds}, ${body.maxSeconds},
+        COALESCE(${helicopterFuel}::smallint, ${defaultPatrolSettings.helicopterFuelSeconds}), COALESCE(${broomFuel}::smallint, ${defaultPatrolSettings.broomFuelSeconds}))
       ON CONFLICT (classroom_id) DO UPDATE SET patrol_car_hits=EXCLUDED.patrol_car_hits, patrol_bike_hits=EXCLUDED.patrol_bike_hits,
         patrol_helicopter_hits=EXCLUDED.patrol_helicopter_hits, patrol_broom_hits=EXCLUDED.patrol_broom_hits,
         jail_base_seconds=EXCLUDED.jail_base_seconds, jail_extra_seconds=EXCLUDED.jail_extra_seconds,
-        jail_max_seconds=EXCLUDED.jail_max_seconds, updated_at=NOW()`;
-    return body;
+        jail_max_seconds=EXCLUDED.jail_max_seconds, helicopter_fuel_seconds=COALESCE(${helicopterFuel}, gallery_worlds.helicopter_fuel_seconds),
+        broom_fuel_seconds=COALESCE(${broomFuel}, gallery_worlds.broom_fuel_seconds), updated_at=NOW()
+      RETURNING helicopter_fuel_seconds AS "helicopterFuelSeconds", broom_fuel_seconds AS "broomFuelSeconds"`;
+    return { ...body, ...fuel };
   }, { params: t.Object({ classroomId: t.String({ format: "uuid" }) }), body: t.Object({
     car: t.Integer({ minimum: 1, maximum: 20 }), bike: t.Integer({ minimum: 1, maximum: 20 }),
     helicopter: t.Integer({ minimum: 1, maximum: 20 }), broom: t.Integer({ minimum: 1, maximum: 20 }),
     baseSeconds: t.Integer({ minimum: 5, maximum: 120 }), extraSeconds: t.Integer({ minimum: 1, maximum: 30 }),
     maxSeconds: t.Integer({ minimum: 5, maximum: 180 }),
+    helicopterFuelSeconds: t.Optional(t.Integer({ minimum: 5, maximum: 180 })),
+    broomFuelSeconds: t.Optional(t.Integer({ minimum: 5, maximum: 180 })),
   }) })
   .put("/classrooms/:classroomId/gallery/santa", async ({ params, body, request }) => {
     checkRequestOrigin(request);
@@ -235,7 +243,7 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
       RETURNING santa_bomb_fuse_seconds AS "fuseSeconds", santa_respawn_seconds AS "respawnSeconds"
     `;
     return { ok: true, ...settings };
-  }, { body: t.Object({ fuseSeconds: t.Integer({ minimum: 2, maximum: 15 }), respawnSeconds: t.Integer({ minimum: 3, maximum: 60 }) }) })
+  }, { body: t.Object({ fuseSeconds: t.Integer({ minimum: 1, maximum: 15 }), respawnSeconds: t.Integer({ minimum: 3, maximum: 60 }) }) })
   .put("/classrooms/:classroomId/gallery/train", async ({ params, body, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);

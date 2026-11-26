@@ -12,13 +12,14 @@ import { correctionOffset, facingRotation, interpolateTrain, jumpHeight, reconci
 import { canvasAimPoint, wandAim } from "./gallery-aim";
 import { enterGalleryFullscreen, unlockGalleryOrientation } from "./gallery-fullscreen";
 import { blockPosition, exhibitPosition, trainStartStation, trainTrack } from "../../gallery-server/src/train-layout.mjs";
+import { avatarHeight, avatarRadius, blockingProp, jumpApex, signBoard, signPost, slidePastProps, studentSpaceCollision, studentTreeTrunk } from "../../gallery-server/src/student-space.mjs";
 import { canBoardTrain, stationWaitMs } from "../../gallery-server/src/train-rules.mjs";
 import { LANDING_HEIGHT, VEHICLE_BAY_Z, VEHICLE_ENTER_DISTANCE, vehicleKinds, vehicleSpecs, type VehicleKind } from "../../gallery-server/src/vehicles.mjs";
 import { broomSeatHeight, knockMessages, vehicleModel, vehicleNames, type VehicleState } from "./gallery-vehicles";
 import { createPresentBlast, createPresentModel, createSantaModel, disposeSantaModel } from "./gallery-santa";
 import { depot, nearPlace, portal, rentalPads, shop } from "../../gallery-server/src/world-places.mjs";
 import { createActivityLandmarks, itemNames, shopItems, type ShopPrices, type Wallet } from "./gallery-activities";
-import { jailGate, rankWanted, type PatrolSettings } from "../../gallery-server/src/patrol.mjs";
+import { rankWanted, type PatrolSettings } from "../../gallery-server/src/patrol.mjs";
 import { createGalleryJail, MostWanted, PatrolSettingsForm, type OfficerView, type WantedEntry } from "./gallery-patrol";
 
 type User = { role: "owner" | "teacher" | "student"; displayName: string };
@@ -31,7 +32,8 @@ type Manifest = { enabled: boolean; classroomId: string; classroomName: string; 
 type GalleryAccessStudent = { studentId: string; accountLinked: boolean; displayName: string; studentNumber: number | null; requiredAssignmentId: string | null; requiredAssignmentTitle: string | null; hasSubmission: boolean; approved: boolean; entryAllowed: boolean };
 type GalleryAccess = { mode: "submission" | "approval"; requiredAssignmentId: string | null; requiredAssignmentTitle: string | null; students: GalleryAccessStudent[] };
 type Avatar = AvatarAppearance & { displayName: string; role: string; x: number; z: number; rotation: number; sequence?: number; jump?: number; movementEpoch?: number; knocked?: boolean; knockCause?: string; respawnAt?: number; protectedUntil?: number; wantedCount?: number; wantedSince?: number; jailedUntil?: number; trainSeat?: number; vehicleId?: string };
-type VehicleAvailability = Pick<VehicleState, "id" | "kind" | "revision" | "driverId" | "rental" | "hitLimit" | "hitsRemaining"> & { driverName?: string };
+type VehicleAvailability = Pick<VehicleState, "id" | "kind" | "revision" | "driverId" | "rental" | "hitLimit" | "hitsRemaining" | "fuelCapacity" | "fuelRemaining" | "landing"> & { driverName?: string };
+type GalleryMenu = "menu" | "tools" | "settings";
 type Activity = "" | "portal" | "shop" | "depot";
 type BoltVisual = { group: THREE.Group; trail: THREE.Line; target: THREE.Vector3 };
 type PresentView = { x: number; z: number; expiresAt: number };
@@ -130,7 +132,9 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   const [appearance, setAppearance] = useState<AvatarAppearance>(defaultAvatarAppearance);
   const [draftAppearance, setDraftAppearance] = useState<AvatarAppearance>(defaultAvatarAppearance);
   const [customizerOpen, setCustomizerOpen] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [activeMenu, setActiveMenu] = useState<GalleryMenu | null>(null);
+  const menuOpen = activeMenu !== null;
+  const menuButtons = useRef<Partial<Record<GalleryMenu, HTMLButtonElement>>>({});
   const menuOpenRef = useRef(false);
   const [immersive, setImmersive] = useState(true);
   const [landscapeRequired, setLandscapeRequired] = useState(false);
@@ -157,11 +161,17 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   useEffect(() => { document.documentElement.classList.toggle("gallery-immersive", immersive); }, [immersive]);
   useEffect(() => {
     const onFullscreenChange = () => { if (!document.fullscreenElement) { setImmersive(false); unlockGalleryOrientation(); } };
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape" && !document.fullscreenElement) setImmersive(false); };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (activeMenu) {
+        setActiveMenu(null);
+        menuButtons.current[activeMenu]?.focus({ preventScroll: true });
+      } else if (!document.fullscreenElement) setImmersive(false);
+    };
     document.addEventListener("fullscreenchange", onFullscreenChange);
     window.addEventListener("keydown", onKeyDown);
     return () => { document.removeEventListener("fullscreenchange", onFullscreenChange); window.removeEventListener("keydown", onKeyDown); };
-  }, []);
+  }, [activeMenu]);
   useEffect(() => () => { window.setTimeout(() => {
     if (document.querySelector(".gallery-shell")) return;
     document.documentElement.classList.remove("gallery-immersive");
@@ -212,7 +222,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   useEffect(() => {
     lastSavedTrainSettings.current = null; lastSavedSantaSettings.current = null; setTrainView(null); setTrainSeat(-1); setDisplayPages({});
     setSantaActive(false); setNearestPresent(""); setGiftMessage(""); setSantaForm({ fuseSeconds: 5, respawnSeconds: 10 });
-    setWanted(null);
+    setWanted(null); setActiveMenu(null);
     window.clearTimeout(activityTimeout.current);
     setWallet(null); setShopPrices(null); setQuote(null); setActivityPanel(""); setActivity(""); setActivityMessage(""); setActivityPending(false);
   }, [classroomId]);
@@ -330,17 +340,29 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     const trainGroup = new THREE.Group(); scene.add(trainGroup);
     const santaGroup = createSantaModel(); santaGroup.visible = false; scene.add(santaGroup);
     const santaTarget = new THREE.Vector3(-29, 0, 8);
-    const officer = createAvatarCharacter({ ...defaultAvatarAppearance, shirtColor: "#193f66", trousersColor: "#17263d", hatStyle: "cap", hatColor: "#1d4065", glassesStyle: "square", glassesColor: "#17263d" });
-    const officerLabel = new THREE.Sprite(new THREE.SpriteMaterial({ map: labelTexture("สายตรวจ"), transparent: true }));
-    officerLabel.position.y = avatarNameLabelY;
-    officerLabel.scale.set(2.5, 0.45, 1);
-    officer.add(officerLabel);
     const jail = createGalleryJail(labelTexture("เรือนจำ"));
-    officer.position.set(jailGate.x, 0, jailGate.z);
-    officer.visible = jail.visible = false;
-    scene.add(officer, jail);
-    const officerTarget = new THREE.Vector3(jailGate.x, 0, jailGate.z);
-    let officerAngle = 0, officerWalking = false, officerChasing = false, officerPhase = 0;
+    jail.visible = false;
+    scene.add(jail);
+    const patrolLabels = { foot: labelTexture("สายตรวจ"), car: labelTexture("รถสายตรวจ") };
+    const patrolModels = new Map<string, { group: THREE.Group; state: OfficerView; target: THREE.Vector3; phase: number }>();
+    const syncPatrol = (id: string, wire: OfficerView) => {
+      let visual = patrolModels.get(id);
+      if (!visual) {
+        const car = wire.kind === "car";
+        const group = car ? vehicleModel("car", true) : createAvatarCharacter({ ...defaultAvatarAppearance, shirtColor: "#193f66", trousersColor: "#17263d", hatStyle: "cap", hatColor: "#1d4065", glassesStyle: "square", glassesColor: "#17263d" });
+        const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: patrolLabels[car ? "car" : "foot"], transparent: true }));
+        label.position.y = avatarNameLabelY;
+        label.scale.set(2.5, 0.45, 1);
+        group.add(label);
+        group.position.set(wire.x, 0, wire.z);
+        group.rotation.y = wire.rotation;
+        scene.add(group);
+        visual = { group, state: wire, target: group.position.clone(), phase: 0 };
+        patrolModels.set(id, visual);
+      }
+      visual.state = wire;
+      visual.target.set(wire.x, 0, wire.z);
+    };
     const presentMeshes = new Map<string, THREE.Group>();
     const blastMeshes = new Map<string, THREE.Group>();
     const presentPositions = new Map<string, PresentView>();
@@ -423,7 +445,8 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         trainTrackGroup.add(segment);
       }
     };
-    let blockSignature = "", layoutChanged = false;
+    let blockSignature = "", layoutChanged = false, collisionEnabled = false;
+    let props = studentSpaceCollision(0);
     const addBlock = (block: Manifest["blocks"][number]) => {
       const position = blockPosition(block.layoutIndex); const group = new THREE.Group(); group.position.set(position.x, 0, position.z); scene.add(group);
       const text = `${block.studentNumber ?? "—"} · ${block.displayName}`, votes = voteSummaryRef.current?.blockTotals.find((item) => item.studentId === block.studentId)?.votes ?? 0;
@@ -431,7 +454,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       blockLabels.set(block.studentId, { mesh: label, text, votes });
       blockMap.set(block.studentId, block); blockGroups.set(block.studentId, group);
     };
-    const rebuildLandscape = (blocks: Manifest["blocks"][number][], layoutCount: number) => {
+    const rebuildLandscape = (blocks: Pick<Manifest["blocks"][number], "studentId" | "layoutIndex">[], layoutCount: number) => {
       for (const child of [...landscapeGroup.children]) {
         child.traverse((object) => { const mesh = object as THREE.Mesh; mesh.geometry?.dispose?.(); const materials = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : []; materials.forEach((material) => material.dispose()); });
       }
@@ -441,9 +464,9 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       const pads = new THREE.InstancedMesh(new THREE.BoxGeometry(12, 0.42, 10), new THREE.MeshStandardMaterial({ color: 0x718b67, roughness: 0.98 }), count);
       const decks = new THREE.InstancedMesh(new THREE.BoxGeometry(11.7, 0.08, 9.7), new THREE.MeshStandardMaterial({ color: 0xe8ddc1, roughness: 0.98 }), count);
       const thresholds = new THREE.InstancedMesh(new THREE.BoxGeometry(11.6, 0.08, 0.28), new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.88 }), count);
-      const signPosts = new THREE.InstancedMesh(new THREE.BoxGeometry(0.22, 1.58, 0.24), new THREE.MeshStandardMaterial({ color: 0x315f4c, roughness: 0.82 }), count * 2);
-      const signBoards = new THREE.InstancedMesh(new THREE.BoxGeometry(9.5, 1.42, 0.18), new THREE.MeshStandardMaterial({ color: 0x315f4c, roughness: 0.82 }), count);
-      const trunks = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.14, 0.21, 0.82, 5), new THREE.MeshStandardMaterial({ color: 0x83613f, roughness: 0.98, flatShading: true }), treeCount);
+      const signPosts = new THREE.InstancedMesh(new THREE.BoxGeometry(signPost.width, signPost.height, signPost.depth), new THREE.MeshStandardMaterial({ color: 0x315f4c, roughness: 0.82 }), count * 2);
+      const signBoards = new THREE.InstancedMesh(new THREE.BoxGeometry(signBoard.width, signBoard.height, signBoard.depth), new THREE.MeshStandardMaterial({ color: 0x315f4c, roughness: 0.82 }), count);
+      const trunks = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.14, studentTreeTrunk.width / 2, studentTreeTrunk.height, 5), new THREE.MeshStandardMaterial({ color: 0x83613f, roughness: 0.98, flatShading: true }), treeCount);
       const crowns = new THREE.InstancedMesh(new THREE.ConeGeometry(0.84, 2.22, 5), new THREE.MeshStandardMaterial({ color: 0x4b8060, roughness: 0.94, flatShading: true }), treeCount);
       const flowers = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(0.18, 0), new THREE.MeshStandardMaterial({ color: 0xe6a66c, roughness: 0.8, flatShading: true }), count * 2);
       const paths = new THREE.InstancedMesh(new THREE.BoxGeometry(72, 0.035, 1.8), new THREE.MeshStandardMaterial({ color: 0xc8b98f, roughness: 1 }), Math.max(1, rows - 1)); paths.count = Math.max(0, rows - 1);
@@ -453,11 +476,11 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         pose.position.y = 0.48; pose.updateMatrix(); decks.setMatrixAt(index, pose.matrix);
         pose.position.set(base.x, 0.55, base.z + 4.55); pose.updateMatrix(); thresholds.setMatrixAt(index, pose.matrix);
         thresholds.setColorAt(index, colorFor(block.studentId).lerp(new THREE.Color("#e8c777"), 0.55));
-        pose.position.set(base.x, 3.0, base.z - 4.58); pose.updateMatrix(); signBoards.setMatrixAt(index, pose.matrix);
+        pose.position.set(base.x + signBoard.x, signBoard.y, base.z + signBoard.z); pose.updateMatrix(); signBoards.setMatrixAt(index, pose.matrix);
         for (const [sideIndex, side] of [-1, 1].entries()) {
           const instance = index * 2 + sideIndex;
-          pose.position.set(base.x + side * 4.55, 2.85, base.z - 4.58); pose.updateMatrix(); signPosts.setMatrixAt(instance, pose.matrix);
-          pose.position.set(base.x + side * 5.08, 1.03, base.z + 3.55); pose.updateMatrix(); trunks.setMatrixAt(instance, pose.matrix);
+          pose.position.set(base.x + side * signPost.x, signPost.y, base.z + signPost.z); pose.updateMatrix(); signPosts.setMatrixAt(instance, pose.matrix);
+          pose.position.set(base.x + side * studentTreeTrunk.x, studentTreeTrunk.y, base.z + studentTreeTrunk.z); pose.updateMatrix(); trunks.setMatrixAt(instance, pose.matrix);
           pose.position.set(base.x + side * 5.08, 2.32, base.z + 3.55); pose.updateMatrix(); crowns.setMatrixAt(instance, pose.matrix);
           pose.position.set(base.x + side * 4.72, 0.78, base.z + 3.9); pose.scale.set(1, 0.8, 1); pose.updateMatrix(); flowers.setMatrixAt(instance, pose.matrix); pose.scale.set(1, 1, 1);
           flowers.setColorAt(instance, new THREE.Color(sideIndex ? "#e99b73" : "#e5c16d"));
@@ -484,12 +507,14 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         const layoutIndex = positions?.get(block.studentId);
         return layoutIndex === undefined && positions ? [] : [{ ...block, layoutIndex: layoutIndex ?? block.layoutIndex }];
       });
-      const signature = JSON.stringify(blocks.map((block) => [block.studentId, block.layoutIndex, block.studentNumber, block.displayName]));
+      const landscape = snapshot?.map((block, layoutIndex) => ({ studentId: block.studentId, layoutIndex })) ?? blocks;
+      const signature = JSON.stringify([landscape.map((block) => block.studentId), blocks.map((block) => [block.studentId, block.layoutIndex, block.studentNumber, block.displayName])]);
       if (signature === blockSignature) return;
       blockSignature = signature; layoutChanged = true;
       for (const [studentId, group] of blockGroups) { const label = blockLabels.get(studentId); if (label) disposeTrackedTexture((label.mesh.material as THREE.MeshBasicMaterial).map); scene.remove(group); disposeAvatarCharacter(group); blockGroups.delete(studentId); blockMap.delete(studentId); blockLabels.delete(studentId); }
       for (const block of blocks) if (current.has(block.studentId)) addBlock(block);
-      rebuildLandscape(blocks, layoutCount);
+      props = studentSpaceCollision(layoutCount);
+      rebuildLandscape(landscape, layoutCount);
       rebuildTrack(layoutCount);
       const rows = Math.ceil(layoutCount / 4), depth = Math.max(2120, rows * 17 + 220), centerZ = -depth / 2 + 30;
       groundDepth = depth; groundZ = centerZ;
@@ -571,7 +596,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     const raycaster = new THREE.Raycaster(); const pointer = new THREE.Vector2();
     let activePointer: number | null = null, dragged = false, lastX = 0, lastY = 0, startX = 0, startY = 0, yaw = 0, cameraPitch = 0.34;
     const moveCrosshair = (event: PointerEvent) => {
-      if (!wandRef.current || customizerOpenRef.current || document.hidden) return;
+      if (!wandRef.current || menuOpenRef.current || customizerOpenRef.current || document.hidden) return;
       const point = canvasAimPoint(event.clientX, event.clientY, canvas.getBoundingClientRect());
       aimPoint.current.set(point.x, point.y);
       if (crosshairRef.current) { crosshairRef.current.style.left = `${(point.x + 1) * 50}%`; crosshairRef.current.style.top = `${(1 - point.y) * 50}%`; }
@@ -584,7 +609,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       const key = event.key.toLowerCase();
       const target = event.target instanceof HTMLElement ? event.target : null;
       if (!customizerOpenRef.current && key === "f" && wandRef.current && !target?.matches("input, textarea, select") && !target?.isContentEditable) { event.preventDefault(); fireWandRef.current(); return; }
-      if (customizerOpenRef.current || target?.matches("input, textarea, select") || (key === " " && target?.matches("button")) || target?.isContentEditable) return;
+      if (menuOpenRef.current || activityPanelRef.current || customizerOpenRef.current || target?.matches("input, textarea, select") || (key === " " && target?.matches("button")) || target?.isContentEditable) return;
       const drivingKind = drivingKindRef.current;
       if (drivingKind && vehicleSpecs[drivingKind].flying && (key === "q" || key === "e")) {
         event.preventDefault(); keys.add(key); return;
@@ -602,13 +627,13 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       if (required) onBlur();
     };
     const onPointerDown = (event: PointerEvent) => {
-      if (customizerOpenRef.current || document.hidden || activePointer !== null) return;
+      if (menuOpenRef.current || activityPanelRef.current || customizerOpenRef.current || document.hidden || activePointer !== null) return;
       activePointer = event.pointerId; dragged = false; lastX = startX = event.clientX; lastY = startY = event.clientY;
       canvas.setPointerCapture(event.pointerId);
       if (event.pointerType !== "touch") moveCrosshair(event);
     };
     const onPointerMove = (event: PointerEvent) => {
-      if (customizerOpenRef.current || document.hidden) return;
+      if (menuOpenRef.current || activityPanelRef.current || customizerOpenRef.current || document.hidden) return;
       if (activePointer === null) { if (event.pointerType !== "touch") moveCrosshair(event); return; }
       if (activePointer !== event.pointerId) return;
       dragged ||= Math.hypot(event.clientX - startX, event.clientY - startY) >= 5;
@@ -794,12 +819,14 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       room.onStateChange((state: any) => {
         if (!alive) return;
         landmarks.visible = state.activities === true;
+        collisionEnabled = Boolean(state.patrolBackup);
         if (state.officer) {
-          const wire = state.officer as OfficerView;
-          officerTarget.set(wire.x, 0, wire.z);
-          if (!officer.visible) officer.position.copy(officerTarget);
-          officerAngle = wire.rotation; officerWalking = wire.walking; officerChasing = Boolean(wire.targetId);
-          officer.visible = jail.visible = true;
+          jail.visible = true;
+          syncPatrol("primary", state.officer);
+          state.patrolBackup?.forEach((unit: OfficerView, id: string) => syncPatrol(id, unit));
+          for (const [id, visual] of patrolModels) if (id !== "primary" && !state.patrolBackup?.has(id)) {
+            scene.remove(visual.group); disposeAvatarCharacter(visual.group); patrolModels.delete(id);
+          }
         }
         if (landmarks.visible && !teacher && !requestedWallet && state.players?.has(room.sessionId)) {
           requestedWallet = true;
@@ -835,9 +862,11 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
           state.vehicles.forEach((vehicle: VehicleState, id: string) => {
             const kind = vehicle.kind;
             if (!vehicleKinds.includes(kind)) return;
-            const wire = { id, kind, rental: Boolean(vehicle.rental), x: vehicle.x, y: vehicle.y, z: vehicle.z, rotation: vehicle.rotation, revision: vehicle.revision, driverId: vehicle.driverId, hitLimit: vehicle.hitLimit, hitsRemaining: vehicle.hitsRemaining };
+            const wire = { id, kind, rental: Boolean(vehicle.rental), x: vehicle.x, y: vehicle.y, z: vehicle.z, rotation: vehicle.rotation, revision: vehicle.revision, driverId: vehicle.driverId,
+              hitLimit: vehicle.hitLimit, hitsRemaining: vehicle.hitsRemaining, fuelCapacity: vehicle.fuelCapacity, fuelRemaining: vehicle.fuelRemaining, landing: vehicle.landing };
             currentVehicles.add(id);
-            availability.push({ id, kind, rental: wire.rental, revision: wire.revision, driverId: wire.driverId, driverName: state.players?.get(wire.driverId)?.displayName, hitLimit: wire.hitLimit, hitsRemaining: wire.hitsRemaining });
+            availability.push({ id, kind, rental: wire.rental, revision: wire.revision, driverId: wire.driverId, driverName: state.players?.get(wire.driverId)?.displayName,
+              hitLimit: wire.hitLimit, hitsRemaining: wire.hitsRemaining, fuelCapacity: wire.fuelCapacity, fuelRemaining: wire.fuelRemaining, landing: wire.landing });
             let visual = vehicleMeshes.get(id);
             if (!visual) {
               const group = vehicleModel(kind);
@@ -857,7 +886,8 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
           }
           setVehicles((current) => current?.length === availability.length && current.every((vehicle, index) => {
             const next = availability[index]!;
-            return vehicle.id === next.id && vehicle.revision === next.revision && vehicle.driverName === next.driverName && vehicle.hitsRemaining === next.hitsRemaining;
+            return vehicle.id === next.id && vehicle.revision === next.revision && vehicle.driverName === next.driverName && vehicle.hitsRemaining === next.hitsRemaining
+              && vehicle.fuelRemaining === next.fuelRemaining && vehicle.landing === next.landing;
           }) ? current : availability);
         }
         if (state.train) {
@@ -910,7 +940,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
           avatar.userData.vehicleId = player.vehicleId ?? "";
           const priorEpoch = avatar.userData.epoch;
           avatar.userData.epoch = player.movementEpoch;
-          if (priorEpoch !== player.movementEpoch && Math.hypot(avatar.position.x - player.x, avatar.position.z - player.z) > 6) {
+          if (priorEpoch !== player.movementEpoch && (collisionEnabled || Math.hypot(avatar.position.x - player.x, avatar.position.z - player.z) > 6)) {
             avatar.position.set(player.x, 0, player.z);
             avatar.rotation.y = player.rotation;
             avatar.userData.jumpTime = -Infinity;
@@ -924,7 +954,11 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
             const mounted = player.vehicleId ?? "";
             if (drivingRef.current !== mounted) {
               onBlur();
-              if (mounted) { yaw = 0; setWandMode(false); }
+              if (mounted) {
+                yaw = 0;
+                setWandMode(false);
+                setActivityPanel("");
+              }
               drivingRef.current = mounted;
               drivingKindRef.current = (mounted && vehicleMeshes.get(mounted)?.state.kind) || "";
               setDriving(drivingKindRef.current);
@@ -950,7 +984,8 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
             if (!initialized) { local = { x: player.x, z: player.z, rotation: player.rotation }; initialized = true; }
             // Replay movement not yet acknowledged instead of snapping to a delayed server position.
             if (player.sequence !== undefined && player.sequence > lastAcknowledged) {
-              const corrected = reconcilePosition(player, player.sequence, pending, unsent);
+              const corrected = reconcilePosition(player, player.sequence, pending, unsent, collisionEnabled
+                ? (from, to) => slidePastProps(props, from, to, avatarHeight + (performance.now() - jumpTime < 750 ? jumpApex : 0)) : undefined);
               visualOffset = correctionOffset(local, corrected, visualOffset);
               Object.assign(local, corrected);
               pending = pending.filter((move) => move.sequence > player.sequence!); lastAcknowledged = player.sequence;
@@ -974,12 +1009,15 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       const santaAngle = (santaGroup.userData.rotationTarget as number | undefined) ?? 0;
       santaGroup.rotation.y += Math.atan2(Math.sin(santaAngle - santaGroup.rotation.y), Math.cos(santaAngle - santaGroup.rotation.y)) * (1 - Math.exp(-10 * dt));
       santaGroup.position.y = Math.sin(time * 0.003) * 0.035;
-      if (officer.visible) {
-        officer.position.lerp(officerTarget, 1 - Math.exp(-22 * dt));
-        const angle = officerAngle - officer.rotation.y;
-        officer.rotation.y += Math.atan2(Math.sin(angle), Math.cos(angle)) * (1 - Math.exp(-14 * dt));
-        if (officerWalking) officerPhase += dt * (officerChasing ? 15 : 8);
-        animateAvatarCharacter(officer, officerPhase, officerWalking ? 1 : 0, false, false, false);
+      for (const visual of patrolModels.values()) {
+        const { group, state, target } = visual;
+        group.position.lerp(target, 1 - Math.exp(-22 * dt));
+        const angle = state.rotation - group.rotation.y;
+        group.rotation.y += Math.atan2(Math.sin(angle), Math.cos(angle)) * (1 - Math.exp(-14 * dt));
+        if (state.kind !== "car") {
+          if (state.walking) visual.phase += dt * 12;
+          animateAvatarCharacter(group, visual.phase, state.walking ? 1 : 0, false, false, false);
+        }
       }
       for (const [id, gift] of presentMeshes) { gift.rotation.y += dt * 0.45; gift.position.y = 0.035 + Math.sin(time * 0.004 + id.length) * 0.035; }
       for (const [id, blast] of blastMeshes) blast.scale.setScalar(5 * (1 + Math.sin(time * 0.012 + id.length) * 0.035));
@@ -1012,19 +1050,24 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       const side = Number(keys.has("d") || keys.has("arrowright") || touchRef.current.x > 0.15) - Number(keys.has("a") || keys.has("arrowleft") || touchRef.current.x < -0.15);
       const bufferedTrain = interpolateTrain(trainSamples, time);
       if (bufferedTrain) { trainTarget.x = bufferedTrain.x; trainTarget.z = bufferedTrain.z; trainTarget.rotation = bufferedTrain.rotation; }
-      const active = initialized && room?.connection?.isOpen && !customizerOpenRef.current && !activityPanelRef.current && !document.hidden && !landscapeRequiredRef.current && (touchDevice || document.hasFocus()) && !knockedRef.current && trainSeatRef.current < 0;
+      const active = initialized && room?.connection?.isOpen && !menuOpenRef.current && !customizerOpenRef.current && !activityPanelRef.current && !document.hidden && !landscapeRequiredRef.current && (touchDevice || document.hasFocus()) && !knockedRef.current && trainSeatRef.current < 0;
       if (!active) onBlur();
       const ownVehicle = drivingRef.current ? vehicleMeshes.get(drivingRef.current) : undefined;
       const walking = active && !drivingRef.current;
-      const step = walking ? walkingStep(forward, side, yaw, dt) : { dx: 0, dz: 0 };
+      let step = walking ? walkingStep(forward, side, yaw, dt) : { dx: 0, dz: 0 };
+      const headHeight = avatarHeight + (time - jumpTime < 750 ? jumpApex : 0);
+      if (collisionEnabled && (step.dx || step.dz)) {
+        const next = slidePastProps(props, local, { x: local.x + step.dx, z: local.z + step.dz }, headHeight);
+        step = { dx: next.x - local.x, dz: next.z - local.z };
+      }
       local.x += step.dx; local.z += step.dz; unsent.dx += step.dx; unsent.dz += step.dz;
       if (step.dx || step.dz) local.rotation = facingRotation(step.dx, step.dz);
       if (walking && jumpRef.current) {
         jumpRef.current = false;
-        if (time - jumpTime >= 900) { jumpTime = time; room.send("jump"); }
+        if (time - jumpTime >= 900 && (!collisionEnabled || !blockingProp(props, local, local, avatarRadius, avatarHeight + jumpApex))) { jumpTime = time; room.send("jump"); }
       }
       if (ownVehicle && room?.connection?.isOpen && time - lastVehicleSend >= 75) {
-        const acceptsInput = active && !menuOpenRef.current;
+        const acceptsInput = active && !ownVehicle.state.landing && !(ownVehicle.state.fuelCapacity && !ownVehicle.state.fuelRemaining);
         const lift = liftRef.current || Number(keys.has("q")) - Number(keys.has("e"));
         room.send("vehicle-input", {
           revision: ownVehicle.state.revision, epoch: movementEpoch,
@@ -1035,8 +1078,11 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       const decay = Math.exp(-12 * dt);
       visualOffset.x *= decay; visualOffset.z *= decay;
       const seated = trainSeatRef.current >= 0 ? trainSeatPosition(trainSeatRef.current) : null;
+      const offsetPosition = { x: local.x + visualOffset.x, z: local.z + visualOffset.z };
+      const walkingVisual = collisionEnabled && (Math.abs(visualOffset.x) + Math.abs(visualOffset.z) > 0.001)
+        ? slidePastProps(props, local, offsetPosition, headHeight) : offsetPosition;
       const visual = ownVehicle ? { x: ownVehicle.group.position.x, z: ownVehicle.group.position.z, rotation: ownVehicle.group.rotation.y }
-        : seated ?? { x: local.x + visualOffset.x, z: local.z + visualOffset.z, rotation: local.rotation };
+        : seated ?? { ...walkingVisual, rotation: local.rotation };
       trainGroup.position.set(trainTarget.x, 0, trainTarget.z);
       trainGroup.rotation.y = trainTarget.rotation;
       if (time - lastTrainActionScan > 250) {
@@ -1064,7 +1110,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
           if (distance <= nearest) { nearby = state.id; nearest = distance; }
         }
         setVehicleNearby((current) => current === nearby ? current : nearby);
-        const landed = !ownVehicle || ownVehicle.state.y <= LANDING_HEIGHT;
+        const landed = !ownVehicle || (!ownVehicle.state.landing && ownVehicle.state.y <= LANDING_HEIGHT);
         setCanExitVehicle((current) => current === landed ? current : landed);
       }
       for (const [id, avatar] of avatarMeshes) {
@@ -1223,11 +1269,11 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     return true;
   }
   function useNearbyActivity() {
-    if (activity === "portal") { sendActivity("teleport"); return; }
+    if (activity === "portal") { if (sendActivity("teleport")) setActiveMenu(null); return; }
     if (activity !== "shop" && activity !== "depot") return;
     if (activity === "shop" && !sendActivity("shop-open")) return;
     if (activity === "depot") setActivityMessage("");
-    setSelected(null); setActivityPanel(activity);
+    setSelected(null); setActiveMenu(null); setActivityPanel(activity);
   }
   async function saveShopPrices(prices: ShopPrices) {
     const saved = await api<ShopPrices>(apiPath(classroomId, "/shop"), { method: "PUT", body: JSON.stringify(prices) });
@@ -1238,9 +1284,10 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     setManifest((current) => current?.classroomId === classroomId ? { ...current, patrol } : current);
   }
   function toggleWand() {
+    if (!wandMode && (knockSeconds || driving || (!teacher && trainSeatRef.current >= 0) || !canEquipWand)) return;
     setWandMode((value) => !value);
     setSelected(null);
-    setMenuOpen(false);
+    setActiveMenu(null);
   }
   function vehicleCommand(action: "reset" | "enter" | "exit", id: string) {
     const room = roomRef.current;
@@ -1249,7 +1296,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     if (action === "reset" && vehicle?.driverId && !window.confirm("ย้ายคนขับและยานพาหนะกลับไปที่จุดจอดหรือไม่?")) return;
     setError("");
     setVehicleMessage("");
-    if (action !== "reset") { setSelected(null); canvasRef.current?.focus({ preventScroll: true }); }
+    if (action !== "reset") { setSelected(null); setActiveMenu(null); canvasRef.current?.focus({ preventScroll: true }); }
     room.send("vehicle-" + action, { id, kind: vehicle?.kind ?? id, revision: vehicle?.revision ?? 0, confirmedDriverId: vehicle?.driverId ?? "" });
   }
   async function setHidden(model: GalleryModel) {
@@ -1301,28 +1348,31 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     else { unlockGalleryOrientation(); setImmersive(false); }
   }
 
+  function closeMenu() {
+    setActiveMenu(null);
+    if (activeMenu) menuButtons.current[activeMenu]?.focus({ preventScroll: true });
+  }
+  const nearbyAction = activity === "portal" ? "วาร์ปไปพื้นที่สุ่ม" : activity === "shop" ? "เปิดร้านค้าแต้ม" : "เลือกยานพาหนะ";
+  const activeRide = driving ? vehicles?.find((vehicle) => vehicle.id === drivingRef.current) : undefined;
+
   if (enabled === false && !teacher) return <main className="public-lesson-page"><section className="panel"><h2>โลกเสมือนยังไม่พร้อม</h2><p>{error || "กรุณากลับไปยังห้องเรียนแล้วลองอีกครั้ง."}</p><a href="/">กลับไปห้องเรียน</a></section></main>;
   return <>
     <section className="gallery-shell">
       <header className={`gallery-toolbar${menuOpen ? " menu-open" : ""}`}>
         <div className="gallery-toolbar-room"><span className="gallery-room-mark" aria-hidden="true">✦</span><div><strong>{manifest?.classroomName ?? "โลกเสมือน"}</strong><small><span className="gallery-online-dot" aria-hidden="true" />{online} คนออนไลน์ · WASD/Space หรือจอยสติ๊ก</small></div></div>
         <div className="gallery-toolbar-actions">
-          <button className="button button-quiet gallery-menu-toggle" aria-expanded={menuOpen} aria-controls="gallery-menu" onClick={() => setMenuOpen((open) => !open)}><span aria-hidden="true">☰</span>{menuOpen ? "ปิดเมนู" : "เมนู"}</button>
+          {([["menu", "☰", "เมนู"], ["tools", "✦", "เครื่องมือ"], ["settings", "⚙", "ตั้งค่าเกม"]] as const)
+            .filter(([id]) => id !== "settings" || teacher).map(([id, icon, title]) => <button key={id}
+              ref={(button) => { if (button) menuButtons.current[id] = button; }}
+              className="button button-quiet gallery-menu-toggle" aria-expanded={activeMenu === id} aria-controls={`gallery-${id}`}
+              onClick={() => setActiveMenu((current) => current === id ? null : id)}><span aria-hidden="true">{icon}</span>{title}</button>)}
           <button className="button button-quiet gallery-fullscreen-toggle" onClick={immersive ? exitFullscreenView : toggleFullscreen}><span aria-hidden="true">⛶</span>{immersive ? "ออกจากเต็มจอ" : "เต็มจอ"}</button>
         </div>
       </header>
-      <div id="gallery-menu" className="gallery-menu" hidden={!menuOpen}>
-        <div className="gallery-menu-header"><strong>เมนูโลกเสมือน</strong><div><button className="button button-quiet" onClick={() => setMenuOpen(false)}>ปิดเมนู</button>{close && <button className="button button-quiet" onClick={close}>กลับห้องเรียน</button>}</div></div>
+      <div id="gallery-menu" className="gallery-menu" hidden={activeMenu !== "menu"}>
+        <div className="gallery-menu-header"><strong>เมนูโลกเสมือน</strong><div><button className="button button-quiet" onClick={closeMenu}>ปิดเมนู</button>{close && <button className="button button-quiet" onClick={close}>กลับห้องเรียน</button>}</div></div>
         <div className="gallery-menu-room"><strong>{manifest?.classroomName ?? "โลกเสมือน"}</strong><small>{online} คนออนไลน์ · WASD/ลูกศร เดิน · Space กระโดด · ลากเพื่อหมุนมุมมอง</small></div>
         {user.role === "student" && <div className="gallery-attendance"><StudentAttendance /></div>}
-        {!teacher && <section className="gallery-management gallery-point-balance">
-          <strong>แต้มโลกเสมือน</strong>
-          <span>{wallet ? `${wallet.balance} แต้ม` : "กำลังโหลด…"}</span>
-          {wallet && <small>เหลือ {wallet.spells} คาถา · {wallet.license ? "มีใบขับขี่สำหรับ 1 เที่ยว" : "ไม่มีใบขับขี่"}</small>}
-          <div className="gallery-management-actions">
-            {canEquipWand && <button className="button button-quiet" onClick={toggleWand} aria-pressed={wandMode}>{wandMode ? "เก็บไม้กายสิทธิ์" : "ถือไม้กายสิทธิ์"}</button>}
-          </div>
-        </section>}
         {user.role === "student" && <section className="gallery-management gallery-vote-list"><strong>โหวตผลงานของเพื่อน · ไม่เกิน 10 ครั้งต่องาน</strong>
           {voteSummary?.usage.map((item) => <small key={item.assignmentId}>{item.assignmentTitle}: ใช้แล้ว {item.used}/{voteSummary.limit} · เหลือ {Math.max(0, voteSummary.limit - item.used)}</small>)}
           {voteSummary?.myVotes.length ? voteSummary.myVotes.map((vote) => <div className="gallery-vote-entry" key={vote.fileId}>
@@ -1330,10 +1380,46 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
             <button className="text-button" onClick={() => void toggleVote(vote.fileId, true)}>ยกเลิก</button>
           </div>) : <small>{voteSummary ? "ยังไม่ได้โหวต · ยกเลิกโหวตแล้วจะได้สิทธิ์คืน" : "กำลังโหลดโหวต…"}</small>}
         </section>}
+        {manifest?.nextOffset != null && <button className="button button-quiet" onClick={() => void load(manifest.nextOffset!)}>โหลดผลงานเพิ่ม</button>}
+        {teacher && models.some((item) => item.hidden) && <aside className="gallery-hidden-tray"><strong>ผลงานที่ซ่อน</strong>{models.filter((item) => item.hidden).map((item) => <div key={item.id}><span>{item.displayName} · {item.originalName}</span><button className="text-button" onClick={() => void setHidden(item)}>แสดง</button></div>)}</aside>}
+        {logout && <button className="button button-quiet" onClick={logout}>ออกจากระบบ</button>}
+        {error && <div className="notice" role="alert">{error}</div>}{!config && <p className="gallery-service-note">ยังไม่ได้ตั้งค่า Colyseus ใน Coolify</p>}
+      </div>
+      <div id="gallery-tools" className="gallery-menu" hidden={activeMenu !== "tools"}>
+        <div className="gallery-menu-header"><strong>เครื่องมือ</strong><button className="button button-quiet" onClick={closeMenu}>ปิดเครื่องมือ</button></div>
+        <section className="gallery-management gallery-point-balance">
+          <strong>อุปกรณ์และตัวละคร</strong>
+          {!teacher && <><span>{wallet ? `${wallet.balance} แต้ม` : "กำลังโหลดแต้ม…"}</span>
+            {wallet && <small>เหลือ {wallet.spells} คาถา · {wallet.license ? "มีใบขับขี่สำหรับ 1 เที่ยว" : "ไม่มีใบขับขี่"}</small>}</>}
+          <div className="gallery-management-actions">
+            <button className="button button-quiet" onClick={toggleWand} aria-pressed={wandMode}
+              disabled={!wandMode && (!canEquipWand || Boolean(driving || knockSeconds) || (!teacher && trainSeat >= 0))}>{wandMode ? "เก็บไม้กายสิทธิ์" : "ถือไม้กายสิทธิ์"}</button>
+            <button className="button button-quiet" onClick={() => { setError(""); setDraftAppearance({ ...appearance }); setCustomizerOpen(true); setActiveMenu(null); }}>ปรับแต่งตัวละคร</button>
+          </div>
+        </section>
+        <section className="gallery-management">
+          <strong>ยานพาหนะและจุดใกล้เคียง</strong>
+          <div className="gallery-management-actions">
+            {vehicleNearby && !driving && !knockSeconds && <button className="button button-quiet" onClick={() => vehicleCommand("enter", vehicleNearby)}>ขับ{vehicleNames[vehicleNearby as VehicleKind]}</button>}
+            {activity && !knockSeconds && <button className="button button-quiet" disabled={activityPending} onClick={useNearbyActivity}>{nearbyAction}</button>}
+          </div>
+          {!activity && !vehicleNearby && <small>{driving ? "ใช้ปุ่มบนหน้าจอเพื่อควบคุมหรือออกจากยานพาหนะ" : "เดินเข้าใกล้ยานพาหนะหรือจุดกิจกรรมเพื่อใช้งาน"}</small>}
+        </section>
         <aside className="gallery-train-panel" aria-label="รถไฟเที่ยวชมโลกเสมือน">
           <div className="gallery-train-status"><strong>🚂 รถไฟเที่ยวชม</strong><span>{trainStatus}</span><small>{trainView?.active ? `${trainView.seats}/12 ที่นั่ง · ${trainView.mode === "auto" ? "อัตโนมัติ" : "เริ่มโดยครู"}` : ""}</small></div>
-          <div className="gallery-train-actions">{teacher && trainView?.active && trainView.mode === "manual" && trainView.phase === "waiting" && <button className="button button-quiet" onClick={() => trainCommand("train-start")}>เริ่มนับถอยหลังออกจากสถานี</button>}</div>
-          {teacher && <div className="gallery-train-settings">
+          <div className="gallery-train-actions">
+            {teacher && trainView?.active && trainView.mode === "manual" && trainView.phase === "waiting" && <button className="button button-quiet" onClick={() => trainCommand("train-start")}>เริ่มนับถอยหลังออกจากสถานี</button>}
+            {!knockSeconds && trainAction && <button className="button button-quiet" onClick={() => { trainCommand(trainAction === "board" ? "train-board" : "train-leave"); setActiveMenu(null); }}>{trainAction === "board" ? "ขึ้นรถไฟ" : "ลงจากรถไฟ"}</button>}
+          </div>
+          {trainMessage && <small role="status">{trainMessage}</small>}
+        </aside>
+        {wanted && <MostWanted entries={wanted.entries} targetId={wanted.targetId} />}
+        {error && <div className="notice" role="alert">{error}</div>}
+      </div>
+      {teacher && <div id="gallery-settings" className="gallery-menu" hidden={activeMenu !== "settings"}>
+        <div className="gallery-menu-header"><strong>ตั้งค่าเกม</strong><button className="button button-quiet" onClick={closeMenu}>ปิดการตั้งค่า</button></div>
+        <section className="gallery-management"><strong>จัดการโลกเสมือน</strong><p>{enabled ? "เปิดสำหรับนักเรียน" : "หยุดสำหรับนักเรียน · ครูเข้าชมได้"}</p><div className="gallery-management-actions"><button className="button button-quiet" disabled={loading} onClick={() => void setWorld(!enabled)}>{enabled ? "หยุดโลกสำหรับนักเรียน" : "เปิดโลกสำหรับนักเรียน"}</button></div></section>
+        <section className="gallery-management"><strong>ตารางรถไฟและสถานี</strong><div className="gallery-train-settings">
             <label>ตารางรถ<select value={trainForm.mode} onChange={(event) => setTrainForm({ ...trainForm, mode: event.target.value as TrainSettings["mode"] })}><option value="auto">อัตโนมัติ</option><option value="manual">ครูเริ่มเอง</option></select></label>
             {trainForm.mode === "auto" && <label>ช่วงเวลา<select value={trainForm.intervalSeconds} onChange={(event) => setTrainForm({ ...trainForm, intervalSeconds: Number(event.target.value) as 60 | 120 })}><option value={60}>ทุก 1 นาที</option><option value={120}>ทุก 2 นาที</option></select></label>}
             <label>เริ่มจาก<select value={trainForm.startStudentId ?? ""} onChange={(event) => setTrainForm({ ...trainForm, startStudentId: event.target.value || null })}><option value="">สถานีทางเข้า</option>{manifest?.blocks.filter((block) => block.studentNumber !== null).map((block) => <option key={block.studentId} value={block.studentId}>เลขที่ {block.studentNumber} · {block.displayName}</option>)}</select></label>
@@ -1356,8 +1442,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
             <button className="button button-quiet" disabled={loading} onClick={() => void saveTrainSettings()}>บันทึกตาราง</button>
             <small>ใช้การตั้งค่าเมื่อรถว่างก่อนออกเที่ยวถัดไป · เลขที่ที่เลือกเริ่มที่สถานีประจำกลุ่มแถว</small>
             {trainMessage && <small role="status">{trainMessage}</small>}
-          </div>}
-        </aside>
+        </div></section>
         {user.role === "owner" && vehicles && <section className="gallery-management">
           <strong>จุดจอดยานพาหนะ</strong>
           <div className="gallery-management-actions">{vehicleKinds.map((kind) => {
@@ -1371,13 +1456,10 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
           </button>)}
           {vehicleMessage && <small role="status">{vehicleMessage}</small>}
         </section>}
-        <div className="gallery-management"><strong>ตัวละคร</strong><div className="gallery-management-actions"><button className="button button-quiet" onClick={() => { setError(""); setDraftAppearance({ ...appearance }); setCustomizerOpen(true); setMenuOpen(false); }}>ปรับแต่งตัวละคร</button></div></div>
-        {teacher && <div className="gallery-management"><strong>จัดการโลกเสมือน</strong><p>{enabled ? "เปิดสำหรับนักเรียน" : "หยุดสำหรับนักเรียน · ครูเข้าชมได้"}</p><div className="gallery-management-actions"><button className="button button-quiet" disabled={loading} onClick={() => void setWorld(!enabled)}>{enabled ? "หยุดโลกสำหรับนักเรียน" : "เปิดโลกสำหรับนักเรียน"}</button><button className="button button-quiet" aria-pressed={wandMode} onClick={toggleWand}>{wandMode ? "เก็บไม้กายสิทธิ์" : "ถือไม้กายสิทธิ์"}</button></div></div>}
-        {wanted && <MostWanted entries={wanted.entries} targetId={wanted.targetId} />}
-        {teacher && manifest?.patrol && <PatrolSettingsForm key={`patrol-${classroomId}`} settings={manifest.patrol} save={savePatrolSettings} />}
-        {teacher && manifest?.shop && <ShopPriceForm key={classroomId} prices={manifest.shop} save={saveShopPrices} />}
-        {teacher && <section className="gallery-management"><strong>🎅 ซานต้าตัวแสบ</strong><p>{santaActive ? "กำลังกวาดตาดูทางเดิน · ของขวัญใหม่ทุก 8 วินาที" : "กิจกรรมปิดอยู่"}</p><div className="gallery-management-actions"><button className="button button-quiet" onClick={santaCommand}>{santaActive ? "หยุดกิจกรรมและเก็บของขวัญ" : "เริ่มกิจกรรมคริสต์มาส"}</button></div><div className="gallery-access-mode"><label>นับถอยหลังก่อนระเบิด (วินาที)<input type="number" min={2} max={15} step={1} value={santaForm.fuseSeconds} onChange={(event) => setSantaForm({ ...santaForm, fuseSeconds: Number(event.target.value) })} /></label><label>เวลาคูลดาวน์ก่อนเกิดใหม่ (วินาที)<input type="number" min={3} max={60} step={1} value={santaForm.respawnSeconds} onChange={(event) => setSantaForm({ ...santaForm, respawnSeconds: Number(event.target.value) })} /></label><button className="button button-quiet" disabled={loading || santaForm.fuseSeconds < 2 || santaForm.fuseSeconds > 15 || santaForm.respawnSeconds < 3 || santaForm.respawnSeconds > 60} onClick={() => void saveSantaSettings()}>บันทึกการตั้งค่าระเบิด</button></div><small>นับถอยหลังปรับได้ 2–15 วินาที · คูลดาวน์เกิดใหม่ 3–60 วินาที</small>{santaMessage && <small role="status">{santaMessage}</small>}</section>}
-        {teacher && <section className="gallery-management gallery-access">
+        {manifest?.patrol && <PatrolSettingsForm key={`patrol-${classroomId}`} settings={manifest.patrol} save={savePatrolSettings} />}
+        {manifest?.shop && <ShopPriceForm key={classroomId} prices={manifest.shop} save={saveShopPrices} />}
+        <section className="gallery-management"><strong>🎅 ซานต้าตัวแสบ</strong><p>{santaActive ? "กำลังกวาดตาดูทางเดิน · ของขวัญใหม่ทุก 8 วินาที" : "กิจกรรมปิดอยู่"}</p><div className="gallery-management-actions"><button className="button button-quiet" onClick={santaCommand}>{santaActive ? "หยุดกิจกรรมและเก็บของขวัญ" : "เริ่มกิจกรรมคริสต์มาส"}</button></div><div className="gallery-access-mode"><label>นับถอยหลังก่อนระเบิด (วินาที)<input type="number" min={1} max={15} step={1} value={santaForm.fuseSeconds} onChange={(event) => setSantaForm({ ...santaForm, fuseSeconds: Number(event.target.value) })} /></label><label>เวลาคูลดาวน์ก่อนเกิดใหม่ (วินาที)<input type="number" min={3} max={60} step={1} value={santaForm.respawnSeconds} onChange={(event) => setSantaForm({ ...santaForm, respawnSeconds: Number(event.target.value) })} /></label><button className="button button-quiet" disabled={loading || !Number.isInteger(santaForm.fuseSeconds) || santaForm.fuseSeconds < 1 || santaForm.fuseSeconds > 15 || !Number.isInteger(santaForm.respawnSeconds) || santaForm.respawnSeconds < 3 || santaForm.respawnSeconds > 60} onClick={() => void saveSantaSettings()}>บันทึกการตั้งค่าระเบิด</button></div><small>นับถอยหลังปรับได้ 1–15 วินาที · คูลดาวน์เกิดใหม่ 3–60 วินาที</small>{santaMessage && <small role="status">{santaMessage}</small>}</section>
+        <section className="gallery-management gallery-access">
           <strong>สิทธิ์เข้าโลกของนักเรียน</strong>
           <p>งานล่าสุด: {galleryAccess?.requiredAssignmentTitle ?? "ยังไม่มีงานที่เปิดอยู่"}</p>
           <div className="gallery-access-mode">
@@ -1403,12 +1485,9 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
             {!galleryAccess.students.length && <small>ยังไม่มีนักเรียนในห้องนี้</small>}
           </div>}
           {accessMessage && <small role="status">{accessMessage}</small>}
-        </section>}
-        {manifest?.nextOffset !== null && <button className="button button-quiet" onClick={() => void load(manifest?.nextOffset ?? 0)}>โหลดผลงานเพิ่ม</button>}
-        {teacher && models.some((item) => item.hidden) && <aside className="gallery-hidden-tray"><strong>ผลงานที่ซ่อน</strong>{models.filter((item) => item.hidden).map((item) => <div key={item.id}><span>{item.displayName} · {item.originalName}</span><button className="text-button" onClick={() => void setHidden(item)}>แสดง</button></div>)}</aside>}
-        {logout && <button className="button button-quiet" onClick={logout}>ออกจากระบบ</button>}
-        {error && <div className="notice" role="alert">{error}</div>}{!config && <p className="gallery-service-note">ยังไม่ได้ตั้งค่า Colyseus ใน Coolify</p>}
-      </div>
+        </section>
+        {error && <div className="notice" role="alert">{error}</div>}
+      </div>}
       {error && !menuOpen && <div className="notice" role="alert">{error}</div>}
       <canvas ref={canvasRef} className="gallery-canvas" tabIndex={0} aria-label="โลกเสมือนห้องเรียน กด WASD เพื่อเดิน Space เพื่อกระโดด และลากเพื่อหมุนมุมมอง" />
       {landscapeRequired && <div className="gallery-rotate-prompt" role="alert"><strong>หมุนโทรศัพท์เป็นแนวนอนเพื่อเล่น</strong><span>หมุนอุปกรณ์เพื่อให้ปุ่มควบคุมแสดงครบ</span>{close && <button className="button button-quiet" onClick={close}>กลับห้องเรียน</button>}</div>}
@@ -1416,7 +1495,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       {blastSeconds > 0 && <div className="gallery-blast-countdown" role="alert">🎁 ระเบิดของขวัญใน {blastSeconds} วินาที · ออกจากวงสีแดง</div>}
       {giftMessage && <div className="gallery-gift-message" role="status">{giftMessage}</div>}
       {activity && !activityPanel && !menuOpen && !customizerOpen && !knockSeconds && <button className="gallery-activity-button button button-primary" disabled={activityPending} onClick={useNearbyActivity}>
-        {activity === "portal" ? "วาร์ปไปพื้นที่สุ่ม" : activity === "shop" ? "เปิดร้านค้าแต้ม" : "เลือกยานพาหนะ"}
+        {nearbyAction}
       </button>}
       {activityPanel && !menuOpen && !customizerOpen && !knockSeconds && <section className="gallery-activity-panel" aria-label={activityPanel === "shop" ? "ร้านค้าแต้ม" : "จุดรับรถ"}>
         <header><strong>{activityPanel === "shop" ? "ร้านค้าแต้ม" : "จุดรับรถ"}</strong><button className="button button-quiet" aria-label="ปิด" onClick={() => { setActivityPanel(""); setShopPrices(null); setQuote(null); }}>ปิด</button></header>
@@ -1436,7 +1515,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
           : <span>{wallet ? "ซื้อใบขับขี่ที่ร้านค้าแต้มก่อนเริ่มขับ" : "กำลังโหลดใบขับขี่…"}</span>}
         {(activityMessage || activityPending) && <small role="status">{activityPending ? "กำลังดำเนินการ…" : activityMessage}</small>}
       </section>}
-      {wandMode && !activityPanel && !customizerOpen && !driving && !knockSeconds && <>
+      {wandMode && !menuOpen && !activityPanel && !customizerOpen && !driving && !knockSeconds && <>
         <div ref={crosshairRef} className={`gallery-crosshair${aimValid ? "" : " unavailable"}`} style={{ left: `${(aimPoint.current.x + 1) * 50}%`, top: `${(1 - aimPoint.current.y) * 50}%` }} aria-hidden="true">{aimValid ? "＋" : "×"}</div>
         <p className="gallery-aim-hint">เลื่อนเมาส์หรือแตะเพื่อเล็ง · ลากเพื่อหมุนกล้อง · กด F หรือปุ่มยิง{!aimValid && <span>จุดนี้ยิงไม่ได้ — เลือกจุดเล็งใหม่</span>}</p>
         <button className="gallery-fire button button-primary" disabled={!castReady || !aimValid || knockSeconds > 0} onClick={() => fireWandRef.current()}>{castReady ? "ยิงเวทมนตร์ · F" : "กำลังชาร์จ…"}{!teacher && wallet && ` · ${wallet.spells} คาถา`}</button>
@@ -1445,14 +1524,17 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         ? `ถูกจับเข้าเรือนจำ · ปล่อยตัวใน ${knockSeconds} วินาที`
         : `${knockMessages[knockCause] ?? "ตัวละครล้ม"} · ฟื้นใน ${knockSeconds} วินาที`}</div>
         : wanted?.targetId && wanted.targetId === roomRef.current?.sessionId ? <div className="gallery-knockdown" role="status">สายตรวจกำลังตามจับคุณ</div> : null}
-      {!knockSeconds && trainAction && <button className="gallery-train-quick-action button button-primary" onClick={() => trainCommand(trainAction === "board" ? "train-board" : "train-leave")}>{trainAction === "board" ? "ขึ้นรถไฟ" : "ลงจากรถไฟ"}</button>}
+      {!menuOpen && !activityPanel && !customizerOpen && !knockSeconds && trainAction && <button className="gallery-train-quick-action button button-primary" onClick={() => trainCommand(trainAction === "board" ? "train-board" : "train-leave")}>{trainAction === "board" ? "ขึ้นรถไฟ" : "ลงจากรถไฟ"}</button>}
       {!menuOpen && !customizerOpen && !knockSeconds && (driving || vehicleNearby) && <div className={`gallery-vehicle-controls${driving ? " driving" : ""}`}>
         {driving ? <>
-          {vehicles?.filter((vehicle) => vehicle.id === drivingRef.current && vehicle.hitLimit).map((vehicle) =>
-            <span key={vehicle.id} className="gallery-drive-hint gallery-hits" role="status">ชนได้อีก {vehicle.hitsRemaining}/{vehicle.hitLimit}</span>)}
+          {Boolean(activeRide?.hitLimit) && <span className="gallery-drive-hint gallery-hits" role="status">ชนได้อีก {activeRide?.hitsRemaining}/{activeRide?.hitLimit}</span>}
+          {Boolean(activeRide?.fuelCapacity) && <span className={`gallery-drive-hint gallery-fuel${(activeRide?.fuelRemaining ?? 0) <= 5 ? " low" : ""}`}>
+            {activeRide?.landing ? "เชื้อเพลิงหมด · กำลังลงจอด" : activeRide?.fuelRemaining
+              ? `${activeRide.fuelRemaining <= 5 ? "เชื้อเพลิงใกล้หมด" : "เชื้อเพลิง"} ${activeRide.fuelRemaining}/${activeRide.fuelCapacity} วินาที` : "เชื้อเพลิงหมด"}
+          </span>}
           <span className="gallery-drive-hint">{vehicleNames[driving]} · WASD{vehicleSpecs[driving].flying ? " · Q ขึ้น / E ลง" : ""}</span>
           {vehicleSpecs[driving].flying && <div className="gallery-flight-buttons" aria-label="ควบคุมระดับความสูง">
-            {([1, -1] as const).map((direction) => <button key={direction} className="button button-quiet"
+            {([1, -1] as const).map((direction) => <button key={direction} className="button button-quiet" disabled={Boolean(activeRide?.fuelCapacity && !activeRide.fuelRemaining)}
               onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); liftRef.current = direction; }}
               onPointerUp={() => { if (liftRef.current === direction) liftRef.current = 0; }}
               onPointerCancel={() => { if (liftRef.current === direction) liftRef.current = 0; }}
@@ -1463,8 +1545,8 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
           <button className="button button-primary" disabled={!canExitVehicle} onClick={() => vehicleCommand("exit", drivingRef.current)}>{canExitVehicle ? "ออกจากยานพาหนะ" : "ลงจอดก่อนออก"}</button>
         </> : vehicleNearby && <button className="button button-primary" onClick={() => vehicleCommand("enter", vehicleNearby)}>ขับ{vehicleNames[vehicleNearby as VehicleKind]}</button>}
       </div>}
-      {!knockSeconds && <div className="gallery-touch" role="group" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); moveTouchJoystick(event, touchKnobRef.current, touchRef.current); }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) moveTouchJoystick(event, touchKnobRef.current, touchRef.current); }} onPointerUp={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} onPointerCancel={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} onLostPointerCapture={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} aria-label="ลากจอยสติ๊กเพื่อเดิน"><span ref={touchKnobRef} className="gallery-touch-knob" aria-hidden="true" /></div>}
-      {!driving && <button className="gallery-jump button button-quiet" disabled={customizerOpen || knockSeconds > 0} onPointerDown={(event) => { event.preventDefault(); jumpRef.current = true; }} onClick={(event) => { if (event.detail === 0) jumpRef.current = true; }}>กระโดด ↑</button>}
+      {!menuOpen && !activityPanel && !customizerOpen && !knockSeconds && <div className="gallery-touch" role="group" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); moveTouchJoystick(event, touchKnobRef.current, touchRef.current); }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) moveTouchJoystick(event, touchKnobRef.current, touchRef.current); }} onPointerUp={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} onPointerCancel={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} onLostPointerCapture={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} aria-label="ลากจอยสติ๊กเพื่อเดิน"><span ref={touchKnobRef} className="gallery-touch-knob" aria-hidden="true" /></div>}
+      {!menuOpen && !activityPanel && !driving && <button className="gallery-jump button button-quiet" disabled={customizerOpen || knockSeconds > 0} onPointerDown={(event) => { event.preventDefault(); jumpRef.current = true; }} onClick={(event) => { if (event.detail === 0) jumpRef.current = true; }}>กระโดด ↑</button>}
       {selected && <aside className="gallery-inspect"><button className="icon-button" onClick={() => setSelected(null)} aria-label="ปิด">×</button><p className="eyebrow">{selected.displayName} · เลขที่ {selected.studentNumber ?? "—"}</p><h3>{selected.originalName}</h3><p className="muted">{selected.assignmentTitle}</p><p>{selected.likes} ถูกใจ{selected.likes >= 6 ? " · ระดับทอง" : selected.likes >= 3 ? " · ระดับเงิน" : selected.likes > 0 ? " · ระดับทองแดง" : ""}</p>{selectedPageCount > 1 && <div className="gallery-display-pages"><span>ผลงานในพื้นที่ {selectedPage * 40 + 1}–{Math.min(selectedPage * 40 + 40, selectedStudentWork.length)} จาก {selectedStudentWork.length}</span><button className="text-button" disabled={selectedPage === 0} onClick={() => { const next = selectedStudentWork[(selectedPage - 1) * 40]; setDisplayPages((pages) => ({ ...pages, [selected.studentId]: selectedPage - 1 })); if (next) setSelected(next); }}>ก่อนหน้า</button><button className="text-button" disabled={selectedPage + 1 >= selectedPageCount} onClick={() => { const next = selectedStudentWork[(selectedPage + 1) * 40]; setDisplayPages((pages) => ({ ...pages, [selected.studentId]: selectedPage + 1 })); if (next) setSelected(next); }}>ถัดไป</button></div>}{user.role === "student" && selected.studentId !== manifest?.viewerStudentId && <><small>เหลือ {selectedVotesRemaining}/{voteSummary?.limit ?? 10} โหวตสำหรับงานนี้</small><button className="button button-quiet" disabled={!selected.likedByMe && selectedVotesRemaining <= 0} onClick={() => void like(selected)}>{selected.likedByMe ? "ยกเลิกโหวต · ได้สิทธิ์คืน" : selectedVotesRemaining <= 0 ? "โหวตครบแล้ว" : "โหวตผลงานนี้"}</button></>}{teacher && <button className="button button-quiet" onClick={() => void setHidden(selected)}>{selected.hidden ? "แสดงผลงาน" : "ซ่อนผลงาน"}</button>}<button className="button button-primary" onClick={() => setPreview(selected)}>เปิดดูโมเดล</button></aside>}
       {customizerOpen && <CharacterCustomizer appearance={draftAppearance} onChange={setDraftAppearance} onCancel={() => setCustomizerOpen(false)} onSave={() => void saveAppearance()} saving={loading} error={error} />}
     </section>

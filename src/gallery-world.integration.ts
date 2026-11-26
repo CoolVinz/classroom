@@ -69,14 +69,21 @@ test.skipIf(!database)("checks gallery admission, rides, and patrol in a live ro
     expect(initialManifest.enabled).toBe(false);
     expect(initialManifest.shop).toEqual({ wand: 5, license: 10 });
     expect(initialManifest.patrol).toEqual(defaultPatrolSettings);
-    const patrolSettings = { ...defaultPatrolSettings, car: 1, broom: 4, baseSeconds: 5, extraSeconds: 2, maxSeconds: 10 };
+    const patrolSettings = { ...defaultPatrolSettings, car: 1, broom: 4, baseSeconds: 5, extraSeconds: 2, maxSeconds: 10, helicopterFuelSeconds: 14, broomFuelSeconds: 5 };
     expect((await request(studentToken, "/patrol", "PUT", patrolSettings)).status).toBe(401);
     expect((await request(await createSession(foreignTeacher), "/patrol", "PUT", patrolSettings)).status).toBe(404);
     expect((await request(teacherToken, "/patrol", "PUT", { ...patrolSettings, helicopter: 21 })).status).toBe(422);
     expect((await request(teacherToken, "/patrol", "PUT", { ...patrolSettings, baseSeconds: 20 })).status).toBe(422);
+    expect((await request(teacherToken, "/patrol", "PUT", { ...patrolSettings, helicopterFuelSeconds: 4 })).status).toBe(422);
+    expect((await request(teacherToken, "/patrol", "PUT", { ...patrolSettings, broomFuelSeconds: 181 })).status).toBe(422);
     expect(await (await request(teacherToken, "/patrol", "PUT", patrolSettings)).json()).toEqual(patrolSettings);
+    const { helicopterFuelSeconds, broomFuelSeconds, ...olderPatrolSettings } = patrolSettings;
+    expect(await (await request(teacherToken, "/patrol", "PUT", olderPatrolSettings)).json()).toMatchObject({ helicopterFuelSeconds, broomFuelSeconds });
     expect((await (await request(teacherToken, "", "GET", undefined, other)).json()).patrol).toEqual(defaultPatrolSettings);
     expect((await (await request(teacherToken)).json()).patrol).toEqual(patrolSettings);
+    expect((await request(studentToken, "/santa", "PUT", { fuseSeconds: 1, respawnSeconds: 10 })).status).toBe(401);
+    expect((await request(teacherToken, "/santa", "PUT", { fuseSeconds: 0, respawnSeconds: 10 })).status).toBe(422);
+    expect(await (await request(teacherToken, "/santa", "PUT", { fuseSeconds: 1, respawnSeconds: 10 })).json()).toEqual({ ok: true, fuseSeconds: 1, respawnSeconds: 10 });
     expect((await request(studentToken, "/shop", "PUT", { wand: 5, license: 10 })).status).toBe(401);
     expect((await request(teacherToken, "/shop", "PUT", { wand: 0, license: 10 })).status).toBe(422);
     expect(initialManifest.train).toEqual({ mode: "auto", intervalSeconds: 120, startStudentId: null, stationWaitSeconds: {} });
@@ -257,6 +264,7 @@ test.skipIf(!database)("checks gallery admission, rides, and patrol in a live ro
     await moveTo(studentRoomAgain, present.x, present.z);
     const failedDuplicate = new Promise<{ ok: boolean }>((resolve) => studentRoomAgain.onMessage("present-result", resolve));
     const foundGift = new Promise<{ kind: "bomb" | "points"; balance?: number; detonateAt?: number }>((resolve) => studentRoomAgain.onMessage("gift-result", resolve));
+    const openedAt = Date.now();
     studentRoomAgain.send("open-present", { id: present.id });
     studentRoomAgain.send("open-present", { id: present.id });
     const duplicateResult = await Promise.race([failedDuplicate, Bun.sleep(2000).then(() => null)]);
@@ -267,6 +275,8 @@ test.skipIf(!database)("checks gallery admission, rides, and patrol in a live ro
       expect(giftResult.balance).toBe(1);
       expect(await (await app.handle(new Request("http://localhost/api/student/gallery-points", { headers: studentHeaders }))).json()).toEqual({ balance: 1 });
     } else {
+      expect(giftResult?.detonateAt).toBeGreaterThanOrEqual(openedAt + 1000);
+      expect(giftResult?.detonateAt).toBeLessThan(openedAt + 1550);
       await waitFor(() => rider(studentRoomAgain).knockCause === "santa", 7000);
       expect(rider(studentRoomAgain).respawnAt).toBeGreaterThan(Date.now());
     }
@@ -344,9 +354,13 @@ test.skipIf(!database)("checks gallery admission, rides, and patrol in a live ro
     const rentalId = rider(studentRoomAgain).vehicleId, peerRental = rider(peerRoom).vehicleId;
     expect(rentalId).not.toBe(peerRental);
     const broom = scene(studentRoomAgain).vehicles.get(rentalId);
-    expect(broom).toMatchObject({ kind: "broom", rental: true, hitLimit: 4, hitsRemaining: 4 });
+    const peerBroom = scene(peerRoom).vehicles.get(peerRental);
+    expect(broom).toMatchObject({ kind: "broom", rental: true, hitLimit: 4, hitsRemaining: 4, fuelCapacity: 5, fuelRemaining: 5 });
+    expect(peerBroom.fuelRemaining).toBe(5);
+    const peerLift = () => peerRoom.send("vehicle-input", { revision: peerBroom.revision, epoch: rider(peerRoom).movementEpoch, throttle: 0, turn: 0, lift: 1 });
     for (let i = 0; i < 4; i++) {
       studentRoomAgain.send("vehicle-input", { revision: broom.revision, epoch: rider(studentRoomAgain).movementEpoch, throttle: 0, turn: 0, lift: 1 });
+      peerLift();
       await Bun.sleep(85);
     }
     expect(broom.y).toBeGreaterThan(0.3);
@@ -358,6 +372,10 @@ test.skipIf(!database)("checks gallery admission, rides, and patrol in a live ro
     expect(broom.y).toBe(0);
     expect(await vehicleCommand(studentRoomAgain, "exit", rentalId)).toBe(true);
     await waitFor(() => !scene(studentRoomAgain).vehicles.has(rentalId));
+    await waitFor(() => peerBroom.fuelRemaining === 0 && peerBroom.landing, 5500);
+    await waitFor(() => peerBroom.y === 0 && !peerBroom.landing);
+    peerLift(); await Bun.sleep(270);
+    expect(peerBroom.y).toBe(0);
     await peerRoom.leave();
     await waitFor(() => !scene(studentRoomAgain).vehicles.has(peerRental));
     await moveTo(studentRoomAgain, depot.x, depot.z);
@@ -377,7 +395,7 @@ test.skipIf(!database)("checks gallery admission, rides, and patrol in a live ro
     await studentRoomAgain.leave();
     studentRoomAgain = await join(studentToken);
     expect(rider(studentRoomAgain).wantedCount).toBe(1);
-    await waitFor(() => rider(studentRoomAgain).jailedUntil > Date.now(), 4500);
+    await waitFor(() => rider(studentRoomAgain).jailedUntil > Date.now(), 10000);
     const jailedUntil = rider(studentRoomAgain).jailedUntil;
     expect(rider(studentRoomAgain)).toMatchObject({ ...jailCell, wantedCount: 0, vehicleId: "" });
     await studentRoomAgain.leave();

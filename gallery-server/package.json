@@ -2,7 +2,7 @@
   "name": "classroom-gallery-server",
   "private": true,
   "type": "module",
-  "scripts": { "start": "node src/server.mjs", "test": "node --test src/movement-check.mjs src/combat-check.mjs src/health-check.mjs src/avatar-check.mjs src/database-config-check.mjs src/train-layout-check.mjs src/train-rules-check.mjs src/vehicles-check.mjs src/santa-check.mjs src/patrol-check.mjs" },
+  "scripts": { "start": "node src/server.mjs", "test": "node --test src/movement-check.mjs src/combat-check.mjs src/health-check.mjs src/avatar-check.mjs src/database-config-check.mjs src/train-layout-check.mjs src/train-rules-check.mjs src/vehicles-check.mjs src/santa-check.mjs src/patrol-check.mjs src/student-space-check.mjs" },
   "dependencies": {
     "@colyseus/schema": "5.0.8",
     "colyseus": "0.18.0",

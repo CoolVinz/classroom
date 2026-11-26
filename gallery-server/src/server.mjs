@@ -8,23 +8,24 @@ import { advanceBolt, knockPlayer, playerHitFraction, respawnPlayer, validAim } 
 import { databaseConfig } from "./database-config.mjs";
 import { blockPosition, BLOCK_DEPTH, distanceToNextStation, TRAIN_SPEED, trainTrack } from "./train-layout.mjs";
 import { canBoardTrain, firstDepartureAt, nextDepartureAt, stationWaitMs } from "./train-rules.mjs";
-import { advanceVehicle, hitsMovingBody, LANDING_HEIGHT, trainBodies, validVehicleInput, VEHICLE_BAY_Z, VEHICLE_ENTER_DISTANCE, vehicleKinds, vehicleRespawn, vehicleSpecs } from "./vehicles.mjs";
+import { advanceFuelLanding, advanceVehicle, flightFuelRemaining, hitsMovingBody, LANDING_HEIGHT, trainBodies, validVehicleInput, VEHICLE_BAY_Z, VEHICLE_ENTER_DISTANCE, vehicleKinds, vehicleRespawn, vehicleSpecs } from "./vehicles.mjs";
 import { advanceSanta, canOpenPresent, maxPresents, presentDropMs, presentLifetimeMs, santaPath, insideBombRadius } from "./santa.mjs";
 import { buyItem, isRequestId, readShop, readWallet, useItem, withStudentWallet } from "./wallet.mjs";
 import { depot, nearPlace, portal, rentalPads, shop } from "./world-places.mjs";
-import { addKnockdown, advanceOfficer, canArrest, defaultPatrolSettings, jailCell, jailGate, knockdownsUntilBreak, rankWanted, sentenceSeconds } from "./patrol.mjs";
+import { addKnockdown, advanceOfficer, backupPatrol, canArrest, defaultPatrolSettings, jailCell, jailGate, knockdownsUntilBreak, rankWanted, sentenceSeconds } from "./patrol.mjs";
+import { avatarHeight, avatarRadius, blockingProp, clearGround, jumpApex, slidePastProps, studentSpaceCollision } from "./student-space.mjs";
 
 if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
 const pool = new pg.Pool(databaseConfig());
 const Player = schema({ displayName: t.string(), role: t.string(), skinColor: t.string(), hairColor: t.string(), shirtColor: t.string(), trousersColor: t.string(), hairStyle: t.string(), hatStyle: t.string(), glassesStyle: t.string(), shoeStyle: t.string(), hatColor: t.string(), glassesColor: t.string(), shoeColor: t.string(), x: t.number().default(0), z: t.number().default(0), rotation: t.number().default(0), sequence: t.number().default(0), jump: t.number().default(0), movementEpoch: t.number().default(0), knocked: t.boolean().default(false), knockCause: t.string().default(""), wantedCount: t.number().default(0), wantedSince: t.number().default(0), jailedUntil: t.number().default(0), vehicleId: t.string().default(""), respawnAt: t.number().default(0), protectedUntil: t.number().default(0), trainSeat: t.number().default(-1) });
 const Bolt = schema({ id: t.string(), x: t.number(), y: t.number(), z: t.number() });
 const Train = schema({ active: t.boolean().default(false), x: t.number().default(0), z: t.number().default(2), rotation: t.number().default(0), phase: t.string().default("waiting"), stopId: t.string().default("entrance"), nextStopId: t.string().default(""), departureAt: t.number().default(0), arrivalAt: t.number().default(0), mode: t.string().default("auto"), intervalSeconds: t.number().default(120), seats: t.number().default(0), revision: t.number().default(0), startStudentId: t.string().default(""), layoutRoster: t.string().default("[]") });
-const Vehicle = schema({ id: t.string(), kind: t.string(), rental: t.boolean().default(false), x: t.number(), y: t.number(), z: t.number(), rotation: t.number(), revision: t.number(), driverId: t.string(), hitsRemaining: t.number().default(0), hitLimit: t.number().default(0) });
-const Officer = schema({ x: t.number().default(jailGate.x), z: t.number().default(jailGate.z), rotation: t.number().default(0), walking: t.boolean().default(false), targetId: t.string().default("") });
+const Vehicle = schema({ id: t.string(), kind: t.string(), rental: t.boolean().default(false), x: t.number(), y: t.number(), z: t.number(), rotation: t.number(), revision: t.number(), driverId: t.string(), hitsRemaining: t.number().default(0), hitLimit: t.number().default(0), fuelRemaining: t.number().default(0), fuelCapacity: t.number().default(0), landing: t.boolean().default(false) });
+const Officer = schema({ x: t.number().default(jailGate.x), z: t.number().default(jailGate.z), rotation: t.number().default(0), walking: t.boolean().default(false), targetId: t.string().default(""), kind: t.string().default("foot") });
 const Santa = schema({ enabled: t.boolean().default(false), x: t.number().default(-29), z: t.number().default(8), rotation: t.number().default(0), nextPoint: t.number().default(1), nextDropAt: t.number().default(0) });
 const Present = schema({ id: t.string(), x: t.number(), z: t.number(), droppedAt: t.number(), expiresAt: t.number() });
 const Blast = schema({ id: t.string(), x: t.number(), y: t.number(), z: t.number(), detonateAt: t.number() });
-const GalleryState = schema({ players: t.map(Player), bolts: t.map(Bolt), train: Train, vehicles: t.map(Vehicle), santa: Santa, presents: t.map(Present), blasts: t.map(Blast), officer: Officer, activities: t.boolean().default(true) });
+const GalleryState = schema({ players: t.map(Player), bolts: t.map(Bolt), train: Train, vehicles: t.map(Vehicle), santa: Santa, presents: t.map(Present), blasts: t.map(Blast), officer: Officer, activities: t.boolean().default(true), patrolBackup: t.map(Officer) });
 const cannotAct = (player) => player.knocked || player.jailedUntil > 0;
 const idleVehicleInput = { throttle: 0, turn: 0, lift: 0 };
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
@@ -85,6 +86,7 @@ class ClassroomGallery extends Room {
   lifeStates = new Map();
   wantedRecords = new Map();
   patrolSettings = defaultPatrolSettings;
+  props = [];
   combatTimer;
   trainRoute = [];
   trainConfig = null;
@@ -97,6 +99,7 @@ class ClassroomGallery extends Room {
   trainSeats = new Map();
   trainCommandTimes = new Map();
   vehicleInputs = new Map();
+  flightFuel = new Map();
   vehicleCommandTimes = new Map();
   worldActionTimes = new Map();
   worldActions = new Set();
@@ -122,6 +125,7 @@ class ClassroomGallery extends Room {
     this.onMessage("jump", (client) => {
       const player = this.state.players.get(client.sessionId), now = Date.now();
       if (!player || cannotAct(player) || player.trainSeat >= 0 || player.vehicleId || now - (this.jumpTimes.get(client.sessionId) ?? 0) < 900) return;
+      if (blockingProp(this.props, player, player, avatarRadius, avatarHeight + jumpApex)) return;
       this.jumpTimes.set(client.sessionId, now); this.jumpStarts.set(client.sessionId, now); player.jump++;
     });
     this.onMessage("cast", (client, message) => { void this.cast(client, message).catch(() => client.send("cast-result", { ok: false })); });
@@ -199,7 +203,8 @@ class ClassroomGallery extends Room {
   async refreshPatrolSettings() {
     const { rows: [settings] } = await pool.query(`SELECT patrol_car_hits AS car, patrol_bike_hits AS bike,
       patrol_helicopter_hits AS helicopter, patrol_broom_hits AS broom, jail_base_seconds AS "baseSeconds",
-      jail_extra_seconds AS "extraSeconds", jail_max_seconds AS "maxSeconds"
+      jail_extra_seconds AS "extraSeconds", jail_max_seconds AS "maxSeconds",
+      helicopter_fuel_seconds AS "helicopterFuelSeconds", broom_fuel_seconds AS "broomFuelSeconds"
       FROM classroom.gallery_worlds WHERE classroom_id=$1`, [this.classroomId]);
     if (settings) this.patrolSettings = settings;
   }
@@ -249,11 +254,12 @@ class ClassroomGallery extends Room {
       if (!(await stillAllowed(auth).catch(() => false)) || this.members.get(client.sessionId) !== auth) {
         client.send("present-result", { ok: false, message: "สิทธิ์เข้าห้องเปลี่ยนแล้ว" }); return;
       }
+      const kind = randomInt(2) === 0 ? "bomb" : "points";
+      if (kind === "bomb") await this.refreshSantaSettings();
       const current = this.state.presents.get(id), latest = this.state.players.get(client.sessionId);
-      if (!this.state.santa.enabled || current !== present || latest !== player || cannotAct(player) || player.vehicleId || player.trainSeat >= 0 || !canOpenPresent(player, present, Date.now())) {
+      if (this.members.get(client.sessionId) !== auth || !this.state.santa.enabled || current !== present || latest !== player || cannotAct(player) || player.vehicleId || player.trainSeat >= 0 || !canOpenPresent(player, present, Date.now())) {
         client.send("present-result", { ok: false, message: "ของขวัญนี้ถูกเปิดไปแล้วหรือหมดเวลา" }); return;
       }
-      const kind = randomInt(2) === 0 ? "bomb" : "points";
       if (kind === "points") {
         const balance = await this.claimPointGift(auth, present);
         this.state.presents.delete(id);
@@ -352,7 +358,8 @@ class ClassroomGallery extends Room {
   }
 
   resetPosition(sessionId, player, x, z, rotation) {
-    Object.assign(player, { x, z, rotation, jump: 0, movementEpoch: player.movementEpoch + 1 });
+    const ground = player.vehicleId ? { x, z } : clearGround(this.props, { x, z });
+    Object.assign(player, { ...ground, rotation, jump: 0, movementEpoch: player.movementEpoch + 1 });
     this.jumpStarts.delete(sessionId);
     this.movementTimes.set(sessionId, Date.now());
   }
@@ -412,6 +419,9 @@ class ClassroomGallery extends Room {
       if (record) Object.assign(player, { wantedCount: record.count, wantedSince: record.since });
     }
     player.trainSeat = -1;
+    const ground = clearGround(this.props, player);
+    player.x = ground.x;
+    player.z = ground.z;
     this.state.players.set(client.sessionId, player);
     this.movementTimes.set(client.sessionId, Date.now());
   }
@@ -424,14 +434,20 @@ class ClassroomGallery extends Room {
     if (now - count.start > 1000) { count.start = now; count.total = 0; }
     if (++count.total > 20) return;
     this.movementMessages.set(client.sessionId, count);
-    const elapsed = Math.min(1, Math.max(0.05, (now - (this.movementTimes.get(client.sessionId) ?? now)) / 1000));
+    const last = this.movementTimes.get(client.sessionId) ?? now;
+    const elapsed = Math.min(1, Math.max(0.05, (now - last) / 1000));
     const next = boundedMove(player, message, elapsed, Math.max(2000, this.trainRoute.length ? Math.abs(Math.min(...this.trainRoute.map((point) => point.z))) + 100 : 2000));
     if (!next) return;
+    const started = this.jumpStarts.get(client.sessionId) ?? -Infinity;
+    const altitude = last < started + 750 && started <= now ? jumpApex : 0;
+    const position = slidePastProps(this.props, player, next, avatarHeight + altitude);
     if (Number.isSafeInteger(message.sequence) && message.sequence > player.sequence) player.sequence = message.sequence;
     this.movementTimes.set(client.sessionId, now);
-    player.x = next.x;
-    player.z = next.z;
-    player.rotation = next.rotation;
+    if (player.x !== position.x || player.z !== position.z) {
+      player.rotation = position === next ? next.rotation : (Math.atan2(position.x - player.x, position.z - player.z) + Math.PI * 2) % (Math.PI * 2);
+      player.x = position.x;
+      player.z = position.z;
+    }
   }
 
   async readTrainConfiguration() {
@@ -459,6 +475,17 @@ class ClassroomGallery extends Room {
     this.trainConfig = config;
     this.trainRoute = config.route;
     this.vehicleBounds.minZ = Math.min(-25, ...config.route.map((point) => point.z)) - 10;
+    this.props = studentSpaceCollision(config.roster.length);
+    for (const [id, player] of this.state.players) {
+      if (player.vehicleId || player.trainSeat >= 0) continue;
+      const ground = clearGround(this.props, player, avatarRadius, avatarHeight + this.jumpAltitude(id, Date.now()));
+      if (ground !== player) this.resetPosition(id, player, ground.x, ground.z, player.rotation);
+    }
+    for (const officer of [this.state.officer, ...this.state.patrolBackup.values()]) {
+      const ground = clearGround(this.props, officer, officer.kind === "car" ? vehicleSpecs.car.halfWidth : avatarRadius);
+      officer.x = ground.x;
+      officer.z = ground.z;
+    }
     const train = this.state.train;
     train.revision++;
     train.active = this.trainRoute.length > 0;
@@ -534,8 +561,9 @@ class ClassroomGallery extends Room {
     if (!(await stillAllowed(auth).catch(() => false)) || this.members.get(client.sessionId) !== auth) { client.leave(4003, "Classroom access expired"); return; }
     if (message.revision !== train.revision || player.trainSeat < 0 || !["waiting", "boarding", "dwell"].includes(train.phase)) { client.send("train-result", { ok: false, message: "รถไฟออกจากสถานีแล้ว" }); return; }
     const seat = this.trainSeats.get(client.sessionId) ?? 0;
-    this.trainSeats.delete(client.sessionId); player.trainSeat = -1; player.x = train.x + 2 + (seat % 3); player.z = train.z + 3; player.rotation = 0; player.movementEpoch++;
-    this.jumpStarts.delete(client.sessionId); train.seats = this.trainSeats.size;
+    this.trainSeats.delete(client.sessionId); player.trainSeat = -1;
+    this.resetPosition(client.sessionId, player, train.x + 2 + (seat % 3), train.z + 3, 0);
+    train.seats = this.trainSeats.size;
     client.send("train-result", { ok: true, message: "ลงจากรถไฟแล้ว" });
   }
 
@@ -583,7 +611,10 @@ class ClassroomGallery extends Room {
     train.phase = "waiting"; train.stopId = this.trainRoute[0]?.id ?? "entrance"; train.arrivalAt = now; train.departureAt = 0;
     for (const [sessionId, seat] of this.trainSeats) {
       const player = this.state.players.get(sessionId);
-      if (player) { player.trainSeat = -1; player.x = train.x + 2 + (seat % 3); player.z = train.z + 3; player.rotation = 0; player.movementEpoch++; }
+      if (player) {
+        player.trainSeat = -1;
+        this.resetPosition(sessionId, player, train.x + 2 + (seat % 3), train.z + 3, 0);
+      }
     }
     this.trainSeats.clear(); train.seats = 0; this.trainCircuitActive = false;
     const config = await this.readTrainConfiguration().catch(() => this.pendingTrainConfig ?? this.trainConfig);
@@ -632,7 +663,7 @@ class ClassroomGallery extends Room {
     }
     if (action === "exit") {
       if (!current || current.driverId !== sessionId || player.vehicleId !== id) return;
-      if (current.y > LANDING_HEIGHT) { result(false, "ลงจอดก่อนลงจากยานพาหนะ"); return; }
+      if (current.landing || current.y > LANDING_HEIGHT) { result(false, "ลงจอดก่อนลงจากยานพาหนะ"); return; }
       this.releaseVehicle(current);
       result(true, "ออกจากยานพาหนะแล้ว"); return;
     }
@@ -662,6 +693,7 @@ class ClassroomGallery extends Room {
     this.reservedPads.add(pad);
     const eligible = () => this.visitorAt(client, auth, depot) === player && player.movementEpoch === epoch && isClear(pad);
     try {
+      await this.refreshPatrolSettings();
       const remaining = await withStudentWallet(pool, auth, (tx) => useItem(tx, auth, "license", message.requestId, eligible));
       if (remaining === null) return result(false, "ต้องมีใบขับขี่ที่ยังไม่ได้ใช้");
       client.send("license-used", {});
@@ -669,6 +701,11 @@ class ClassroomGallery extends Room {
       const vehicle = new Vehicle();
       const hitLimit = this.patrolSettings[message.kind];
       Object.assign(vehicle, { id: randomUUID(), kind: message.kind, rental: true, hitsRemaining: hitLimit, hitLimit, ...pad, y: 0, rotation: Math.PI, revision: 0, driverId: "" });
+      if (vehicleSpecs[message.kind].flying) {
+        const seconds = this.patrolSettings[`${message.kind}FuelSeconds`];
+        vehicle.fuelCapacity = vehicle.fuelRemaining = seconds;
+        this.flightFuel.set(vehicle.id, { seconds, lastTick: Date.now(), ground: null });
+      }
       this.mountVehicle(sessionId, player, vehicle);
       this.state.vehicles.set(vehicle.id, vehicle);
       result(true, "เริ่มขับขี่แล้ว");
@@ -691,6 +728,7 @@ class ClassroomGallery extends Room {
       this.resetPosition(vehicle.driverId, player, position?.x ?? vehicle.x + side, position?.z ?? vehicle.z, vehicle.rotation);
     }
     this.vehicleInputs.delete(vehicle.id);
+    this.flightFuel.delete(vehicle.id);
     if (vehicle.rental) { this.state.vehicles.delete(vehicle.id); return; }
     vehicle.driverId = "";
     vehicle.y = 0;
@@ -717,10 +755,25 @@ class ClassroomGallery extends Room {
       const input = this.vehicleInputs.get(vehicle.id);
       const active = input && now - input.at <= 300 ? input : idleVehicleInput;
       const from = { x: vehicle.x, y: vehicle.y, z: vehicle.z };
-      const next = advanceVehicle(vehicle, active, 0.05, this.vehicleBounds);
+      const fuel = this.flightFuel.get(vehicle.id);
+      if (fuel) {
+        fuel.seconds = flightFuelRemaining(fuel.seconds, vehicle.y, active.lift, (now - fuel.lastTick) / 1000);
+        fuel.lastTick = now;
+        vehicle.fuelRemaining = Math.ceil(fuel.seconds);
+      }
+      const exhausted = fuel?.seconds === 0;
+      let next;
+      if (exhausted) {
+        const radius = vehicleSpecs[vehicle.kind].halfWidth + avatarRadius;
+        if (!fuel.ground || blockingProp(this.props, fuel.ground, fuel.ground, radius)) {
+          fuel.ground = clearGround(this.props, { x: vehicle.x, z: vehicle.z }, radius);
+        }
+        next = advanceFuelLanding(vehicle, fuel.ground, 0.05);
+        vehicle.landing = next.y > 0 || Math.hypot(next.x - fuel.ground.x, next.z - fuel.ground.z) > 1e-6;
+      } else next = advanceVehicle(vehicle, active, 0.05, this.vehicleBounds);
       Object.assign(vehicle, next);
       player.x = next.x; player.z = next.z; player.rotation = next.rotation;
-      this.collideVehicle(from, next, [vehicleSpecs[vehicle.kind]], vehicle.kind, now, vehicle);
+      if (!exhausted) this.collideVehicle(from, next, [vehicleSpecs[vehicle.kind]], vehicle.kind, now, vehicle);
     }
   }
 
@@ -774,12 +827,24 @@ class ClassroomGallery extends Room {
       const candidate = { id, player, accountId, count: player.wantedCount, since: player.wantedSince };
       if (!target || rankWanted(candidate, target) < 0) target = candidate;
     }
-    officer.targetId = target?.id ?? "";
-    advanceOfficer(officer, target?.player ?? jailGate, 0.05, Boolean(target));
+    const backup = this.state.patrolBackup, roles = backupPatrol(target?.count ?? 0);
+    for (const kind of backup.keys()) if (!roles.includes(kind)) backup.delete(kind);
+    for (const kind of roles) {
+      if (backup.has(kind)) continue;
+      const unit = new Officer();
+      Object.assign(unit, { kind, x: jailGate.x + (kind === "car" ? 6 : 2), z: jailGate.z - 3 });
+      backup.set(kind, unit);
+    }
+    const units = [officer, ...backup.values()];
+    for (const unit of units) {
+      unit.targetId = target?.id ?? "";
+      advanceOfficer(unit, target?.player ?? jailGate, 0.05, this.props);
+    }
     if (!target) return;
     const { player, id, accountId, count } = target;
-    const altitude = (this.state.vehicles.get(player.vehicleId)?.y ?? 0) + this.jumpAltitude(id, now);
-    if (!canArrest(officer, player, altitude)) return;
+    const vehicle = this.state.vehicles.get(player.vehicleId);
+    const altitude = (vehicle?.y ?? 0) + this.jumpAltitude(id, now);
+    if (vehicle?.landing || !units.some((unit) => canArrest(unit, player, altitude, this.props))) return;
 
     const record = this.wantedRecords.get(accountId);
     if (!record) return;
@@ -794,6 +859,7 @@ class ClassroomGallery extends Room {
       this.state.bolts.delete(boltId);
     }
     officer.targetId = "";
+    backup.clear();
   }
 
   knockAvatar(sessionId, player, now, cause, cooldownMs) {
@@ -927,11 +993,11 @@ class ClassroomGallery extends Room {
     this.jumpStarts.delete(client.sessionId);
   }
 
-  onDispose() { clearInterval(this.accessTimer); clearInterval(this.galleryTimer); clearInterval(this.worldTimer); clearInterval(this.combatTimer); clearInterval(this.trainSettingsTimer); this.state.bolts.clear(); this.boltDetails.clear(); this.lifeStates.clear(); this.wantedRecords.clear(); this.usedShotIds.clear(); this.trainSeats.clear(); this.trainCommandTimes.clear(); this.santaCommandTimes.clear(); this.openingGifts.clear(); this.state.presents.clear(); this.state.blasts.clear(); this.state.vehicles.clear(); this.vehicleInputs.clear(); this.vehicleCommandTimes.clear(); }
+  onDispose() { clearInterval(this.accessTimer); clearInterval(this.galleryTimer); clearInterval(this.worldTimer); clearInterval(this.combatTimer); clearInterval(this.trainSettingsTimer); this.state.bolts.clear(); this.boltDetails.clear(); this.lifeStates.clear(); this.wantedRecords.clear(); this.usedShotIds.clear(); this.trainSeats.clear(); this.trainCommandTimes.clear(); this.santaCommandTimes.clear(); this.openingGifts.clear(); this.state.presents.clear(); this.state.blasts.clear(); this.state.vehicles.clear(); this.vehicleInputs.clear(); this.flightFuel.clear(); this.vehicleCommandTimes.clear(); }
 }
 
 const gameServer = new Server({
-  express: (app) => app.get("/__gallery_protocol", (_request, response) => response.type("text").send("patrol-v1")),
+  express: (app) => app.get("/__gallery_protocol", (_request, response) => response.type("text").send("patrol-v2")),
 });
 gameServer.define("classroom", ClassroomGallery).filterBy(["classroomId"]);
 await gameServer.listen(Number(process.env.PORT ?? 2567));

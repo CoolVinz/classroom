@@ -1,3 +1,5 @@
+import { walkingSpeed } from "../../gallery-server/src/movement.mjs";
+
 export type Position = { x: number; z: number; rotation: number };
 export type Move = { sequence: number; dx: number; dz: number };
 export type TrainSample = { at: number; x: number; z: number; rotation: number };
@@ -27,7 +29,7 @@ export function interpolateTrain(samples: readonly TrainSample[], now: number, d
 
 export function walkingStep(forward: number, side: number, yaw: number, seconds: number) {
   const length = Math.max(1, Math.hypot(forward, side));
-  const distance = 5 * Math.min(0.05, Math.max(0, seconds)) / length;
+  const distance = walkingSpeed * Math.min(0.05, Math.max(0, seconds)) / length;
   // yaw is the camera's orbit around the player; W follows the direction away from the camera.
   return { dx: (-Math.sin(yaw) * forward + Math.cos(yaw) * side) * distance, dz: (-Math.cos(yaw) * forward - Math.sin(yaw) * side) * distance };
 }
@@ -42,8 +44,14 @@ export function directionFromCamera(direction: { x: number; y: number; z: number
   return { dx: dx / magnitude, dy: dy / magnitude, dz: dz / magnitude };
 }
 
-export function reconcilePosition(server: Position, acknowledged: number, pending: Move[], unsent: { dx: number; dz: number }) {
+export function reconcilePosition(server: Position, acknowledged: number, pending: Move[], unsent: { dx: number; dz: number },
+  clip?: (from: { x: number; z: number }, to: { x: number; z: number }) => { x: number; z: number }) {
   const remaining = pending.filter((move) => move.sequence > acknowledged);
+  if (clip) {
+    let position = { x: server.x, z: server.z };
+    for (const move of [...remaining, unsent]) position = clip(position, { x: position.x + move.dx, z: position.z + move.dz });
+    return position;
+  }
   return { x: server.x + unsent.dx + remaining.reduce((sum, move) => sum + move.dx, 0), z: server.z + unsent.dz + remaining.reduce((sum, move) => sum + move.dz, 0) };
 }
 
