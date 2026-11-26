@@ -48,6 +48,8 @@ UPLOAD_MAX_FILE_BYTES (defaults to 50 MiB)
 UPLOAD_MAX_TOTAL_BYTES (defaults to 5 GiB)
 GOOGLE_CLIENT_ID (required to enable student sign-in)
 GOOGLE_WORKSPACE_DOMAIN (defaults to banjan.ac.th)
+LESSON_DRIVE_FOLDER_ID (optional, dedicated lesson image folder)
+LESSON_DRIVE_SERVICE_ACCOUNT_JSON (optional runtime secret, Google service account credentials)
 GALLERY_WS_URL (public HTTPS URL for the Colyseus service)
 OWNER_USERNAME (first-owner setup only)
 OWNER_DISPLAY_NAME (first-owner setup only)
@@ -65,7 +67,8 @@ Configure the separate Colyseus service with the same `DATABASE_URL` and `DATABA
 - The preflight connection used the PostgreSQL `postgres` role, which owns the `classroom` schema. Do not use that superuser login as the deployed app credential; create a dedicated role that owns the app schema.
 - Database backups are managed at the PostgreSQL service; the app container has no independent backup or migration rollback workflow.
 - The shared file quota includes assignment originals, OBJ MTL companion files, assignment thumbnails, Blender working files, optimized lesson images, and optimized quiz images. Keep actual free disk space above the configured quota; interrupted staging files are cleaned at startup. Working files are stored unchanged on the upload volume. Lesson and quiz pictures are converted to WebP and retained while drafts, published versions, or classroom quiz snapshots reference them; unreferenced images can be cleaned after 24 hours.
-- Code lessons use browser-only sandboxed frames; no runtime or editor package is installed. The app's frame policy must keep generated lesson previews, Google sign-in, and YouTube privacy embeds available. Lesson source and published images remain public through the lesson link.
+- Code lessons use browser-only sandboxed frames. The app's frame policy must keep generated lesson previews, Google sign-in, and YouTube privacy embeds available. Drive images are available only through teacher previews and assigned student lessons.
+- Migration `032_lesson_drive_images.sql` adds Drive references to lesson-image metadata. To enable Drive links, enable the Google Drive API, create a dedicated service account, share only the intended lesson-image folder with that account as Viewer, and set both `LESSON_DRIVE_*` variables as runtime settings in Coolify. Google Workspace must allow the folder to be shared with that account. Use the folder ID from its URL and keep the service account JSON out of Git and build arguments. Google student sign-in uses separate settings. Verify a sample image in teacher preview and an assigned student lesson before sharing links with students.
 - Login throttling is process-local, so the documented initial target is a single application container.
 - Google sign-in uses a Web application client. Add the public app origin as an authorized JavaScript origin and the exact `${APP_URL}/api/auth/student/google` callback as an authorized redirect URI. The callback uses the visible app host (Vite's `/api` proxy in local development); the client ID is public and this ID-token flow needs no client secret.
 - Set `GOOGLE_WORKSPACE_DOMAIN=banjan.ac.th`. The endpoint rejects unverified email, missing or wrong `hd`, wrong audience/issuer/expiry, invalid CSRF, and accounts without active roster matches.

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { CodeBlock } from "./code-lesson";
+import { LessonImagePreview } from "./LessonImagePicker";
 
 export type LessonBlock =
   | { type: "text"; heading?: string; text: string }
@@ -11,7 +12,7 @@ export function LessonContent({ title, blocks, imageUrl }: { title: string; bloc
   return <article className="lesson-reading-content"><h1>{title}</h1>{blocks.map((block, index) => block.type === "text"
     ? <section className="lesson-reading-text" key={index}>{block.heading && <h2>{block.heading}</h2>}<p>{block.text}</p></section>
     : block.type === "image"
-      ? <figure key={block.imageId}><img loading="lazy" src={imageUrl(block.imageId)} alt={block.alt} />{block.caption && <figcaption>{block.caption}</figcaption>}</figure>
+      ? <figure key={`${block.imageId}-${index}`}><LessonImagePreview src={imageUrl(block.imageId)} alt={block.alt} />{block.caption && <figcaption>{block.caption}</figcaption>}</figure>
       : block.type === "youtube" ? <YouTube key={block.videoId + "-" + index} block={block} /> : null
   )}</article>;
 }

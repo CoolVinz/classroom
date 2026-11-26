@@ -184,6 +184,8 @@ OWNER_DISPLAY_NAME
 OWNER_PASSWORD
 GOOGLE_CLIENT_ID
 GOOGLE_WORKSPACE_DOMAIN
+LESSON_DRIVE_FOLDER_ID
+LESSON_DRIVE_SERVICE_ACCOUNT_JSON
 ```
 
 `OWNER_*` values are for first-owner provisioning only and should be removed after the account is created.

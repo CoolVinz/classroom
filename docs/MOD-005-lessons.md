@@ -18,11 +18,14 @@ Teachers create reusable lesson pages with ordered text, image, and YouTube bloc
 - Lesson pack review shows code as text. One transaction creates the included drafts and adds a quiz button when a quiz is included. Review the code using **Run Preview** in the editor. Publish and assign content using the existing classroom workflows, then attach the worksheet from its classroom round.
 - Custom-code lessons offer None (default) or Bootstrap 5.3.9 CSS + JavaScript. The optional `framework` code-block field is saved with draft/published JSON snapshots; older snapshots without it use None. Preview and public readers inject the same pinned jsDelivr assets with verified SRI, before lesson code, under the existing CSP. Teachers should not import Bootstrap again when selected; their separate CSS is applied afterward. No migration or installed dependency is required. CDN access is required; Tailwind/daisyUI are deferred.
 - Published title and content snapshots stay together. Editing a custom lesson does not change its public title or code before publish.
-- Uploaded pictures can be inserted into code with `lesson-image://<uuid>` markers. The server derives and validates referenced images; both saved draft and public snapshots retain their image files.
+- In the HTML tab, **แทรกรูปภาพ** adds an editable `<img>` at the cursor. Choose an existing lesson image, upload a picture, or paste a screenshot. **เปลี่ยนรูปภาพ** changes the `src` under the cursor and preserves other attributes. Edit `srcset` and `<picture>` manually. CSS and JavaScript tabs insert image references in their respective syntax.
+- When Drive is configured, either editor can add or replace an image using its Drive file link. The original lives directly inside the configured private folder. Classroom checks folder membership and download permission each time it retrieves the image, and uses the same lesson access rules to serve it. Legacy public lessons must be assigned to a classroom before they can publish a Drive image. See OPS-001.
+- In the lesson library, **รูปภาพบทเรียน** lists the teacher's images with their source, lesson, assigned classrooms, and saved draft or published usage. Search by filename or lesson title and filter by class or unassigned lessons. Remove an unused upload to free storage, or remove an unused Drive reference to leave the original in Drive. Images used in a saved snapshot or held in the trash cannot be deleted individually.
+- Code uses `lesson-image://<uuid>` markers for both sources. The server derives and validates referenced images. A saved draft and published snapshot can refer to different images.
 - Custom code runs only in a sandboxed iframe with an opaque origin. A fixed CSP permits inline scripts/styles and selected CDN, font, image, and YouTube hosts, while blocking app API connections, forms, popups, and top-level navigation. Scripts can still navigate their own frame. Uploaded images are resolved to data URLs before the source enters the frame. The server never executes or serves source as same-origin HTML.
 - Content is structured data. Text is rendered as text; only validated YouTube video IDs are used to construct privacy-enhanced embed URLs. Video players load after the reader clicks.
 - Uploaded lesson pictures are decoded with `sharp`, bounded to 40 megapixels, resized within 1920 × 1920, stripped of metadata, and stored as WebP at quality 80.
-- Images use the shared `/app/uploads` volume, configured per-file limit, and 5 GiB shared quota. Only images referenced in a saved draft or current published version are retained indefinitely; unreferenced images are eligible for cleanup after 24 hours.
+- Uploaded images use the shared `/app/uploads` volume, configured per-file limit, and 5 GiB shared quota. Drive files stay on Drive and are limited to 10 MiB or the configured upload limit, whichever is smaller. Classroom optimizes Drive pictures in memory and stores no copy on disk. Unreferenced lesson images outside the trash are eligible for cleanup after 24 hours.
 - Every draft save and publish checks an expected revision. Conflicting edits return 409 and leave the editor's content intact.
 - After publishing, select one or more owned classrooms under **ห้องเรียนที่ได้รับบทเรียน**. Active students find the lesson under **บทเรียน** on their dashboard. A stable link selects the sole eligible classroom or asks the student to choose one.
 - Previously published lessons retain public access until first assigned. Assignment permanently restricts the link to assigned students, even if the teacher later removes every classroom. Unpublishing or trashing keeps the assignments and hides the page until it is available again.
@@ -44,13 +47,14 @@ Teachers create reusable lesson pages with ordered text, image, and YouTube bloc
 
 ```text
 Teacher UI and source editor: web/src/LessonLibrary.tsx, web/src/LessonClassAssignments.tsx, web/src/CodeLesson.tsx
+Image picker and cross-class manager: web/src/LessonImagePicker.tsx, web/src/LessonImageManager.tsx
 Public reader and content blocks: web/src/PublicLessonPage.tsx, web/src/LessonContent.tsx
 Sandbox document and image markers: web/src/code-lesson.ts
 Attendance on public lesson pages: web/src/StudentAttendance.tsx
 Teacher, student, and legacy public APIs: src/routes/lesson-pages.ts
 AI lesson pack: web/src/AiImportPanel.tsx, src/lesson-pack-import.ts, POST /api/lesson-packs/import
-Storage quota, startup recovery, and image cleanup: src/file-storage.ts
-Migrations: src/db/migrations/010_lesson_pages.sql, src/db/migrations/011_lesson_code.sql, src/db/migrations/012_quiz_builder.sql, src/db/migrations/013_recoverable_trash.sql, src/db/migrations/027_classroom_lessons_worksheets.sql, src/db/migrations/030_lesson_wio_labs.sql
+Storage quota, startup recovery, and Google Drive reads: src/file-storage.ts, src/lesson-images.ts
+Migrations: 010_lesson_pages, 011_lesson_code, 012_quiz_builder, 013_recoverable_trash, 027_classroom_lessons_worksheets, 030_lesson_wio_labs, 032_lesson_drive_images
 Frame policy: src/content-security-policy.ts, src/server.ts
 Routing and deployment: src/server.ts, web/src/App.tsx
 Tests: src/student-workflow.test.ts (isolated PostgreSQL integration), web/src/code-lesson.test.ts
@@ -61,6 +65,7 @@ YouTube URL validation: web/src/youtube-url.ts, web/src/youtube-url.test.ts
 
 - Public links can be shared beyond the intended class. Unpublishing prevents future page and image requests but cannot recall content already copied or downloaded.
 - Many or large code lesson images can use substantial browser memory because the preview embeds them in its isolated document; keep uploaded preview images small.
+- Replacing a file in Drive can change the published lesson image without republishing. Moving, deleting, or restricting that file can make it unavailable until access is restored.
 - Lesson JavaScript and approved third-party resources can consume browser resources. Publish only code you trust, and never include secrets.
 - Lessons depend on YouTube playback and network access. Embedded videos may be unavailable if blocked by the video owner, Google Workspace, or school network.
 - Lesson quiz buttons point to existing quiz rounds but do not embed question content; see MOD-006.

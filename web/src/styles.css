@@ -38,7 +38,21 @@
 .code-editor-label{display:grid;gap:7px;color:#526966;font-size:.88rem}
 .code-editor-label textarea{width:100%;min-height:380px;resize:vertical;overflow:auto;border:1px solid #183a41;border-radius:8px;padding:14px;background:#102b31;color:#e5f3ef;font:13px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace;tab-size:2;white-space:pre}
 .code-image-tools{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
-.code-image-tools>div{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.lesson-library-toolbar,.lesson-image-picker-header{display:flex;align-items:center;flex-wrap:wrap;gap:10px}
+.lesson-image-picker-header{justify-content:space-between}
+.lesson-image-picker,.lesson-image-card{display:grid;align-content:start;gap:10px;min-width:0;padding:14px}
+.lesson-image-picker label,.lesson-image-picker-row label{display:grid;gap:5px;color:var(--muted);font-size:.86rem;min-width:0}
+.lesson-image-picker input,.lesson-image-picker-row input,.lesson-image-picker-row select{width:100%;min-width:0;min-height:38px;padding:7px 9px;border:1px solid var(--line);border-radius:7px;color:var(--ink);background:var(--surface);font:inherit}
+.lesson-image-picker-row{display:flex;flex-wrap:wrap;align-items:end;gap:8px}
+.lesson-image-picker-row label{flex:1 1 190px}
+.lesson-image-picker-grid,.lesson-image-manager-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(min(100%,140px),1fr))}
+.lesson-image-picker-grid{max-height:270px;overflow:auto;padding:3px}
+.lesson-image-manager-grid{grid-template-columns:repeat(auto-fill,minmax(min(100%,220px),1fr))}
+.lesson-image-option{display:grid;align-content:start;gap:5px;min-width:0;padding:7px;border:1px solid var(--line);border-radius:8px;color:var(--ink);background:var(--surface);text-align:left}
+.lesson-image-option img,.lesson-image-card img{width:100%;aspect-ratio:4/3;object-fit:contain;background:#eef3f1;border-radius:6px}
+.lesson-image-option span,.lesson-image-card>span,.lesson-image-card>strong{overflow-wrap:anywhere}
+.lesson-image-placeholder{display:grid;place-items:center;padding:12px;min-height:78px;border:1px dashed var(--line);border-radius:7px;color:var(--muted);background:#eef3f1;text-align:center}
+.lesson-image-card .lesson-actions{justify-content:start}
 .code-lesson-output{display:grid;gap:10px}
 .code-preview-controls{display:flex;gap:8px;flex-wrap:wrap}
 .code-lesson-frame{display:block;width:100%;height:min(82vh,1000px);min-height:620px;border:1px solid var(--line);border-radius:10px;background:#fff}

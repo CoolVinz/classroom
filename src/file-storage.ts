@@ -189,7 +189,7 @@ export async function ensureUploadRoot() {
   const records = await sql<{ storageName: string; id: string; thumbnailSizeBytes: number | null; thumbnailMediaType: "image/png" | "image/webp" | null }[]>`
     SELECT storage_name AS "storageName", id, thumbnail_size_bytes AS "thumbnailSizeBytes", thumbnail_media_type AS "thumbnailMediaType" FROM classroom.files
     UNION ALL SELECT material_storage_name AS "storageName", id, NULL::bigint, NULL::text FROM classroom.files WHERE material_storage_name IS NOT NULL
-    UNION ALL SELECT storage_name AS "storageName", id, NULL::bigint AS "thumbnailSizeBytes", NULL::text AS "thumbnailMediaType" FROM classroom.lesson_page_images
+    UNION ALL SELECT storage_name AS "storageName", id, NULL::bigint AS "thumbnailSizeBytes", NULL::text AS "thumbnailMediaType" FROM classroom.lesson_page_images WHERE storage_name IS NOT NULL
     UNION ALL SELECT storage_name AS "storageName", id, NULL::bigint AS "thumbnailSizeBytes", NULL::text AS "thumbnailMediaType" FROM classroom.quiz_images
   `;
   const referenced = new Set(records.map((record) => record.storageName));
@@ -234,13 +234,14 @@ export async function cleanupUnusedLessonImages() {
   try {
     await sql.begin(async (tx) => {
       await tx`SELECT pg_advisory_xact_lock(870010022)`;
-      const unused = await tx<{ id: string; storageName: string }[]>`
+      const unused = await tx<{ id: string; storageName: string | null }[]>`
         SELECT i.id, i.storage_name AS "storageName" FROM classroom.lesson_page_images i
         WHERE i.created_at < NOW() - INTERVAL '24 hours'
           AND NOT EXISTS (
             SELECT 1 FROM classroom.lesson_pages l
             WHERE l.id = i.lesson_id AND (
-              EXISTS (SELECT 1 FROM jsonb_array_elements(l.draft_blocks) b WHERE
+              l.trashed_at IS NOT NULL
+              OR EXISTS (SELECT 1 FROM jsonb_array_elements(l.draft_blocks) b WHERE
                 (b->>'type' = 'image' AND b->>'imageId' = i.id::text)
                 OR (b->>'type' = 'code' AND b->'imageIds' ? i.id::text))
               OR (l.published_blocks IS NOT NULL AND EXISTS (
@@ -271,6 +272,7 @@ export async function cleanupUnusedLessonImages() {
           ) FOR UPDATE OF i
       `;
       for (const image of [...unused, ...unusedQuiz]) {
+        if (!image.storageName) continue;
         const original = resolve(root, image.storageName); const tombstone = original + ".deleting";
         try { await rename(original, tombstone); staged.push({ id: image.id, original, tombstone }); }
         catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; }

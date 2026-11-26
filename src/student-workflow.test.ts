@@ -1,6 +1,6 @@
 import { syntheticGLB } from "./test-fixtures/gltf";
 import { describe, expect, spyOn, test } from "bun:test";
-import { OAuth2Client } from "google-auth-library";
+import { JWT, OAuth2Client } from "google-auth-library";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readdir, rename, rm, utimes } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -1010,6 +1010,110 @@ describe("student submission API", () => {
       expect((await learningRequest(classLesson, "GET", studentHeaders)).status).toBe(404);
       expect((await learningRequest(imagePath, "GET", studentHeaders)).status).toBe(404);
       await sql`UPDATE classroom.students SET archived_at = NULL WHERE id = ${studentC}`;
+
+      const privateImageApi = `/lesson-pages/${privateLesson.id}/images`;
+      const driveHeaders = { cookie: `classroom_session=${otherTeacherToken}`, origin: "http://localhost:3000" };
+      const driveLink = { link: "https://drive.google.com/file/d/lesson_test_image/view?usp=sharing" };
+      const driveEnvironment = {
+        LESSON_DRIVE_FOLDER_ID: process.env.LESSON_DRIVE_FOLDER_ID,
+        LESSON_DRIVE_SERVICE_ACCOUNT_JSON: process.env.LESSON_DRIVE_SERVICE_ACCOUNT_JSON,
+      };
+      delete process.env.LESSON_DRIVE_FOLDER_ID;
+      delete process.env.LESSON_DRIVE_SERVICE_ACCOUNT_JSON;
+      expect((await learningRequest(`${privateImageApi}/drive`, "POST", teacherHeaders, driveLink)).status).toBe(503);
+      process.env.LESSON_DRIVE_FOLDER_ID = "lesson_test_folder";
+      process.env.LESSON_DRIVE_SERVICE_ACCOUNT_JSON = JSON.stringify({ type: "service_account", client_email: "test@example.test", private_key: "synthetic" });
+      let driveParent = "wrong_folder";
+      let upstreamCalls = 0;
+      const tokenClient: { getAccessToken: () => Promise<{ token?: string | null }> } = JWT.prototype;
+      const driveAuth = spyOn(tokenClient, "getAccessToken").mockResolvedValue({ token: "synthetic" });
+      const driveFetch = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async (...[input, options]: Parameters<typeof fetch>) => {
+        const url = new URL(String(input));
+        expect(url.origin + url.pathname).toBe("https://www.googleapis.com/drive/v3/files/lesson_test_image");
+        expect(options?.method).toBeUndefined();
+        expect(options?.redirect).toBe("error");
+        upstreamCalls++;
+        return url.searchParams.has("alt") ? new Response(Uint8Array.from(png)) : Response.json({
+          name: "ภาพทดสอบ.png", parents: [driveParent], mimeType: "image/png", size: String(png.length), capabilities: { canDownload: true },
+        });
+      }, { preconnect: fetch.preconnect }));
+      try {
+        expect((await learningRequest(`${privateImageApi}/drive`, "POST", teacherHeaders, { link: "https://drive.google.com.example.test/file/d/lesson_test_image/view" })).status).toBe(422);
+        expect((await learningRequest(`${privateImageApi}/drive`, "POST", driveHeaders, driveLink)).status).toBe(404);
+        expect(upstreamCalls).toBe(0);
+        expect((await learningRequest(`${privateImageApi}/drive`, "POST", teacherHeaders, driveLink)).status).toBe(404);
+        driveParent = "lesson_test_folder";
+        const linked = await learningRequest(`${privateImageApi}/drive`, "POST", teacherHeaders, driveLink);
+        expect(linked.status).toBe(200);
+        const driveImage = await linked.json() as { id: string };
+        expect(driveImage).toMatchObject({ originalName: "ภาพทดสอบ.png", sizeBytes: null, source: "drive" });
+        expect(await (await learningRequest(`${privateImageApi}/drive`, "POST", teacherHeaders, driveLink)).json()).toMatchObject({ id: driveImage.id });
+        expect(await Bun.file(resolve(uploadDir, driveImage.id)).exists()).toBe(false);
+        const removeDrive = () => learningRequest(`${privateImageApi}/${driveImage.id}`, "DELETE");
+        const driveContent = { title: "Classroom private lesson", blocks: [{ type: "image", imageId: driveImage.id, alt: "Drive image" }] };
+        await sql`UPDATE classroom.lesson_pages SET legacy_public = TRUE WHERE id = ${privateLesson.id}`;
+        expect((await learningRequest(`/lesson-pages/${privateLesson.id}/publish`, "POST", teacherHeaders, { ...driveContent, expectedRevision: 1 })).status).toBe(422);
+        expect((await learningRequest(`/lesson-pages/${privateLesson.id}/draft`, "PUT", teacherHeaders, { ...driveContent, expectedRevision: 1 })).status).toBe(200);
+        expect((await removeDrive()).status).toBe(409);
+        expect((await learningRequest(`/lesson-pages/${privateLesson.id}/classrooms/${roomB}`, "PUT")).status).toBe(200);
+        const studentDriveImage = `/student/classrooms/${roomB}/lesson-pages/${privateLesson.id}/images/${driveImage.id}/content`;
+        expect((await learningRequest(studentDriveImage, "GET", studentHeaders)).status).toBe(404);
+        expect((await learningRequest(`/lesson-pages/${privateLesson.id}/publish`, "POST", teacherHeaders, { ...driveContent, expectedRevision: 2 })).status).toBe(200);
+        const manager = await (await learningRequest("/lesson-images")).json();
+        expect(manager.images).toContainEqual(expect.objectContaining({ id: driveImage.id, draft: true, published: true, classroomIds: [roomB], lessonId: privateLesson.id }));
+        expect((await (await learningRequest("/lesson-images", "GET", driveHeaders)).json()).images).toEqual([]);
+        expect((await learningRequest("/lesson-images", "GET", studentHeaders)).status).toBe(401);
+        const beforeDenials = upstreamCalls;
+        expect((await learningRequest(studentDriveImage, "GET", peerHeaders)).status).toBe(404);
+        expect((await learningRequest(studentDriveImage, "GET", {})).status).toBe(401);
+        expect((await learningRequest(`/public/lesson-pages/${privateLesson.id}/images/${driveImage.id}/content`, "GET", {})).status).toBe(404);
+        expect(upstreamCalls).toBe(beforeDenials);
+        const allowedReads = await Promise.all([
+          learningRequest(studentDriveImage, "GET", studentHeaders),
+          learningRequest(`${privateImageApi}/${driveImage.id}/content`),
+        ]);
+        for (const response of allowedReads) {
+          expect(response.status).toBe(200);
+          expect((await sharp(Buffer.from(await response.arrayBuffer())).metadata()).format).toBe("webp");
+        }
+        driveParent = "wrong_folder";
+        expect((await learningRequest(studentDriveImage, "GET", studentHeaders)).status).toBe(404);
+        const withoutImage = { ...driveContent, blocks: [{ type: "text", text: "No image" }] };
+        expect((await learningRequest(`/lesson-pages/${privateLesson.id}/draft`, "PUT", teacherHeaders, { ...withoutImage, expectedRevision: 3 })).status).toBe(200);
+        expect((await removeDrive()).status).toBe(409);
+        expect((await learningRequest(`/lesson-pages/${privateLesson.id}/publish`, "POST", teacherHeaders, { ...withoutImage, expectedRevision: 4 })).status).toBe(200);
+        const beforeRemoval = upstreamCalls;
+        expect(await (await removeDrive()).json()).toEqual({ ok: true, cleanupPending: false });
+        expect(upstreamCalls).toBe(beforeRemoval);
+        expect((await learningRequest(`/lesson-pages/${privateLesson.id}/classrooms/${roomB}`, "DELETE")).status).toBe(200);
+      } finally {
+        driveFetch.mockRestore();
+        driveAuth.mockRestore();
+        for (const [key, value] of Object.entries(driveEnvironment)) {
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        }
+      }
+      const removableForm = new FormData(); removableForm.set("file", new File([png], "remove.png", { type: "image/png" }));
+      const removable = await (await app.handle(new Request(`http://localhost/api${privateImageApi}`, { method: "POST", headers: teacherHeaders, body: removableForm }))).json() as { id: string };
+      const removablePath = `${privateImageApi}/${removable.id}`;
+      expect(await Bun.file(resolve(uploadDir, removable.id)).exists()).toBe(true);
+      expect((await learningRequest(removablePath, "DELETE", driveHeaders)).status).toBe(404);
+      expect((await learningRequest(removablePath, "DELETE", { ...teacherHeaders, origin: "https://different.example.test" })).status).toBe(403);
+      const [removal, racedSave] = await Promise.all([
+        learningRequest(removablePath, "DELETE"),
+        learningRequest(`/lesson-pages/${privateLesson.id}/draft`, "PUT", teacherHeaders, {
+          title: "Classroom private lesson", blocks: [{ type: "image", imageId: removable.id, alt: "race" }], expectedRevision: 5,
+        }),
+      ]);
+      if (removal.status === 200) {
+        expect(racedSave.status).toBe(422);
+        expect(await Bun.file(resolve(uploadDir, removable.id)).exists()).toBe(false);
+      } else {
+        expect(removal.status).toBe(409);
+        expect(racedSave.status).toBe(200);
+        expect(await Bun.file(resolve(uploadDir, removable.id)).exists()).toBe(true);
+      }
 
       const worksheet = await (await learningRequest("/worksheets", "POST", teacherHeaders, { title: "กิจกรรมทดสอบ" })).json() as { id: string };
       const blankId = randomUUID();

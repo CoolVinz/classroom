@@ -1,14 +1,14 @@
 import { Elysia, t } from "elysia";
 import { randomUUID } from "node:crypto";
 import { mkdir, rename, rm } from "node:fs/promises";
-import { basename, resolve } from "node:path";
+import { resolve } from "node:path";
 import type postgres from "postgres";
-import sharp from "sharp";
 import { requireActor, requireStudent } from "../auth/session";
 import { sql } from "../db/client";
 import { HttpError } from "../http-error";
 import { checkRequestOrigin, cleanText } from "../security";
 import { cleanupUnusedLessonImages, maxStoredBytes, maxUploadBytes, uploadRoot, storedFilePath } from "../file-storage";
+import { driveImageId, lessonDriveEnabled, lessonImageName, optimizeLessonImage, readDriveLessonImage } from "../lesson-images";
 
 import { validWioMaxScore, wioLabIds, wioMaxScore, type WioLabSettings } from "../wio-labs";
 
@@ -33,6 +33,14 @@ type StoredBlock = Exclude<LessonBlock, { type: "code" }> | Extract<LessonBlock,
 const lessonImagePattern = /lesson-image:\/\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/gi;
 const uuid = t.String({ format: "uuid" });
 const classLessonParams = t.Object({ classroomId: uuid, id: uuid });
+const imageParams = t.Object({ id: uuid, imageId: uuid });
+type ImageStorage = { storageName: string | null; driveFileId: string | null };
+
+function snapshotUsesImage(db: postgres.ISql, snapshot: "draft_blocks" | "published_blocks") {
+  return db`EXISTS (SELECT 1 FROM jsonb_array_elements(${db(`l.${snapshot}`)}) block
+    WHERE (block->>'type' = 'image' AND block->>'imageId' = i.id::text)
+      OR (block->>'type' = 'code' AND block->'imageIds' ? i.id::text))`;
+}
 
 function normalizeWioLab(lab: WioLabSettings | null) {
   if (lab && !validWioMaxScore(lab.maxScore)) throw new HttpError(422, "คะแนนเต็มต้องใช้ทศนิยมไม่เกิน 2 ตำแหน่ง");
@@ -107,7 +115,51 @@ async function usedStorageBytes(tx: postgres.ISql) {
   return Number(usage.used);
 }
 
+async function deleteLessonImages(action: (tx: postgres.TransactionSql, stage: (id: string, storageName: string | null) => Promise<void>) => Promise<void>) {
+  const staged: { id: string; path: string; tombstone: string }[] = [];
+  try {
+    await sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(870010022)`;
+      await action(tx, async (id, storageName) => {
+        if (!storageName) return;
+        const path = resolve(uploadRoot(), storageName);
+        const tombstone = path + ".deleting";
+        try { await rename(path, tombstone); staged.push({ id, path, tombstone }); }
+        catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; }
+      });
+    });
+  } catch (error) {
+    for (const image of staged) {
+      try {
+        const [record] = await sql`SELECT id FROM classroom.lesson_page_images WHERE id = ${image.id}`;
+        if (record) await rename(image.tombstone, image.path).catch(() => {});
+        else await rm(image.tombstone, { force: true }).catch(() => {});
+      } catch { /* Startup reconciliation resolves uncertain commits. */ }
+    }
+    throw error;
+  }
+  let cleanupPending = false;
+  for (const image of staged) if (await rm(image.tombstone, { force: true }).then(() => false, () => true)) cleanupPending = true;
+  return { ok: true, cleanupPending };
+}
+
 export const lessonPageRoutes = new Elysia({ prefix: "/api" })
+  .get("/lesson-images", async ({ request }) => {
+    const actor = await requireActor(request);
+    const [images, classrooms] = await Promise.all([
+      sql`SELECT i.id, i.lesson_id AS "lessonId", i.original_name AS "originalName", i.size_bytes AS "sizeBytes",
+        CASE WHEN i.drive_file_id IS NULL THEN 'upload' ELSE 'drive' END AS source,
+        l.title AS "lessonTitle", l.trashed_at IS NOT NULL AS trashed,
+        ${snapshotUsesImage(sql, "draft_blocks")} AS draft, ${snapshotUsesImage(sql, "published_blocks")} AS published,
+        ARRAY(SELECT a.classroom_id FROM classroom.classroom_lessons a
+          JOIN classroom.classrooms c ON c.id = a.classroom_id AND c.owner_id = ${actor.id}
+          WHERE a.lesson_id = l.id ORDER BY c.name, c.id) AS "classroomIds"
+        FROM classroom.lesson_page_images i JOIN classroom.lesson_pages l ON l.id = i.lesson_id
+        WHERE l.owner_id = ${actor.id} ORDER BY i.created_at DESC, i.id`,
+      sql`SELECT id, name, archived_at IS NOT NULL AS archived FROM classroom.classrooms WHERE owner_id = ${actor.id} ORDER BY name, id`,
+    ]);
+    return { images, classrooms };
+  })
   .get("/lesson-pages/:id/classrooms", async ({ params, request }) => {
     const actor = await requireActor(request);
     const [lesson] = await sql`SELECT legacy_public AS "legacyPublic", published_wio_lab AS "publishedWioLab" FROM classroom.lesson_pages
@@ -205,38 +257,19 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
   .delete("/lesson-pages/:id", async ({ params, body, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
-    const staged: { id: string; path: string; tombstone: string }[] = [];
-    try {
-      await sql.begin(async (tx) => {
-        await tx`SELECT pg_advisory_xact_lock(870010022)`;
-        const [page] = await tx<{ title: string; revision: number }[]>`SELECT title, draft_revision AS revision FROM classroom.lesson_pages
-          WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NOT NULL FOR UPDATE`;
-        if (!page) throw new HttpError(404, "ไม่พบบทเรียนในถังขยะนี้");
-        if (page.revision !== body.expectedRevision) throw new HttpError(409, "บทเรียนถูกเปลี่ยนจากอีกหน้าต่าง กรุณาโหลดรายการใหม่");
-        if (body.confirmTitle !== page.title) throw new HttpError(422, "ชื่อบทเรียนที่ยืนยันไม่ตรงกัน");
-        const images = await tx<{ id: string; storageName: string }[]>`SELECT id, storage_name AS "storageName"
-          FROM classroom.lesson_page_images WHERE lesson_id = ${params.id} FOR UPDATE`;
-        for (const image of images) {
-          const path = resolve(uploadRoot(), image.storageName); const tombstone = path + ".deleting";
-          try { await rename(path, tombstone); staged.push({ id: image.id, path, tombstone }); }
-          catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; }
-        }
-        await tx`DELETE FROM classroom.lesson_pages WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NOT NULL`;
-      });
-    } catch (error) {
-      for (const image of staged) {
-        try {
-          const [record] = await sql`SELECT id FROM classroom.lesson_page_images WHERE id = ${image.id}`;
-          if (record) await rename(image.tombstone, image.path).catch(() => {});
-          else await rm(image.tombstone, { force: true }).catch(() => {});
-        } catch { /* Startup reconciliation resolves uncertain commits. */ }
-      }
-      throw error;
-    }
-    let cleanupPending = false;
-    for (const image of staged) if (await rm(image.tombstone, { force: true }).then(() => false, () => true)) cleanupPending = true;
+    const result = await deleteLessonImages(async (tx, stage) => {
+      const [page] = await tx<{ title: string; revision: number }[]>`SELECT title, draft_revision AS revision FROM classroom.lesson_pages
+        WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NOT NULL FOR UPDATE`;
+      if (!page) throw new HttpError(404, "ไม่พบบทเรียนในถังขยะนี้");
+      if (page.revision !== body.expectedRevision) throw new HttpError(409, "บทเรียนถูกเปลี่ยนจากอีกหน้าต่าง กรุณาโหลดรายการใหม่");
+      if (body.confirmTitle !== page.title) throw new HttpError(422, "ชื่อบทเรียนที่ยืนยันไม่ตรงกัน");
+      const images = await tx<{ id: string; storageName: string | null }[]>`SELECT id, storage_name AS "storageName"
+        FROM classroom.lesson_page_images WHERE lesson_id = ${params.id} FOR UPDATE`;
+      for (const image of images) await stage(image.id, image.storageName);
+      await tx`DELETE FROM classroom.lesson_pages WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NOT NULL`;
+    });
     cleanupLater();
-    return { ok: true, cleanupPending };
+    return result;
   }, { body: t.Object({ expectedRevision: t.Integer({ minimum: 0 }), confirmTitle: t.String({ minLength: 1, maxLength: 120 }) }) })
   .post("/lesson-pages", async ({ body, request }) => {
     checkRequestOrigin(request);
@@ -247,7 +280,7 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
       VALUES (${actor.id}, ${cleanText(body.title, 120)}, ${editorMode}, ${sql.json(initialBlocks)})
       RETURNING id, title, editor_mode AS "editorMode", draft_blocks AS blocks, draft_revision AS revision,
         published_at AS "publishedAt", published_revision AS "publishedRevision"`;
-    return page;
+    return { ...page, driveEnabled: lessonDriveEnabled() };
   }, { body: t.Object({ title: t.String({ minLength: 1, maxLength: 120 }), editorMode: t.Optional(t.Union([t.Literal("blocks"), t.Literal("code")])) }) })
   .get("/lesson-pages/:id", async ({ params, request }) => {
     const actor = await requireActor(request);
@@ -256,7 +289,7 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
       draft_quiz_links AS "quizLinks", draft_wio_lab AS "wioLab"
       FROM classroom.lesson_pages WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NULL`;
     if (!page) throw new HttpError(404, "ไม่พบบทเรียนนี้");
-    return page;
+    return { ...page, driveEnabled: lessonDriveEnabled() };
   })
   .put("/lesson-pages/:id/draft", async ({ params, body, request }) => {
     checkRequestOrigin(request);
@@ -283,18 +316,18 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
     });
     if (!page) await conflictOrMissing(params.id, actor.id);
     cleanupLater();
-    return page;
+    return { ...page, driveEnabled: lessonDriveEnabled() };
   }, { body: lessonBody })
   .post("/lesson-pages/:id/publish", async ({ params, body, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
     const [page] = await sql.begin(async (tx) => {
       await tx`SELECT pg_advisory_xact_lock(870010022)`;
-      const [current] = await tx<{ editorMode: "blocks" | "code"; quizLinks: { quizId: string; label: string }[]; wioLab: WioLabSettings | null }[]>`SELECT editor_mode AS "editorMode", draft_quiz_links AS "quizLinks", draft_wio_lab AS "wioLab" FROM classroom.lesson_pages
+      const [current] = await tx<{ editorMode: "blocks" | "code"; quizLinks: { quizId: string; label: string }[]; wioLab: WioLabSettings | null; legacyPublic: boolean }[]>`SELECT editor_mode AS "editorMode", draft_quiz_links AS "quizLinks", draft_wio_lab AS "wioLab", legacy_public AS "legacyPublic" FROM classroom.lesson_pages
         WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NULL AND draft_revision = ${body.expectedRevision} FOR UPDATE`;
       if (!current) return [];
       const content = normalizeBlocks(current.editorMode, body.blocks);
-      await validateImageReferences(params.id, actor.id, content, tx);
+      await validateImageReferences(params.id, actor.id, content, tx, current.legacyPublic);
       const quizLinks = body.quizLinks ? normalizeQuizLinks(body.quizLinks) : current.quizLinks;
       await validateQuizLinks(actor.id, quizLinks, tx);
       const lab = body.wioLab === undefined ? current.wioLab : normalizeWioLab(body.wioLab);
@@ -311,7 +344,7 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
     });
     if (!page) await conflictOrMissing(params.id, actor.id);
     cleanupLater();
-    return page;
+    return { ...page, driveEnabled: lessonDriveEnabled() };
   }, { body: lessonBody })
   .post("/lesson-pages/:id/unpublish", async ({ params, body, request }) => {
     checkRequestOrigin(request);
@@ -329,19 +362,8 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
     const actor = await requireActor(request);
     await ownedPage(params.id, actor.id);
     if (!body.file.size || body.file.size > maxUploadBytes()) throw new HttpError(413, "ไฟล์ภาพมีขนาดเกินกำหนด");
-    let image: Buffer; let mediaType: string;
-    try {
-      const input = Buffer.from(await body.file.arrayBuffer());
-      const processor = sharp(input, { failOn: "error", limitInputPixels: 40_000_000 });
-      const metadata = await processor.metadata();
-      if (!metadata.width || !metadata.height || metadata.pages && metadata.pages > 1 || !["jpeg", "png", "webp"].includes(metadata.format ?? "")) throw new Error("unsupported image");
-      image = await sharp(input, { failOn: "error", limitInputPixels: 40_000_000 })
-        .rotate().resize({ width: 1920, height: 1920, fit: "inside", withoutEnlargement: true })
-        .webp({ quality: 80 }).toBuffer();
-      if (image.byteLength > maxUploadBytes()) throw new HttpError(413, "ภาพหลังปรับขนาดมีขนาดเกินกำหนด");
-      mediaType = "image/webp";
-    } catch (error) { if (error instanceof HttpError) throw error; throw new HttpError(422, "รองรับภาพ PNG, JPEG หรือ WebP ที่เปิดได้เท่านั้น"); }
-    const originalName = basename(body.file.name).replace(/[\\/\0-\x1f\x7f]/g, "_").trim().slice(-255) || "image";
+    const image = await optimizeLessonImage(Buffer.from(await body.file.arrayBuffer()));
+    const originalName = lessonImageName(body.file.name);
     const id = randomUUID(); const storageName = id; const root = uploadRoot();
     await mkdir(root, { recursive: true, mode: 0o750 });
     const temporary = resolve(root, id + ".upload"); const destination = resolve(root, id); let renamed = false;
@@ -367,23 +389,61 @@ export const lessonPageRoutes = new Elysia({ prefix: "/api" })
       throw error;
     }
     cleanupLater();
-    return { id, originalName, mediaType };
+    return { id, originalName, mediaType: "image/webp", source: "upload", sizeBytes: image.byteLength };
   }, { body: t.Object({ file: t.File() }) })
+  .post("/lesson-pages/:id/images/drive", async ({ params, body, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireActor(request);
+    await ownedPage(params.id, actor.id);
+    const driveFileId = driveImageId(body.link.trim());
+    if (!driveFileId) throw new HttpError(422, "กรุณาวางลิงก์ไฟล์รูปภาพจาก Google Drive");
+    const { name } = await readDriveLessonImage(driveFileId);
+    const [image] = await sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(870010022)`;
+      const [lesson] = await tx`SELECT id FROM classroom.lesson_pages WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NULL FOR UPDATE`;
+      if (!lesson) throw new HttpError(404, "ไม่พบบทเรียนนี้");
+      return tx`INSERT INTO classroom.lesson_page_images (lesson_id, original_name, drive_file_id)
+        VALUES (${params.id}, ${name}, ${driveFileId})
+        ON CONFLICT (lesson_id, drive_file_id) WHERE drive_file_id IS NOT NULL
+        DO UPDATE SET original_name = EXCLUDED.original_name, created_at = NOW()
+        RETURNING id, original_name AS "originalName", 'drive' AS source, size_bytes AS "sizeBytes"`;
+    });
+    cleanupLater();
+    return image;
+  }, { params: t.Object({ id: uuid }), body: t.Object({ link: t.String({ minLength: 1, maxLength: 2048 }) }) })
   .get("/lesson-pages/:id/images", async ({ params, request }) => {
     const actor = await requireActor(request);
     const [page] = await sql`SELECT id FROM classroom.lesson_pages WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NULL`;
     if (!page) throw new HttpError(404, "ไม่พบบทเรียนนี้");
-    return sql`SELECT id, original_name AS "originalName", size_bytes AS "sizeBytes"
+    return sql`SELECT id, original_name AS "originalName", size_bytes AS "sizeBytes",
+      CASE WHEN drive_file_id IS NULL THEN 'upload' ELSE 'drive' END AS source
       FROM classroom.lesson_page_images WHERE lesson_id = ${params.id} ORDER BY created_at DESC`;
   })
-  .get("/lesson-pages/:id/images/:imageId/content", async ({ params, request }) => {
+  .get("/lesson-pages/:id/images/:imageId/content", async ({ params, request, set }) => {
+    set.headers["cache-control"] = "no-store";
     const actor = await requireActor(request);
-    const [image] = await sql`SELECT i.storage_name AS "storageName" FROM classroom.lesson_page_images i
+    const [image] = await sql<ImageStorage[]>`SELECT i.storage_name AS "storageName", i.drive_file_id AS "driveFileId" FROM classroom.lesson_page_images i
       JOIN classroom.lesson_pages l ON l.id = i.lesson_id
       WHERE l.id = ${params.id} AND i.id = ${params.imageId} AND l.owner_id = ${actor.id} AND l.trashed_at IS NULL`;
     if (!image) throw new HttpError(404, "ไม่พบภาพนี้");
-    return imageResponse(await storedFilePath(image.storageName));
-  });
+    return imageResponse(image);
+  }, { params: imageParams })
+  .delete("/lesson-pages/:id/images/:imageId", async ({ params, request }) => {
+    checkRequestOrigin(request);
+    const actor = await requireActor(request);
+    return deleteLessonImages(async (tx, stage) => {
+      const [image] = await tx<{ storageName: string | null; draft: boolean; published: boolean }[]>`
+        SELECT i.storage_name AS "storageName", ${snapshotUsesImage(tx, "draft_blocks")} AS draft,
+          ${snapshotUsesImage(tx, "published_blocks")} AS published
+        FROM classroom.lesson_page_images i JOIN classroom.lesson_pages l ON l.id = i.lesson_id
+        WHERE l.id = ${params.id} AND i.id = ${params.imageId} AND l.owner_id = ${actor.id} AND l.trashed_at IS NULL
+        FOR UPDATE OF l, i`;
+      if (!image) throw new HttpError(404, "ไม่พบภาพนี้");
+      if (image.draft || image.published) throw new HttpError(409, "รูปนี้ยังถูกใช้ในฉบับร่างหรือฉบับเผยแพร่ กรุณานำรูปออกจากบทเรียนและบันทึกก่อน");
+      await stage(params.imageId, image.storageName);
+      await tx`DELETE FROM classroom.lesson_page_images WHERE id = ${params.imageId}`;
+    });
+  }, { params: imageParams });
 
 function activeLessonMembership(classroomId: string, accountId: string) {
   return sql`EXISTS (SELECT 1 FROM classroom.classroom_lessons a
@@ -406,15 +466,13 @@ async function readPublishedPage(id: string, access: ReturnType<typeof activeLes
   return page;
 }
 
-async function readPublishedImage(id: string, imageId: string, access: ReturnType<typeof activeLessonMembership>) {
-  const [image] = await sql`SELECT i.storage_name AS "storageName" FROM classroom.lesson_page_images i
+async function readPublishedImage(id: string, imageId: string, access: ReturnType<typeof activeLessonMembership>, allowDrive: boolean) {
+  const [image] = await sql<ImageStorage[]>`SELECT i.storage_name AS "storageName", i.drive_file_id AS "driveFileId" FROM classroom.lesson_page_images i
     JOIN classroom.lesson_pages l ON l.id = i.lesson_id
     WHERE l.id = ${id} AND i.id = ${imageId} AND l.trashed_at IS NULL AND l.published_blocks IS NOT NULL AND ${access}
-        AND EXISTS (SELECT 1 FROM jsonb_array_elements(l.published_blocks) block
-          WHERE (block->>'type' = 'image' AND block->>'imageId' = i.id::text)
-            OR (block->>'type' = 'code' AND block->'imageIds' ? i.id::text))`;
+        AND (${allowDrive} OR i.drive_file_id IS NULL) AND ${snapshotUsesImage(sql, "published_blocks")}`;
   if (!image) throw new HttpError(404, "ไม่พบภาพนี้");
-  return imageResponse(await storedFilePath(image.storageName));
+  return imageResponse(image);
 }
 
 const publicLessonPageRoutes = new Elysia({ prefix: "/api/public/lesson-pages" })
@@ -422,8 +480,10 @@ const publicLessonPageRoutes = new Elysia({ prefix: "/api/public/lesson-pages" }
     set.headers["cache-control"] = "no-store";
     return readPublishedPage(params.id, sql`l.legacy_public`);
   }, { params: t.Object({ id: uuid }) })
-  .get("/:id/images/:imageId/content", ({ params }) => readPublishedImage(params.id, params.imageId, sql`l.legacy_public`),
-    { params: t.Object({ id: uuid, imageId: uuid }) });
+  .get("/:id/images/:imageId/content", ({ params, set }) => {
+    set.headers["cache-control"] = "no-store";
+    return readPublishedImage(params.id, params.imageId, sql`l.legacy_public`, false);
+  }, { params: imageParams });
 
 const studentLessonPageRoutes = new Elysia({ prefix: "/api/student" })
   .get("/lesson-pages", async ({ request, set }) => {
@@ -451,8 +511,10 @@ const studentLessonPageRoutes = new Elysia({ prefix: "/api/student" })
         AND a.archived_at IS NULL AND a.wio_lab IS NOT NULL`;
     return { ...page, worksheets, wioLab: wioLab ?? null };
   }, { params: classLessonParams })
-  .get("/classrooms/:classroomId/lesson-pages/:id/images/:imageId/content", async ({ params, request }) =>
-    readPublishedImage(params.id, params.imageId, activeLessonMembership(params.classroomId, (await requireStudent(request)).id)),
+  .get("/classrooms/:classroomId/lesson-pages/:id/images/:imageId/content", async ({ params, request, set }) => {
+    set.headers["cache-control"] = "no-store";
+    return readPublishedImage(params.id, params.imageId, activeLessonMembership(params.classroomId, (await requireStudent(request)).id), true);
+  },
   { params: t.Object({ classroomId: uuid, id: uuid, imageId: uuid }) });
 
 export const lessonPageApiRoutes = new Elysia().use(lessonPageRoutes).use(publicLessonPageRoutes).use(studentLessonPageRoutes);
@@ -488,13 +550,14 @@ async function validateQuizLinks(ownerId: string, links: { quizId: string; label
   if (found.length !== links.length) throw new HttpError(422, "มีแบบทดสอบที่ไม่ได้เป็นของบัญชีนี้");
 }
 
-async function validateImageReferences(id: string, ownerId: string, contents: StoredBlock[], tx: postgres.ISql = sql) {
+async function validateImageReferences(id: string, ownerId: string, contents: StoredBlock[], tx: postgres.ISql, legacyPublic = false) {
   const ids = [...new Set(contents.flatMap((item) => item.type === "image" ? [item.imageId] : item.type === "code" ? item.imageIds : []))];
   if (!ids.length) return;
-  const images = await tx`SELECT i.id FROM classroom.lesson_page_images i
+  const images = await tx`SELECT i.id, i.drive_file_id AS "driveFileId" FROM classroom.lesson_page_images i
     JOIN classroom.lesson_pages l ON l.id = i.lesson_id
     WHERE l.id = ${id} AND l.owner_id = ${ownerId} AND i.id = ANY(${ids}::uuid[])`;
   if (images.length !== ids.length) throw new HttpError(422, "ภาพในบทเรียนไม่ถูกต้อง");
+  if (legacyPublic && images.some((image) => image.driveFileId)) throw new HttpError(422, "มอบหมายบทเรียนสาธารณะนี้ให้ห้องเรียนก่อนเผยแพร่รูปจาก Google Drive");
 }
 
 async function conflictOrMissing(id: string, ownerId: string) {
@@ -502,8 +565,9 @@ async function conflictOrMissing(id: string, ownerId: string) {
   throw new HttpError(409, "มีการแก้ไขบทเรียนจากอีกหน้าต่าง กรุณาโหลดบทเรียนใหม่ก่อนบันทึก");
 }
 
-function imageResponse(path: string) {
-  return new Response(Bun.file(path), { headers: {
+async function imageResponse(image: ImageStorage) {
+  const body = image.driveFileId ? Uint8Array.from((await readDriveLessonImage(image.driveFileId)).bytes) : Bun.file(await storedFilePath(image.storageName!));
+  return new Response(body, { headers: {
     "content-type": "image/webp", "cache-control": "no-store", "x-content-type-options": "nosniff",
   } });
 }
