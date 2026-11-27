@@ -58,6 +58,7 @@ export const studentCourseworkRoutes = new Elysia({ prefix: "/api/student" })
     const actor = await requireStudent(request);
     return sql`
       SELECT a.id AS "assignmentId", a.title, a.instructions, a.wio_lab AS "wioLab",
+        gs.id AS "groupSetId", g.name AS "groupName",
         c.id AS "classroomId", c.name AS "classroomName",
         a.created_at AS "createdAt", q.published_score AS "publishedScore",
         q.published_max_score AS "publishedMaxScore", q.published_feedback AS "publishedFeedback",
@@ -72,6 +73,9 @@ export const studentCourseworkRoutes = new Elysia({ prefix: "/api/student" })
       FROM classroom.students s
       JOIN classroom.classrooms c ON c.id = s.classroom_id
       JOIN classroom.assignments a ON a.classroom_id = c.id
+      LEFT JOIN classroom.group_sets gs ON gs.id = a.group_set_id AND gs.status IN ('open', 'locked')
+      LEFT JOIN classroom.group_memberships gm ON gm.group_set_id = gs.id AND gm.student_id = s.id
+      LEFT JOIN classroom.student_groups g ON g.group_set_id = gm.group_set_id AND g.id = gm.group_id
       LEFT JOIN classroom.assignment_assessments q ON q.assignment_id = a.id AND q.student_id = s.id
       WHERE s.account_id = ${actor.id} AND s.archived_at IS NULL
         AND c.archived_at IS NULL AND a.archived_at IS NULL

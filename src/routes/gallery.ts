@@ -155,27 +155,63 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     if (teacher) { await ownedClass(teacher, params.classroomId); await sql`INSERT INTO classroom.gallery_worlds(classroom_id,enabled) VALUES(${params.classroomId},false) ON CONFLICT DO NOTHING`; }
     else if (student) viewerStudentId = await studentClass(student.id, params.classroomId);
     else throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
-    const [world] = await sql<{ enabled: boolean; classroomName: string; fuseSeconds: number; respawnSeconds: number; wand: number; license: number; patrol: PatrolSettings }[]>`
-      SELECT w.enabled, c.name AS "classroomName", w.santa_bomb_fuse_seconds AS "fuseSeconds", w.santa_respawn_seconds AS "respawnSeconds",
-        w.wand_price AS wand, w.license_price AS license,
-        json_build_object('car', w.patrol_car_hits, 'bike', w.patrol_bike_hits, 'helicopter', w.patrol_helicopter_hits,
-          'broom', w.patrol_broom_hits, 'baseSeconds', w.jail_base_seconds, 'extraSeconds', w.jail_extra_seconds, 'maxSeconds', w.jail_max_seconds,
-          'helicopterFuelSeconds', w.helicopter_fuel_seconds, 'broomFuelSeconds', w.broom_fuel_seconds) AS patrol
-      FROM classroom.gallery_worlds w JOIN classroom.classrooms c ON c.id=w.classroom_id WHERE w.classroom_id=${params.classroomId}`;
-    if (!world || (!teacher && !world.enabled)) throw new HttpError(404, "ยังไม่ได้เปิดโลกเสมือน");
     await ensureBlocks(params.classroomId);
-    const offset = Math.max(0, Math.min(100000, Number(query.offset) || 0));
-    const [blocks, models] = await Promise.all([
-      sql`SELECT s.id AS "studentId", s.display_name AS "displayName", s.student_number AS "studentNumber", b.block_index AS "blockIndex", (row_number() OVER (ORDER BY s.student_number NULLS LAST, s.display_name, s.id) - 1)::int AS "layoutIndex", FALSE AS archived FROM classroom.gallery_blocks b JOIN classroom.students s ON s.id=b.student_id WHERE b.classroom_id=${params.classroomId} AND s.archived_at IS NULL ORDER BY s.student_number NULLS LAST, s.display_name, s.id`,
-      sql`SELECT f.id, f.student_id AS "studentId", s.display_name AS "displayName", s.student_number AS "studentNumber", a.id AS "assignmentId", a.title AS "assignmentTitle", f.original_name AS "originalName", f.media_type AS "mediaType", f.material_storage_name IS NOT NULL AS "materialAvailable", f.thumbnail_size_bytes IS NOT NULL AS "thumbnailAvailable", f.created_at AS "createdAt", (h.file_id IS NOT NULL) AS hidden, (SELECT COUNT(*)::int FROM classroom.gallery_likes l WHERE l.file_id=f.id) AS likes, ${viewerStudentId}::uuid IS NOT NULL AND EXISTS (SELECT 1 FROM classroom.gallery_likes l WHERE l.file_id=f.id AND l.student_id=${viewerStudentId}) AS "likedByMe"
-        FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id LEFT JOIN classroom.gallery_hidden_models h ON h.classroom_id=f.classroom_id AND h.file_id=f.id
-        WHERE f.classroom_id=${params.classroomId} AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$' AND s.archived_at IS NULL AND a.archived_at IS NULL AND (${teacher !== null} OR h.file_id IS NULL)
-        ORDER BY s.student_number NULLS LAST, s.display_name, s.id, f.created_at DESC, f.id LIMIT 40 OFFSET ${offset}`,
-    ]);
-    const [count] = await sql<{ count: number }[]>`SELECT COUNT(*)::int AS count FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id LEFT JOIN classroom.gallery_hidden_models h ON h.classroom_id=f.classroom_id AND h.file_id=f.id WHERE f.classroom_id=${params.classroomId} AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$' AND s.archived_at IS NULL AND a.archived_at IS NULL AND (${teacher !== null} OR h.file_id IS NULL)`;
-    const [train] = await sql<{ mode: "auto" | "manual"; intervalSeconds: number; startStudentId: string | null; stationWaitSeconds: Record<string, number> }[]>`SELECT w.train_mode AS mode, w.train_interval_seconds AS "intervalSeconds", CASE WHEN s.id IS NULL THEN NULL ELSE s.id END AS "startStudentId", w.train_station_wait_seconds AS "stationWaitSeconds" FROM classroom.gallery_worlds w LEFT JOIN classroom.students s ON s.id=w.train_start_student_id AND s.classroom_id=w.classroom_id AND s.archived_at IS NULL AND s.student_number IS NOT NULL WHERE w.classroom_id=${params.classroomId}`;
-    return { classroomId: params.classroomId, classroomName: world.classroomName, enabled: world.enabled, blocks, models, nextOffset: offset + models.length < count.count ? offset + models.length : null, teacher: Boolean(teacher), viewerStudentId, train: { mode: train?.mode ?? "auto", intervalSeconds: train?.intervalSeconds ?? 120, startStudentId: train?.startStudentId ?? null, stationWaitSeconds: train?.stationWaitSeconds ?? {} }, santa: { fuseSeconds: world.fuseSeconds, respawnSeconds: world.respawnSeconds }, shop: { wand: world.wand, license: world.license }, patrol: world.patrol };
+    const offset = Math.max(0, Math.min(100000, Math.trunc(Number(query.offset) || 0)));
+    return sql.begin("isolation level repeatable read read only", async (tx) => {
+      const [world] = await tx<{ enabled: boolean; classroomName: string; fuseSeconds: number; respawnSeconds: number; wand: number; license: number; patrol: PatrolSettings; requested: string | null; displayed: string | null }[]>`
+        SELECT w.enabled, c.name AS "classroomName", w.santa_bomb_fuse_seconds AS "fuseSeconds", w.santa_respawn_seconds AS "respawnSeconds",
+          w.exhibition_assignment_id AS requested, w.displayed_assignment_id AS displayed,
+          w.wand_price AS wand, w.license_price AS license,
+          json_build_object('car', w.patrol_car_hits, 'bike', w.patrol_bike_hits, 'helicopter', w.patrol_helicopter_hits,
+            'broom', w.patrol_broom_hits, 'baseSeconds', w.jail_base_seconds, 'extraSeconds', w.jail_extra_seconds, 'maxSeconds', w.jail_max_seconds,
+            'helicopterFuelSeconds', w.helicopter_fuel_seconds, 'broomFuelSeconds', w.broom_fuel_seconds) AS patrol
+        FROM classroom.gallery_worlds w JOIN classroom.classrooms c ON c.id=w.classroom_id WHERE w.classroom_id=${params.classroomId}`;
+      if (!world || (!teacher && !world.enabled)) throw new HttpError(404, "ยังไม่ได้เปิดโลกเสมือน");
+      if (offset && (query.layout || null) !== world.displayed && query.layout !== undefined) {
+        throw new HttpError(409, "พื้นที่จัดแสดงเปลี่ยนแล้ว กรุณาโหลดผลงานใหม่");
+      }
+      const limit = Math.max(world.displayed ? 200 : 40, Math.min(400, Math.trunc(Number(query.limit) || 0)));
+      const [blocks, modelPage, options, trainStudents, [train]] = await Promise.all([
+        tx`SELECT l.space_id AS "spaceId", b.student_id AS "studentId", l.display_name AS "displayName",
+          l.student_number AS "studentNumber", b.block_index AS "blockIndex", (l.ordinality - 1)::int AS "layoutIndex", FALSE AS archived
+          FROM classroom.gallery_layout(${params.classroomId}, ${world.displayed}) WITH ORDINALITY l
+          LEFT JOIN classroom.gallery_blocks b ON b.classroom_id=${params.classroomId} AND b.student_id=l.space_id AND ${world.displayed}::uuid IS NULL
+          ORDER BY l.ordinality`,
+        tx`SELECT f.id, f.space_id AS "spaceId", f.student_id AS "studentId", f.display_name AS "displayName",
+          f.student_number AS "studentNumber", f.assignment_id AS "assignmentId", f.assignment_title AS "assignmentTitle",
+          f.original_name AS "originalName", f.media_type AS "mediaType", f.material_storage_name IS NOT NULL AS "materialAvailable",
+          f.thumbnail_size_bytes IS NOT NULL AS "thumbnailAvailable", f.created_at AS "createdAt", f.hidden,
+          (SELECT COUNT(*)::int FROM classroom.gallery_likes l WHERE l.file_id=f.id) AS likes,
+          EXISTS (SELECT 1 FROM classroom.gallery_likes l WHERE l.file_id=f.id AND l.student_id=${viewerStudentId}) AS "likedByMe"
+          FROM classroom.gallery_display_models f WHERE f.classroom_id=${params.classroomId} AND (${teacher !== null} OR NOT f.hidden)
+          ORDER BY f.student_number NULLS LAST, f.display_name, f.student_id, f.created_at DESC, f.id LIMIT ${limit + 1} OFFSET ${offset}`,
+        teacher ? tx`SELECT id, title FROM classroom.gallery_exhibition_assignments
+          WHERE classroom_id=${params.classroomId} ORDER BY title, id` : [],
+        teacher ? tx`SELECT space_id AS id, display_name AS "displayName", student_number AS "studentNumber"
+          FROM classroom.gallery_layout(${params.classroomId}, NULL) WHERE student_number IS NOT NULL` : [],
+        tx<{ mode: "auto" | "manual"; intervalSeconds: number; startStudentId: string | null; stationWaitSeconds: Record<string, number> }[]>`SELECT w.train_mode AS mode, w.train_interval_seconds AS "intervalSeconds", s.id AS "startStudentId", w.train_station_wait_seconds AS "stationWaitSeconds" FROM classroom.gallery_worlds w LEFT JOIN classroom.students s ON s.id=w.train_start_student_id AND s.classroom_id=w.classroom_id AND s.archived_at IS NULL AND s.student_number IS NOT NULL WHERE w.classroom_id=${params.classroomId}`,
+      ]);
+      return { classroomId: params.classroomId, classroomName: world.classroomName, enabled: world.enabled, blocks, models: modelPage.slice(0, limit), nextOffset: modelPage.length > limit ? offset + limit : null, teacher: Boolean(teacher), viewerStudentId, exhibition: { requested: world.requested, displayed: world.displayed, options }, trainStudents, train: { mode: train?.mode ?? "auto", intervalSeconds: train?.intervalSeconds ?? 120, startStudentId: train?.startStudentId ?? null, stationWaitSeconds: train?.stationWaitSeconds ?? {} }, santa: { fuseSeconds: world.fuseSeconds, respawnSeconds: world.respawnSeconds }, shop: { wand: world.wand, license: world.license }, patrol: world.patrol };
+    });
   })
+  .put("/classrooms/:classroomId/gallery/exhibition", async ({ params, body, request }) => {
+    checkRequestOrigin(request);
+    const teacher = await requireActor(request);
+    await ownedClass(teacher, params.classroomId);
+    await sql.begin(async (tx) => {
+      if (body.assignmentId) {
+        const [assignment] = await tx`SELECT a.id FROM classroom.assignments a
+          JOIN classroom.group_sets gs ON gs.id=a.group_set_id
+          WHERE a.id=${body.assignmentId} AND a.classroom_id=${params.classroomId}
+            AND a.archived_at IS NULL AND gs.status IN ('open', 'locked') FOR SHARE OF a, gs`;
+        if (!assignment) throw new HttpError(422, "เลือกงานที่เปิดอยู่และเชื่อมกับชุดกลุ่มในห้องนี้");
+      }
+      await tx`INSERT INTO classroom.gallery_worlds(classroom_id, exhibition_assignment_id)
+        VALUES(${params.classroomId}, ${body.assignmentId}) ON CONFLICT(classroom_id)
+        DO UPDATE SET exhibition_assignment_id=EXCLUDED.exhibition_assignment_id, updated_at=NOW()`;
+    });
+    return { ok: true };
+  }, { body: t.Object({ assignmentId: t.Nullable(t.String({ format: "uuid" })) }) })
   .get("/classrooms/:classroomId/gallery/votes", async ({ params, request }) => {
     const teacher = await readActor(request);
     const student = teacher ? null : await readStudentActor(request);
@@ -184,26 +220,26 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     else if (student) studentId = await studentClass(student.id, params.classroomId);
     else throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
     const [blockTotals, usage, myVotes] = await Promise.all([
-      sql`SELECT f.student_id AS "studentId", COUNT(l.file_id)::int AS votes
-        FROM classroom.files f JOIN classroom.students owner ON owner.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id
-        LEFT JOIN classroom.gallery_hidden_models h ON h.classroom_id=f.classroom_id AND h.file_id=f.id
+      sql<{ id: string; team: boolean; votes: number }[]>`SELECT f.space_id AS id, w.displayed_assignment_id IS NOT NULL AS team, COUNT(l.file_id)::int AS votes
+        FROM classroom.gallery_display_models f
+        JOIN classroom.gallery_worlds w ON w.classroom_id=f.classroom_id
         JOIN classroom.gallery_likes l ON l.classroom_id=f.classroom_id AND l.file_id=f.id
-        WHERE f.classroom_id=${params.classroomId} AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$'
-          AND owner.archived_at IS NULL AND a.archived_at IS NULL AND h.file_id IS NULL
-        GROUP BY f.student_id HAVING COUNT(l.file_id)>0`,
+        WHERE f.classroom_id=${params.classroomId} AND NOT f.hidden
+        GROUP BY f.space_id, w.displayed_assignment_id`,
       studentId ? sql`SELECT f.assignment_id AS "assignmentId", a.title AS "assignmentTitle", COUNT(*)::int AS used
         FROM classroom.gallery_likes l JOIN classroom.files f ON f.id=l.file_id JOIN classroom.assignments a ON a.id=f.assignment_id
         WHERE l.classroom_id=${params.classroomId} AND l.student_id=${studentId}
         GROUP BY f.assignment_id,a.title ORDER BY a.title,f.assignment_id` : Promise.resolve([]),
       studentId ? sql`SELECT f.id AS "fileId", f.assignment_id AS "assignmentId", a.title AS "assignmentTitle", f.original_name AS "originalName",
           owner.display_name AS "displayName", owner.student_number AS "studentNumber",
-          (h.file_id IS NOT NULL) AS hidden, (owner.archived_at IS NOT NULL OR a.archived_at IS NOT NULL) AS unavailable
+          (h.file_id IS NOT NULL) AS hidden, (visible.id IS NULL) AS unavailable
         FROM classroom.gallery_likes l JOIN classroom.files f ON f.id=l.file_id JOIN classroom.students owner ON owner.id=f.student_id
         JOIN classroom.assignments a ON a.id=f.assignment_id LEFT JOIN classroom.gallery_hidden_models h ON h.classroom_id=f.classroom_id AND h.file_id=f.id
+        LEFT JOIN classroom.gallery_display_models visible ON visible.id=f.id
         WHERE l.classroom_id=${params.classroomId} AND l.student_id=${studentId}
         ORDER BY a.title, owner.student_number NULLS LAST, owner.display_name, f.original_name, f.id` : Promise.resolve([]),
     ]);
-    return { limit: galleryVoteLimit, blockTotals, usage, myVotes };
+    return { limit: galleryVoteLimit, blockTotals: blockTotals.map(({ id, team, votes }) => team ? { spaceId: id, votes } : { studentId: id, votes }), usage, myVotes };
   })
   .put("/classrooms/:classroomId/gallery", async ({ params, body, request }) => {
     checkRequestOrigin(request);
@@ -267,7 +303,8 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
       if (!student) throw new HttpError(400, "เลือกนักเรียนที่ยังใช้งานและมีเลขที่ในห้องนี้");
     }
     if (body.stationWaitSeconds && Object.keys(body.stationWaitSeconds).length) {
-      const [roster] = await sql<{ count: number }[]>`SELECT COUNT(*)::int AS count FROM classroom.students WHERE classroom_id=${params.classroomId} AND archived_at IS NULL`;
+      const [roster] = await sql<{ count: number }[]>`SELECT COUNT(*)::int AS count FROM classroom.gallery_layout(
+        ${params.classroomId}, (SELECT displayed_assignment_id FROM classroom.gallery_worlds WHERE classroom_id=${params.classroomId}))`;
       const stationIds = new Set(trainTrack(roster.count).map((point) => point.id).filter(Boolean));
       if (Object.keys(body.stationWaitSeconds).some((id) => !stationIds.has(id))) throw new HttpError(400, "เส้นทางรถไฟเปลี่ยนแล้ว กรุณาโหลดสถานีใหม่");
     }
@@ -305,7 +342,8 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     if (teacher) await ownedClass(teacher, params.classroomId);
     else if (student) await studentClass(student.id, params.classroomId);
     else throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
-    const [row] = await sql<{ storageName: string; originalName: string }[]>`SELECT f.storage_name AS "storageName", f.original_name AS "originalName" FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id LEFT JOIN classroom.gallery_hidden_models h ON h.file_id=f.id AND h.classroom_id=f.classroom_id WHERE f.id=${params.fileId} AND f.classroom_id=${params.classroomId} AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$' AND s.archived_at IS NULL AND a.archived_at IS NULL AND (${teacher !== null} OR h.file_id IS NULL)`;
+    const [row] = await sql<{ storageName: string; originalName: string }[]>`SELECT f.storage_name AS "storageName", f.original_name AS "originalName"
+      FROM classroom.gallery_display_models f WHERE f.id=${params.fileId} AND f.classroom_id=${params.classroomId} AND (${teacher !== null} OR NOT f.hidden)`;
     if (!row) throw new HttpError(404, "ไม่พบโมเดลนี้");
     const path = await storedFilePath(row.storageName);
     return new Response(Bun.file(path), { headers: { "content-type": ({"stl":"model/stl","obj":"model/obj","glb":"model/gltf-binary","gltf":"model/gltf+json"} as Record<string,string>)[row.originalName.split(".").pop()!.toLowerCase()], "content-disposition": "inline; filename*=UTF-8''" + encodeURIComponent(row.originalName), "cache-control": "private, no-store", "x-content-type-options": "nosniff" } });
@@ -313,7 +351,9 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
   .get("/classrooms/:classroomId/gallery/files/:fileId/material", async ({ params, request }) => {
     const teacher = await readActor(request); const student = teacher ? null : await readStudentActor(request);
     if (teacher) await ownedClass(teacher, params.classroomId); else if (student) await studentClass(student.id, params.classroomId); else throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
-    const [row] = await sql<{ storageName: string; originalName: string }[]>`SELECT f.material_storage_name AS "storageName", f.material_original_name AS "originalName" FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id LEFT JOIN classroom.gallery_hidden_models h ON h.file_id=f.id AND h.classroom_id=f.classroom_id WHERE f.id=${params.fileId} AND f.classroom_id=${params.classroomId} AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.obj$' AND f.material_storage_name IS NOT NULL AND s.archived_at IS NULL AND a.archived_at IS NULL AND (${teacher !== null} OR h.file_id IS NULL)`;
+    const [row] = await sql<{ storageName: string; originalName: string }[]>`SELECT f.material_storage_name AS "storageName", f.material_original_name AS "originalName"
+      FROM classroom.gallery_display_models f WHERE f.id=${params.fileId} AND f.classroom_id=${params.classroomId}
+        AND f.material_storage_name IS NOT NULL AND (${teacher !== null} OR NOT f.hidden)`;
     if (!row) throw new HttpError(404, "ไม่พบไฟล์วัสดุนี้");
     const path = await storedFilePath(row.storageName);
     return new Response(Bun.file(path), { headers: { "content-type": "text/plain; charset=utf-8", "content-disposition": "attachment; filename*=UTF-8''" + encodeURIComponent(row.originalName), "cache-control": "private, no-store", "x-content-type-options": "nosniff" } });
@@ -324,7 +364,9 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     if (teacher) await ownedClass(teacher, params.classroomId);
     else if (student) await studentClass(student.id, params.classroomId);
     else throw new HttpError(401, "กรุณาเข้าสู่ระบบอีกครั้ง");
-    const [row] = await sql<{ thumbnailMediaType: string | null }[]>`SELECT f.thumbnail_media_type AS "thumbnailMediaType" FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id LEFT JOIN classroom.gallery_hidden_models h ON h.file_id=f.id AND h.classroom_id=f.classroom_id WHERE f.id=${params.fileId} AND f.classroom_id=${params.classroomId} AND f.kind IN ('model','submission') AND s.archived_at IS NULL AND a.archived_at IS NULL AND f.thumbnail_size_bytes IS NOT NULL AND (${teacher !== null} OR h.file_id IS NULL)`;
+    const [row] = await sql<{ thumbnailMediaType: string | null }[]>`SELECT f.thumbnail_media_type AS "thumbnailMediaType"
+      FROM classroom.gallery_display_models f WHERE f.id=${params.fileId} AND f.classroom_id=${params.classroomId}
+        AND f.thumbnail_size_bytes IS NOT NULL AND (${teacher !== null} OR NOT f.hidden)`;
     if (!row?.thumbnailMediaType) throw new HttpError(404, "ยังไม่มีภาพตัวอย่าง");
     const path = await storedFilePath("thumbnails/" + params.fileId + (row.thumbnailMediaType === "image/webp" ? ".webp" : ".png"));
     return new Response(Bun.file(path), { headers: { "content-type": row.thumbnailMediaType, "cache-control": "private, no-store", "x-content-type-options": "nosniff" } });
@@ -348,11 +390,12 @@ export const galleryRoutes = new Elysia({ prefix: "/api" })
     const studentId = await studentClass(actor.id, params.classroomId);
     return sql.begin(async (tx) => {
       await lockVotingWallet(tx, actor.id, params.classroomId, studentId);
-      const [target] = await tx<{ assignmentId: string; ownerId: string }[]>`SELECT f.assignment_id AS "assignmentId", owner.id AS "ownerId" FROM classroom.files f JOIN classroom.students owner ON owner.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id WHERE f.id=${params.fileId} AND f.classroom_id=${params.classroomId} AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$' FOR SHARE OF f, owner, a`;
+      const [target] = await tx<{ assignmentId: string; ownerId: string | null }[]>`SELECT f.assignment_id AS "assignmentId", f.student_id AS "ownerId"
+        FROM classroom.files f WHERE f.id=${params.fileId} AND f.classroom_id=${params.classroomId} FOR SHARE`;
       if (!target || target.ownerId === studentId) throw new HttpError(404, "ไม่พบโมเดลนี้หรือไม่สามารถกดถูกใจให้ผลงานตนเองได้");
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`${params.classroomId}:${studentId}:${target.assignmentId}`}, 74103))`;
-      const [eligible] = await tx<{ ok: boolean }[]>`SELECT EXISTS(SELECT 1 FROM classroom.files f JOIN classroom.students owner ON owner.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id WHERE f.id=${params.fileId} AND owner.archived_at IS NULL AND a.archived_at IS NULL AND NOT EXISTS(SELECT 1 FROM classroom.gallery_hidden_models h WHERE h.classroom_id=f.classroom_id AND h.file_id=f.id)) AS ok`;
-      if (!eligible.ok) throw new HttpError(404, "ไม่พบโมเดลนี้หรือไม่สามารถกดถูกใจให้ผลงานตนเองได้");
+      const [eligible] = await tx`SELECT id FROM classroom.gallery_display_models WHERE id=${params.fileId} AND NOT hidden`;
+      if (!eligible) throw new HttpError(404, "ไม่พบโมเดลนี้หรือไม่สามารถกดถูกใจให้ผลงานตนเองได้");
       const [alreadyVoted] = await tx<{ present: boolean }[]>`SELECT EXISTS(SELECT 1 FROM classroom.gallery_likes WHERE classroom_id=${params.classroomId} AND file_id=${params.fileId} AND student_id=${studentId}) AS present`;
       let pointsDelta = 0;
       if (!alreadyVoted.present) {

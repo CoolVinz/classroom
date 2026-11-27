@@ -3,7 +3,7 @@ import test from "node:test";
 import { addKnockdown, advanceOfficer, backupPatrol, canArrest, defaultPatrolSettings, knockdownsUntilBreak, rankWanted, sentenceSeconds } from "./patrol.mjs";
 import { vehicleKinds, vehicleSpecs } from "./vehicles.mjs";
 import { walkingSpeed } from "./movement.mjs";
-import { blockingProp, studentSpaceCollision, studentTreeTrunk } from "./student-space.mjs";
+import { aisleTreeTrunk, blockingProp, studentSpaceCollision } from "./student-space.mjs";
 import { blockPosition } from "./train-layout.mjs";
 
 test("every rental stops after exactly its limit of successful knockdowns", () => {
@@ -64,7 +64,7 @@ test("backup is capped at a second walker and a patrol car", () => {
 });
 
 test("both units detour around fixed props and cannot arrest through them", () => {
-  const base = blockPosition(0), x = base.x + studentTreeTrunk.x, z = base.z + studentTreeTrunk.z;
+  const base = blockPosition(0), x = aisleTreeTrunk.x, z = base.z;
   const props = studentSpaceCollision(1);
   assert.equal(canArrest({ x, z: z - 0.8 }, { x, z: z + 0.8 }, 0, props), false);
   for (const kind of ["foot", "car"]) {
@@ -77,7 +77,7 @@ test("both units detour around fixed props and cannot arrest through them", () =
   }
 });
 
-test("a patrol car can approach a target near a sign across multiple rows", () => {
+test("a patrol car can approach a target across multiple rows", () => {
   const props = studentSpaceCollision(32), target = { x: 7, z: -120 };
   const car = { kind: "car", x: -25, z: 19 };
   for (let i = 0; i < 400 && !canArrest(car, target, 0, props); i++) advanceOfficer(car, target, 0.05, props);

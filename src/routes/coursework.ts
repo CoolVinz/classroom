@@ -1,5 +1,6 @@
 import { wioLabIds } from "../wio-labs";
 import { Elysia, t } from "elysia";
+import type postgres from "postgres";
 import { randomUUID } from "node:crypto";
 import { mkdir, rename, rm } from "node:fs/promises";
 import { basename, resolve } from "node:path";
@@ -37,13 +38,20 @@ function hasTwoDecimalPlaces(value: number) {
 }
 
 const wioLab = t.Optional(t.Nullable(t.Union(wioLabIds.map((id) => t.Literal(id)))));
+const groupSetId = t.Optional(t.Nullable(t.String({ format: "uuid" })));
+
+async function verifyGroupSet(tx: postgres.TransactionSql, classroomId: string, id: string) {
+  const [set] = await tx`SELECT id FROM classroom.group_sets
+    WHERE id = ${id} AND classroom_id = ${classroomId} AND status IN ('open', 'locked') FOR SHARE`;
+  if (!set) throw new HttpError(422, "เลือกชุดกลุ่มที่เปิดหรือปิดรับสมาชิกแล้วในห้องเรียนนี้");
+}
 
 export const courseworkRoutes = new Elysia({ prefix: "/api" })
   .get("/classrooms/:classroomId/assignments", async ({ params, request }) => {
     const actor = await requireActor(request);
     await ownedClassroom(params.classroomId, actor.id);
     return sql`
-      SELECT a.id, a.title, a.instructions, a.wio_lab AS "wioLab", a.max_score AS "maxScore", a.archived_at IS NOT NULL AS archived,
+      SELECT a.id, a.title, a.instructions, a.wio_lab AS "wioLab", a.group_set_id AS "groupSetId", a.max_score AS "maxScore", a.archived_at IS NOT NULL AS archived,
         a.created_at AS "createdAt", COUNT(f.id) FILTER (WHERE f.kind <> 'working')::int AS "fileCount"
       FROM classroom.assignments a
       LEFT JOIN classroom.files f ON f.assignment_id = a.id
@@ -57,49 +65,51 @@ export const courseworkRoutes = new Elysia({ prefix: "/api" })
     await ownedClassroom(params.classroomId, actor.id);
     const maxScore = body.maxScore ?? 100;
     if (!hasTwoDecimalPlaces(maxScore)) throw new HttpError(422, "คะแนนเต็มต้องใช้ทศนิยมไม่เกิน 2 ตำแหน่ง");
-    const [assignment] = await sql`
-      INSERT INTO classroom.assignments (classroom_id, title, instructions, max_score, wio_lab)
-      VALUES (${params.classroomId}, ${cleanText(body.title, 120)}, ${body.instructions?.trim() ?? ""}, ${maxScore}, ${body.wioLab ?? null})
-      RETURNING id, title, instructions, wio_lab AS "wioLab", max_score AS "maxScore", created_at AS "createdAt"
-    `;
-    return assignment;
-  }, { body: t.Object({ title: t.String({ minLength: 1, maxLength: 120 }), instructions: t.Optional(t.String({ maxLength: 5000 })), maxScore: t.Optional(maximumScore), wioLab }) })
+    return sql.begin(async (tx) => {
+      if (body.groupSetId) await verifyGroupSet(tx, params.classroomId, body.groupSetId);
+      const [assignment] = await tx`
+        INSERT INTO classroom.assignments (classroom_id, title, instructions, max_score, wio_lab, group_set_id)
+        VALUES (${params.classroomId}, ${cleanText(body.title, 120)}, ${body.instructions?.trim() ?? ""}, ${maxScore}, ${body.wioLab ?? null}, ${body.groupSetId ?? null})
+        RETURNING id, title, instructions, wio_lab AS "wioLab", group_set_id AS "groupSetId", max_score AS "maxScore", created_at AS "createdAt"`;
+      return assignment;
+    });
+  }, { body: t.Object({ title: t.String({ minLength: 1, maxLength: 120 }), instructions: t.Optional(t.String({ maxLength: 5000 })), maxScore: t.Optional(maximumScore), wioLab, groupSetId }) })
   .patch("/classrooms/:classroomId/assignments/:assignmentId", async ({ params, body, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
-    await ownedAssignment(params.classroomId, params.assignmentId, actor.id, body.archived === false);
-    if (body.maxScore !== undefined) {
-      const maxScore = body.maxScore;
-      if (!hasTwoDecimalPlaces(maxScore)) throw new HttpError(422, "คะแนนเต็มต้องใช้ทศนิยมไม่เกิน 2 ตำแหน่ง");
-      await sql.begin(async (tx) => {
-        const [assignment] = await tx<{ id: string }[]>`
-          SELECT a.id FROM classroom.assignments a JOIN classroom.classrooms c ON c.id = a.classroom_id
-          WHERE a.id = ${params.assignmentId} AND a.classroom_id = ${params.classroomId}
-            AND c.owner_id = ${actor.id} AND c.archived_at IS NULL FOR UPDATE OF a
-        `;
-        if (!assignment) throw new HttpError(404, "ไม่พบงานนี้");
+    await sql.begin(async (tx) => {
+      const [assignment] = await tx<{ groupSetId: string | null }[]>`
+        SELECT a.group_set_id AS "groupSetId" FROM classroom.assignments a
+        JOIN classroom.classrooms c ON c.id = a.classroom_id
+        WHERE a.id = ${params.assignmentId} AND a.classroom_id = ${params.classroomId}
+          AND c.owner_id = ${actor.id} AND c.archived_at IS NULL
+          AND (${body.archived === false} OR a.archived_at IS NULL) FOR UPDATE OF a`;
+      if (!assignment) throw new HttpError(404, "ไม่พบงานนี้");
+      if (body.groupSetId && body.groupSetId !== assignment.groupSetId) {
+        await verifyGroupSet(tx, params.classroomId, body.groupSetId);
+      }
+      if (body.maxScore !== undefined) {
+        if (!hasTwoDecimalPlaces(body.maxScore)) throw new HttpError(422, "คะแนนเต็มต้องใช้ทศนิยมไม่เกิน 2 ตำแหน่ง");
         const [scores] = await tx<{ highest: number }[]>`
           SELECT GREATEST(COALESCE(MAX(draft_score), 0), COALESCE(MAX(published_score), 0)) AS highest
           FROM classroom.assignment_assessments WHERE assignment_id = ${params.assignmentId}
         `;
-        if (maxScore < scores.highest) throw new HttpError(422, "คะแนนเต็มต้องไม่น้อยกว่าคะแนนที่บันทึกไว้");
-        await tx`UPDATE classroom.assignments SET max_score = ${maxScore} WHERE id = ${params.assignmentId}`;
-      });
-    }
-    if (body.title !== undefined || body.instructions !== undefined || body.wioLab !== undefined) {
-      await sql`
+        if (body.maxScore < scores.highest) throw new HttpError(422, "คะแนนเต็มต้องไม่น้อยกว่าคะแนนที่บันทึกไว้");
+      }
+      await tx`
         UPDATE classroom.assignments SET
           title = COALESCE(${body.title === undefined ? null : cleanText(body.title, 120)}, title),
           instructions = COALESCE(${body.instructions ?? null}, instructions),
-          wio_lab = CASE WHEN ${body.wioLab !== undefined} THEN ${body.wioLab ?? null} ELSE wio_lab END
+          wio_lab = CASE WHEN ${body.wioLab !== undefined} THEN ${body.wioLab ?? null} ELSE wio_lab END,
+          max_score = COALESCE(${body.maxScore ?? null}, max_score),
+          group_set_id = ${body.groupSetId === undefined ? assignment.groupSetId : body.groupSetId},
+          archived_at = CASE WHEN ${body.archived === undefined} THEN archived_at
+            WHEN ${body.archived === true} THEN NOW() ELSE NULL END
         WHERE id = ${params.assignmentId} AND classroom_id = ${params.classroomId}
       `;
-    }
-    if (body.archived !== undefined) {
-      await sql`UPDATE classroom.assignments SET archived_at = ${body.archived ? sql`NOW()` : sql`NULL`} WHERE id = ${params.assignmentId} AND classroom_id = ${params.classroomId}`;
-    }
+    });
     return { ok: true };
-  }, { body: t.Object({ title: t.Optional(t.String({ minLength: 1, maxLength: 120 })), instructions: t.Optional(t.String({ maxLength: 5000 })), maxScore: t.Optional(maximumScore), wioLab, archived: t.Optional(t.Boolean()) }) })
+  }, { body: t.Object({ title: t.Optional(t.String({ minLength: 1, maxLength: 120 })), instructions: t.Optional(t.String({ maxLength: 5000 })), maxScore: t.Optional(maximumScore), wioLab, groupSetId, archived: t.Optional(t.Boolean()) }) })
   .get("/classrooms/:classroomId/assignments/:assignmentId/assessments", async ({ params, query, request }) => {
     const actor = await requireActor(request);
     await ownedAssignment(params.classroomId, params.assignmentId, actor.id, true);

@@ -18,7 +18,7 @@ Assignments can select a [Wio Terminal lab preset](REQ-002-wio-terminal-labs.md)
 
 ## Workflows and rules
 
-- Teachers create or edit an assignment and attach one or more worksheet files.
+- Teachers create or edit an assignment and attach one or more worksheet files. The optional **ชุดกลุ่ม** selector links an open or locked group set from that classroom. Students see their current team and can submit even while unassigned. Uploads and marks remain individual. The gallery can gather that assignment’s eligible 3D files into pavilions using current membership (MOD-007).
 - Teachers upload one or more model files for an active student in that classroom.
 - Students upload one Blender `.blend` file for their active assignment. The server checks its header (including gzip/Zstandard-compressed headers), stores its bytes unchanged, and returns it as a download. Replacement uses the expected current file UUID and keeps the previous copy until the database update succeeds. Blender files do not appear as submissions, thumbnails, reviewed work, or score evidence. Students should pack external textures using Blender's File → External Data → Pack Resources before moving computers.
 - Teacher file routes check classroom ownership. Student routes require a student session and an active linked roster row; students can see worksheets and their own attributed files only. Permanent student removal deletes attributed file metadata and stages stored files for cleanup under the same storage lock used by uploads and individual file deletion.

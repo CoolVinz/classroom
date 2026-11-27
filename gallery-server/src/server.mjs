@@ -20,7 +20,7 @@ if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
 const pool = new pg.Pool(databaseConfig());
 const Player = schema({ displayName: t.string(), role: t.string(), skinColor: t.string(), hairColor: t.string(), shirtColor: t.string(), trousersColor: t.string(), hairStyle: t.string(), hatStyle: t.string(), glassesStyle: t.string(), shoeStyle: t.string(), hatColor: t.string(), glassesColor: t.string(), shoeColor: t.string(), x: t.number().default(0), z: t.number().default(0), rotation: t.number().default(0), sequence: t.number().default(0), jump: t.number().default(0), movementEpoch: t.number().default(0), knocked: t.boolean().default(false), knockCause: t.string().default(""), wantedCount: t.number().default(0), wantedSince: t.number().default(0), jailedUntil: t.number().default(0), vehicleId: t.string().default(""), respawnAt: t.number().default(0), protectedUntil: t.number().default(0), trainSeat: t.number().default(-1) });
 const Bolt = schema({ id: t.string(), x: t.number(), y: t.number(), z: t.number() });
-const Train = schema({ active: t.boolean().default(false), x: t.number().default(0), z: t.number().default(2), rotation: t.number().default(0), phase: t.string().default("waiting"), stopId: t.string().default("entrance"), nextStopId: t.string().default(""), departureAt: t.number().default(0), arrivalAt: t.number().default(0), mode: t.string().default("auto"), intervalSeconds: t.number().default(120), seats: t.number().default(0), revision: t.number().default(0), startStudentId: t.string().default(""), layoutRoster: t.string().default("[]") });
+const Train = schema({ active: t.boolean().default(false), x: t.number().default(0), z: t.number().default(2), rotation: t.number().default(0), phase: t.string().default("waiting"), stopId: t.string().default("entrance"), nextStopId: t.string().default(""), departureAt: t.number().default(0), arrivalAt: t.number().default(0), mode: t.string().default("auto"), intervalSeconds: t.number().default(120), seats: t.number().default(0), revision: t.number().default(0), startStudentId: t.string().default(""), layoutRoster: t.string().default("[]"), exhibitionAssignmentId: t.string().default("") });
 const Vehicle = schema({ id: t.string(), kind: t.string(), rental: t.boolean().default(false), x: t.number(), y: t.number(), z: t.number(), rotation: t.number(), revision: t.number(), driverId: t.string(), hitsRemaining: t.number().default(0), hitLimit: t.number().default(0), fuelRemaining: t.number().default(0), fuelCapacity: t.number().default(0), landing: t.boolean().default(false) });
 const Officer = schema({ x: t.number().default(jailGate.x), z: t.number().default(jailGate.z), rotation: t.number().default(0), walking: t.boolean().default(false), targetId: t.string().default(""), kind: t.string().default("foot") });
 const Santa = schema({ enabled: t.boolean().default(false), x: t.number().default(-29), z: t.number().default(8), rotation: t.number().default(0), nextPoint: t.number().default(1), nextDropAt: t.number().default(0) });
@@ -164,13 +164,13 @@ class ClassroomGallery extends Room {
     await this.refreshSantaSettings().catch(() => {});
     await this.refreshPatrolSettings().catch(() => {});
     const readSignature = async () => {
-      const { rows } = await pool.query(`SELECT
-        (SELECT COUNT(*)::int FROM classroom.files f JOIN classroom.students s ON s.id=f.student_id JOIN classroom.assignments a ON a.id=f.assignment_id WHERE f.classroom_id=$1 AND f.kind IN ('model','submission') AND lower(f.original_name) ~ '\\.(stl|obj|glb|gltf)$' AND s.archived_at IS NULL AND a.archived_at IS NULL) AS files,
-        (SELECT COALESCE(MAX(f.created_at)::text,'') FROM classroom.files f WHERE f.classroom_id=$1 AND f.kind IN ('model','submission')) AS latest,
-        (SELECT COUNT(*)::int FROM classroom.gallery_hidden_models WHERE classroom_id=$1) AS hidden,
+      const { rows } = await pool.query(`SELECT w.enabled, w.exhibition_assignment_id, w.displayed_assignment_id,
+        (SELECT md5(json_agg(json_build_array(id,space_id,hidden,display_name,student_number,assignment_title) ORDER BY id)::text)
+          FROM classroom.gallery_display_models WHERE classroom_id=$1) AS files,
         (SELECT COALESCE(json_agg(json_build_array(file_id,likes) ORDER BY file_id)::text,'[]') FROM (SELECT file_id,COUNT(*)::int AS likes FROM classroom.gallery_likes WHERE classroom_id=$1 GROUP BY file_id) vote_counts) AS likes,
-        (SELECT COALESCE(json_agg(json_build_array(id,student_number,display_name) ORDER BY student_number NULLS LAST,display_name,id)::text,'[]') FROM classroom.students WHERE classroom_id=$1 AND archived_at IS NULL) AS roster,
-        (SELECT enabled FROM classroom.gallery_worlds WHERE classroom_id=$1) AS enabled`, [this.classroomId]);
+        (SELECT json_agg(l ORDER BY l.ordinality) FROM classroom.gallery_layout($1, w.displayed_assignment_id) WITH ORDINALITY l) AS spaces,
+        (SELECT json_agg(e ORDER BY e.id) FROM classroom.gallery_exhibition_assignments e WHERE e.classroom_id=$1) AS options
+        FROM classroom.gallery_worlds w WHERE w.classroom_id=$1`, [this.classroomId]);
       return JSON.stringify(rows[0]);
     };
     let signature = await readSignature().catch(() => "");
@@ -344,11 +344,10 @@ class ClassroomGallery extends Room {
     if (!this.visitorAt(client, auth, portal)) return failed("โปรดเดินเข้าใกล้ท่อก่อนใช้งาน");
     if (Date.now() - (this.teleportTimes.get(sessionId) ?? 0) < 3000) return failed("รอ 3 วินาทีก่อนใช้ท่ออีกครั้ง");
     if (!(await stillAllowed(auth))) throw new Error("Classroom access expired");
-    const { rows } = await pool.query(`SELECT s.id FROM classroom.students s
-      JOIN classroom.gallery_blocks b ON b.classroom_id=s.classroom_id AND b.student_id=s.id
-      WHERE s.classroom_id=$1 AND s.archived_at IS NULL`, [auth.classroomId]);
+    const layout = this.trainConfig;
+    const { rows } = await pool.query("SELECT space_id AS id FROM classroom.gallery_layout($1, $2)", [auth.classroomId, layout?.exhibitionAssignmentId ?? null]);
     const player = this.visitorAt(client, auth, portal);
-    if (!player) return failed("โปรดเดินเข้าใกล้ท่อก่อนใช้งาน");
+    if (!player || layout !== this.trainConfig) return failed("พื้นที่เปลี่ยนแล้ว ลองใช้ท่ออีกครั้ง");
     const active = new Set(rows.map(({ id }) => id));
     const candidates = (this.trainConfig?.roster ?? []).flatMap((block, index) => active.has(block.studentId) ? [{ ...block, index }] : []);
     if (!candidates.length) return failed("ยังไม่มีพื้นที่นักเรียนที่เปิดอยู่");
@@ -452,15 +451,16 @@ class ClassroomGallery extends Room {
   }
 
   async readTrainConfiguration() {
-    const [{ rows: worlds }, { rows: roster }] = await Promise.all([
-      pool.query(`SELECT w.train_mode AS mode, w.train_interval_seconds AS "intervalSeconds", CASE WHEN s.id IS NOT NULL THEN s.id ELSE NULL END AS "startStudentId", w.train_station_wait_seconds AS waits
-        FROM classroom.gallery_worlds w LEFT JOIN classroom.students s ON s.id=w.train_start_student_id AND s.classroom_id=w.classroom_id AND s.archived_at IS NULL AND s.student_number IS NOT NULL WHERE w.classroom_id=$1`, [this.classroomId]),
-      pool.query(`SELECT id, student_number AS "studentNumber", display_name AS "displayName" FROM classroom.students WHERE classroom_id=$1 AND archived_at IS NULL ORDER BY student_number NULLS LAST, display_name, id`, [this.classroomId]),
-    ]);
-    const world = worlds[0] ?? { mode: "auto", intervalSeconds: 120, startStudentId: null };
-    const startIndex = world.startStudentId ? roster.findIndex((student) => student.id === world.startStudentId) : -1;
+    const { rows: [world] } = await pool.query(`SELECT w.train_mode AS mode, w.train_interval_seconds AS "intervalSeconds",
+        w.train_start_student_id AS "startStudentId", w.train_station_wait_seconds AS waits,
+        w.exhibition_assignment_id AS "exhibitionAssignmentId",
+        ARRAY(SELECT json_build_object('studentId', l.space_id, 'studentNumber', l.student_number, 'displayName', l.display_name)
+          FROM classroom.gallery_layout(w.classroom_id, w.exhibition_assignment_id) WITH ORDINALITY l ORDER BY l.ordinality) AS roster
+      FROM classroom.gallery_worlds w WHERE w.classroom_id=$1`, [this.classroomId]);
+    const { exhibitionAssignmentId, mode, waits, roster } = world;
+    const startIndex = exhibitionAssignmentId ? -1 : roster.findIndex((student) => student.studentNumber !== null && student.studentId === world.startStudentId);
     const route = trainTrack(roster.length, startIndex < 0 ? null : startIndex);
-    return { mode: world.mode, intervalSeconds: Number(world.intervalSeconds), startStudentId: startIndex < 0 ? null : world.startStudentId, waits: world.waits ?? {}, roster: roster.map((student) => ({ studentId: student.id, studentNumber: student.studentNumber, displayName: student.displayName })), route };
+    return { exhibitionAssignmentId, mode, intervalSeconds: Number(world.intervalSeconds), startStudentId: startIndex < 0 ? null : world.startStudentId, waits: waits ?? {}, roster, route };
   }
 
   async refreshTrainConfiguration(initial = false) {
@@ -468,18 +468,34 @@ class ClassroomGallery extends Room {
     const signature = JSON.stringify(config);
     if (signature === this.trainConfig?.signature) { this.pendingTrainConfig = null; return; }
     config.signature = signature;
-    if (initial || (!this.trainFinishing && !this.trainCircuitActive && this.state.train.phase === "waiting" && this.trainSeats.size === 0)) this.applyTrainConfiguration(config);
-    else this.pendingTrainConfig = config;
+    const phase = this.state.train.phase;
+    const changingExhibition = this.trainConfig?.exhibitionAssignmentId !== config.exhibitionAssignmentId;
+    if (initial || (!this.trainFinishing && !this.trainCircuitActive && this.trainSeats.size === 0 &&
+        (phase === "waiting" || (phase === "boarding" && changingExhibition)))) {
+      this.trainFinishing = true;
+      try { await this.applyTrainConfiguration(config); }
+      finally { this.trainFinishing = false; }
+    } else this.pendingTrainConfig = config;
   }
 
-  applyTrainConfiguration(config, schedule = true) {
+  async applyTrainConfiguration(config, schedule = true) {
+    const changingExhibition = this.trainConfig?.exhibitionAssignmentId !== config.exhibitionAssignmentId;
+    if (changingExhibition) {
+      // A newer teacher selection may have arrived while the train was unloading.
+      const { rowCount } = await pool.query(`UPDATE classroom.gallery_worlds SET displayed_assignment_id=$2
+        WHERE classroom_id=$1 AND exhibition_assignment_id IS NOT DISTINCT FROM $2::uuid`,
+        [this.classroomId, config.exhibitionAssignmentId]);
+      if (!rowCount) return false;
+    }
     this.trainConfig = config;
     this.trainRoute = config.route;
     this.vehicleBounds.minZ = Math.min(-25, ...config.route.map((point) => point.z)) - 10;
     this.props = studentSpaceCollision(config.roster.length);
     for (const [id, player] of this.state.players) {
       if (player.vehicleId || player.trainSeat >= 0) continue;
-      const ground = clearGround(this.props, player, avatarRadius, avatarHeight + this.jumpAltitude(id, Date.now()));
+      const minZ = Math.min(-2000, this.vehicleBounds.minZ - 90);
+      const inBounds = player.z < minZ ? { x: player.x, z: minZ } : player;
+      const ground = clearGround(this.props, inBounds, avatarRadius, avatarHeight + this.jumpAltitude(id, Date.now()));
       if (ground !== player) this.resetPosition(id, player, ground.x, ground.z, player.rotation);
     }
     for (const officer of [this.state.officer, ...this.state.patrolBackup.values()]) {
@@ -494,16 +510,22 @@ class ClassroomGallery extends Room {
     train.intervalSeconds = config.intervalSeconds;
     train.startStudentId = config.startStudentId ?? "";
     train.layoutRoster = JSON.stringify(config.roster);
+    train.exhibitionAssignmentId = config.exhibitionAssignmentId ?? "";
+    if (changingExhibition) this.broadcast("gallery-refresh");
     train.seats = this.trainSeats.size;
     this.trainLegIndex = 0;
     this.trainCircuitActive = false;
     this.trainLastTick = Date.now();
-    if (!train.active) { train.phase = "waiting"; train.stopId = ""; train.nextStopId = ""; train.departureAt = 0; train.arrivalAt = 0; train.x = 0; train.z = 2; return; }
+    if (!train.active) { train.phase = "waiting"; train.stopId = ""; train.nextStopId = ""; train.departureAt = 0; train.arrivalAt = 0; train.x = 0; train.z = 2; return true; }
     train.x = this.trainRoute[0].x; train.z = this.trainRoute[0].z; train.rotation = 0;
     train.stopId = this.trainRoute[0].id; train.phase = schedule && config.mode === "auto" ? "boarding" : "waiting";
-    train.departureAt = schedule ? firstDepartureAt(Date.now(), config.mode, stationWaitMs(config.waits, train.stopId, true)) : 0;
+    const now = Date.now(), wait = stationWaitMs(config.waits, train.stopId, true);
+    train.departureAt = !schedule ? 0 : this.trainLastDeparture
+      ? nextDepartureAt(config.mode, config.intervalSeconds, this.trainLastDeparture, now, wait)
+      : firstDepartureAt(now, config.mode, wait);
     train.arrivalAt = 0;
     this.updateTrainNextStop();
+    return true;
   }
 
   updateTrainNextStop() {
@@ -528,8 +550,12 @@ class ClassroomGallery extends Room {
     if (latest && this.trainConfig) {
       latest.signature = JSON.stringify(latest);
       if (this.trainSeats.size === 0 && latest.signature !== this.trainConfig.signature) {
-        this.applyTrainConfiguration(latest);
-        if (train.mode !== "manual" || !train.active) { client.send("train-result", { ok: false, message: "ตารางรถไฟเปลี่ยนแล้ว" }); return; }
+        this.trainFinishing = true;
+        let applied;
+        try { applied = await this.applyTrainConfiguration(latest); }
+        finally { this.trainFinishing = false; }
+        if (!applied || train.mode !== "manual" || !train.active) { client.send("train-result", { ok: false, message: "ตารางรถไฟเปลี่ยนแล้ว" }); return; }
+        if (this.members.get(client.sessionId) !== auth) return;
       } else {
         this.trainConfig.waits = latest.waits;
       }
@@ -570,7 +596,7 @@ class ClassroomGallery extends Room {
 
   updateTrain() {
     const train = this.state.train, route = this.trainRoute, now = Date.now();
-    if (!train.active || !route.length) return;
+    if (this.trainFinishing || !train.active || !route.length) return;
     if (train.phase === "boarding" && now >= train.departureAt) {
       this.trainLastDeparture = train.departureAt; this.trainCircuitActive = true; train.phase = "moving"; train.stopId = ""; train.departureAt = 0; this.updateTrainNextStop();
       train.arrivalAt = now + distanceToNextStation(route, this.trainLegIndex, train.x, train.z) / TRAIN_SPEED * 1000;
@@ -619,7 +645,12 @@ class ClassroomGallery extends Room {
     }
     this.trainSeats.clear(); train.seats = 0; this.trainCircuitActive = false;
     const config = await this.readTrainConfiguration().catch(() => this.pendingTrainConfig ?? this.trainConfig);
-    if (config) { config.signature = JSON.stringify(config); this.pendingTrainConfig = null; this.applyTrainConfiguration(config, false); }
+    if (config) {
+      const { signature: _, ...layout } = config;
+      config.signature = JSON.stringify(layout);
+      this.pendingTrainConfig = null;
+      await this.applyTrainConfiguration(config, false).catch(() => false);
+    }
     this.trainFinishing = false;
     if (!train.active) return;
     train.phase = train.mode === "auto" ? "boarding" : "waiting";
@@ -999,7 +1030,7 @@ class ClassroomGallery extends Room {
 
 const gameServer = new Server({
   express: (app) => {
-    app.get("/__gallery_protocol", (_request, response) => response.type("text").send("patrol-v2"));
+    app.get("/__gallery_protocol", (_request, response) => response.type("text").send("team-exhibition-v1"));
     app.get("/__live_activity_protocol", (_request, response) => response.type("text").send("live-activity-v2"));
   },
 });

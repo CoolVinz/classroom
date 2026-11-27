@@ -1,27 +1,17 @@
-import { blockPosition, ROW_SPACING } from "./train-layout.mjs";
+import { blockPosition, GALLERY_COLUMNS, ROW_SPACING } from "./train-layout.mjs";
 
 export const avatarRadius = 0.35;
 export const avatarHeight = 2.18;
 export const jumpApex = 1.125;
-export const signBoard = { x: 0, y: 3, z: -4.58, width: 9.5, height: 1.42, depth: 0.18 };
-export const signPost = { x: 4.55, y: 2.85, z: -4.58, width: 0.22, height: 1.58, depth: 0.24 };
-export const studentTreeTrunk = { x: 5.08, y: 1.03, z: 3.55, width: 0.42, height: 0.82, depth: 0.42 };
+export const aisleTreeTrunk = { x: 5.25, y: 1.03, width: 0.42, height: 0.82 };
 const rowStart = blockPosition(0).z;
 
 export function studentSpaceCollision(count) {
-  const rows = [];
-  for (let index = 0; index < count; index++) {
-    const { x, z } = blockPosition(index);
-    const row = Math.round((rowStart - z) / ROW_SPACING);
-    const props = rows[row] ??= [];
-    for (const prop of [signBoard, signPost, studentTreeTrunk]) {
-      for (const offset of prop.x === 0 ? [0] : [-prop.x, prop.x]) {
-        props.push({ x: x + offset, z: z + prop.z, halfWidth: prop.width / 2, halfDepth: prop.depth / 2,
-          bottom: prop.y - prop.height / 2 });
-      }
-    }
-  }
-  return rows;
+  const tree = aisleTreeTrunk;
+  return Array.from({ length: Math.ceil(count / GALLERY_COLUMNS) }, (_, row) => [-tree.x, tree.x].map((x) => ({
+    x, z: blockPosition(row * GALLERY_COLUMNS).z, halfWidth: tree.width / 2, halfDepth: tree.width / 2,
+    bottom: tree.y - tree.height / 2,
+  })));
 }
 
 function segmentEntry(from, to, prop, radius) {
