@@ -32,6 +32,7 @@ Project-document rows are rated LOW/LOW; module rows below describe implementati
 | MOD-007 | Virtual classroom gallery | [docs/MOD-007-virtual-gallery.md](docs/MOD-007-virtual-gallery.md) | Colyseus world, student displays, train, rides, patrol, and point shop | `gallery, Colyseus, Three.js, vehicles, patrol, jail, Santa, virtual-points, vote-rewards, shop, avatars` | HIGH | HIGH | MOD-001, MOD-002, MOD-003, MOD-004, DAT-001, OPS-001 |
 | MOD-008 | Class gradebook | [docs/MOD-008-gradebook.md](docs/MOD-008-gradebook.md) | Class roster grade grid for published assignment marks, completed quizzes, worksheets, and manual score columns | `gradebook, class-scores, manual-marks, totals, Excel` | HIGH | HIGH | MOD-002, MOD-004, MOD-006, MOD-009, DAT-001 |
 | MOD-009 | Worksheet activities | [docs/MOD-009-worksheets.md](docs/MOD-009-worksheets.md) | Classroom worksheets with AI draft import, resumable answers, lesson embedding, and automatic grading | `worksheets, AI-import, lesson-activities, typed-answers, scores` | HIGH | HIGH | MOD-002, MOD-005, MOD-008, DAT-001 |
+| MOD-010 | Live classroom activities | [docs/MOD-010-live-activities.md](docs/MOD-010-live-activities.md) | Teacher-hosted 2D quiz rooms, moderated ideas, and lesson recaps | `live-activities, avatars, Colyseus, quiz, brainstorming, recap` | HIGH | HIGH | MOD-001, MOD-003, MOD-005, MOD-006, MOD-007, MOD-008, DAT-001, OPS-001 |
 
 ## Retrieval
 

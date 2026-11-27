@@ -3,6 +3,7 @@ import { StudentWioLab } from "./StudentWioLab";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { api, ApiError } from "./api";
 import { LessonContent, type LessonBlock } from "./LessonContent";
+import { LiveActivityLinks } from "./LiveActivityLinks";
 import { StudentAttendance } from "./StudentAttendance";
 import { CodeLessonFrame } from "./CodeLesson";
 import type { CodeBlock } from "./code-lesson";
@@ -66,6 +67,7 @@ export function PublicLessonPage({ id, classroomId, studentId, login }: { id: st
       : <div className="lesson-reading panel"><LessonContent title={page.title} blocks={page.blocks} imageUrl={imageUrl} /></div>}
       {studentId && classroomId && page.wioLab && <LessonWioLab key={page.wioLab.assignmentId} studentId={studentId} classroomId={classroomId} lab={page.wioLab} />}
       {page.quizLinks?.length ? <section className="panel public-lesson-quizzes"><h2>แบบทดสอบ</h2><div>{page.quizLinks.map((link) => <a className="button button-primary" key={link.quizId} href={`/quizzes/${link.quizId}?role=student`}>{link.label}</a>)}</div></section> : null}
+      {studentId && classroomId && <LiveActivityLinks classroomId={classroomId} lessonId={id}/>}
       {page.worksheets?.map((round) => <WorksheetActivity key={round.id} roundId={round.id} title={round.title} />)}</>
       : choices.length ? <section className="panel public-lesson-quizzes"><h1>เลือกห้องเรียนสำหรับบทเรียนนี้</h1><div>{choices.map((link) => <a className="button button-primary" key={link.classroomId} href={`/lessons/${id}/classrooms/${link.classroomId}`}>{link.classroomName}</a>)}</div></section>
       : error ? <section className="panel public-lesson-quizzes"><h1>เปิดบทเรียนไม่ได้</h1><p className="muted">{error}</p><button className="button button-quiet" onClick={() => setRetry((value) => value + 1)}>ลองอีกครั้ง</button></section>

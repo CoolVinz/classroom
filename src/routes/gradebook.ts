@@ -35,17 +35,28 @@ export const gradebookRoutes = new Elysia({ prefix: "/api" })
         a.published_max_score::float8 AS "maxScore"
         FROM classroom.assignment_assessments a JOIN classroom.assignments i ON i.id = a.assignment_id
         WHERE a.classroom_id = ${params.classroomId} AND a.published_at IS NOT NULL`,
-      sql`SELECT r.id, r.title AS name, r.status,
+      sql`SELECT id, name, status, "maxScore" FROM (
+        SELECT r.id, r.title AS name, r.status, r.created_at,
         COALESCE((SELECT SUM((question->>'points')::numeric)
           FROM jsonb_array_elements(r.content_snapshot->'questions') question), 0)::float8 AS "maxScore"
         FROM classroom.classroom_quizzes r JOIN classroom.quizzes q ON q.id = r.quiz_id AND q.trashed_at IS NULL
-        WHERE r.classroom_id = ${params.classroomId} ORDER BY r.created_at, r.id`,
+        WHERE r.classroom_id = ${params.classroomId}
+        UNION ALL SELECT l.id, l.title, 'closed', l.created_at,
+          (SELECT SUM((question->>'points')::numeric) FROM jsonb_array_elements(l.content_snapshot->'questions') question)::float8
+        FROM classroom.live_activities l JOIN classroom.quizzes q ON q.id=l.quiz_id AND q.trashed_at IS NULL
+        WHERE l.classroom_id=${params.classroomId} AND l.phase='finished' AND l.include_in_gradebook
+        ) rounds ORDER BY created_at, id`,
       sql`SELECT a.student_id AS "studentId", a.classroom_quiz_id AS "itemId", a.score::float8 AS score,
         COALESCE((SELECT SUM((question->>'points')::numeric)
           FROM jsonb_array_elements(r.content_snapshot->'questions') question), 0)::float8 AS "maxScore"
         FROM classroom.quiz_attempts a JOIN classroom.classroom_quizzes r ON r.id = a.classroom_quiz_id
         JOIN classroom.quizzes q ON q.id = r.quiz_id AND q.trashed_at IS NULL
-        WHERE r.classroom_id = ${params.classroomId} AND a.finished_at IS NOT NULL`,
+        WHERE r.classroom_id = ${params.classroomId} AND a.finished_at IS NOT NULL
+        UNION ALL SELECT p.student_id, p.activity_id, p.score::float8,
+          (SELECT SUM((question->>'points')::numeric) FROM jsonb_array_elements(l.content_snapshot->'questions') question)::float8
+        FROM classroom.live_activity_participants p JOIN classroom.live_activities l ON l.id=p.activity_id
+        JOIN classroom.quizzes q ON q.id=l.quiz_id AND q.trashed_at IS NULL
+        WHERE l.classroom_id=${params.classroomId} AND l.phase='finished' AND l.include_in_gradebook AND p.score IS NOT NULL`,
       sql`SELECT id, title AS name, status, max_score AS "maxScore" FROM classroom.worksheet_rounds
         WHERE classroom_id = ${params.classroomId} ORDER BY created_at, id`,
       sql`SELECT a.student_id AS "studentId", a.round_id AS "itemId", a.score, r.max_score AS "maxScore"

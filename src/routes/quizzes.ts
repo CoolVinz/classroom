@@ -86,8 +86,10 @@ export const quizRoutes = new Elysia({ prefix: "/api" })
     const trashed = new URL(request.url).searchParams.get("trashed") === "true";
     return sql`SELECT q.id, q.title, q.draft_revision AS "draftRevision", q.published_title AS "publishedTitle",
       q.published_at AS "publishedAt", q.updated_at AS "updatedAt",
-      (SELECT COUNT(*)::int FROM classroom.classroom_quizzes r WHERE r.quiz_id = q.id) AS "roundCount",
-      (SELECT COUNT(*)::int FROM classroom.quiz_attempts a JOIN classroom.classroom_quizzes r ON r.id = a.classroom_quiz_id WHERE r.quiz_id = q.id) AS "attemptCount"
+      ((SELECT COUNT(*) FROM classroom.classroom_quizzes r WHERE r.quiz_id = q.id)
+        + (SELECT COUNT(*) FROM classroom.live_activities l WHERE l.quiz_id = q.id))::int AS "roundCount",
+      ((SELECT COUNT(*) FROM classroom.quiz_attempts a JOIN classroom.classroom_quizzes r ON r.id = a.classroom_quiz_id WHERE r.quiz_id = q.id)
+        + (SELECT COUNT(*) FROM classroom.live_activity_participants a JOIN classroom.live_activities l ON l.id=a.activity_id WHERE l.quiz_id=q.id))::int AS "attemptCount"
       FROM classroom.quizzes q WHERE q.owner_id = ${actor.id} AND (q.trashed_at IS NOT NULL) = ${trashed} ORDER BY q.updated_at DESC`;
   })
   .post("/quizzes/:id/trash", async ({ params, body, request }) => {
@@ -102,6 +104,8 @@ export const quizRoutes = new Elysia({ prefix: "/api" })
       for (const round of rounds) await tx`SELECT pg_advisory_xact_lock(hashtextextended(${"quiz-round:" + round.id}, 0))`;
       const openRounds = await tx<{ id: string }[]>`SELECT id FROM classroom.classroom_quizzes WHERE quiz_id = ${params.id} AND status = 'open' ORDER BY id`;
       for (const round of openRounds) await finishRound(tx, round.id);
+      await tx`UPDATE classroom.live_activities SET phase='cancelled', deadline=NULL, revision=revision+1
+        WHERE quiz_id=${params.id} AND phase NOT IN ('finished','cancelled')`;
       await tx`UPDATE classroom.quizzes SET trashed_at = NOW(), draft_revision = draft_revision + 1, updated_at = NOW()
         WHERE id = ${params.id} AND owner_id = ${actor.id} AND trashed_at IS NULL`;
       return true;

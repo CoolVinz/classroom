@@ -8,6 +8,8 @@
 
 Give teachers one class-level view of scores from published assignment assessments, completed quiz attempts, submitted worksheet activities, and manually created score columns. Students cannot access this view. Assignment drafts and unfinished quiz or worksheet attempts have no grade. Worksheet scores are read-only here and use the round’s fixed maximum.
 
+Completed live quiz scores appear when the teacher enables gradebook inclusion for the session. The session's saved quiz controls the maximum. Participants have recorded grades including zero, and students who never joined have blank cells. See MOD-010.
+
 Teachers can create a manual score item with a name and maximum, edit scores for the roster, save a whole column atomically, and archive or restore manual columns. A blank clears a saved manual score; `0` is an explicit score. Revision checks reject stale column saves. Archived students and archived items can be included through a filter; their records remain available.
 
 Teachers choose which visible items contribute to each student's total. The gradebook adds earned points over the maximum points for recorded selected items only. Published assignment maximum snapshots are used, so changes to a later assignment maximum do not alter previously published grades. A student with no recorded marks has no total. Excel export uses the current roster/item filters, selected items, individual score denominators, and totals.

@@ -6,6 +6,7 @@ import { boundedMove } from "./movement.mjs";
 import { applyAppearance } from "./avatar.mjs";
 import { advanceBolt, knockPlayer, playerHitFraction, respawnPlayer, validAim } from "./combat.mjs";
 import { databaseConfig } from "./database-config.mjs";
+import { liveActivityRoom } from "./live-activities.mjs";
 import { blockPosition, BLOCK_DEPTH, distanceToNextStation, TRAIN_SPEED, trainTrack } from "./train-layout.mjs";
 import { canBoardTrain, firstDepartureAt, nextDepartureAt, stationWaitMs } from "./train-rules.mjs";
 import { advanceFuelLanding, advanceVehicle, flightFuelRemaining, hitsMovingBody, LANDING_HEIGHT, trainBodies, validVehicleInput, VEHICLE_BAY_Z, VEHICLE_ENTER_DISTANCE, vehicleKinds, vehicleRespawn, vehicleSpecs } from "./vehicles.mjs";
@@ -997,9 +998,13 @@ class ClassroomGallery extends Room {
 }
 
 const gameServer = new Server({
-  express: (app) => app.get("/__gallery_protocol", (_request, response) => response.type("text").send("patrol-v2")),
+  express: (app) => {
+    app.get("/__gallery_protocol", (_request, response) => response.type("text").send("patrol-v2"));
+    app.get("/__live_activity_protocol", (_request, response) => response.type("text").send("live-activity-v1"));
+  },
 });
 gameServer.define("classroom", ClassroomGallery).filterBy(["classroomId"]);
+gameServer.define("live-activity", liveActivityRoom(pool)).filterBy(["activityId"]);
 await gameServer.listen(Number(process.env.PORT ?? 2567));
 console.log(`Classroom Colyseus server listening on ${process.env.PORT ?? 2567}`);
 for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, async () => { await gameServer.gracefullyShutdown(false); await pool.end(); process.exit(0); });

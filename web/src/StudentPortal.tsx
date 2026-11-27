@@ -5,6 +5,7 @@ import { StudentAttendance } from "./StudentAttendance";
 import { FileThumbnail } from "./FileThumbnail";
 import { generateThumbnail } from "./thumbnail-jobs";
 import { StudentGroups } from "./StudentGroups";
+import { LiveActivityLinks } from "./LiveActivityLinks";
 import { StudentLearning } from "./StudentLearning";
 
 import { StudentWioLab } from "./StudentWioLab";
@@ -236,6 +237,7 @@ export function StudentPortal({ user, logout, openWorld, initialClassroomId }: {
         {!refreshingClassrooms && !classroomError && classrooms.length === 0 && <p className="assignment-empty muted">ยังไม่มีห้องเรียนที่เชื่อมกับบัญชีของคุณ</p>}
       </section>
       <StudentAttendance refreshVersion={activityRevision}/>
+      <LiveActivityLinks classroomId={classroomFilter || undefined}/>
       <StudentGroups refreshVersion={activityRevision} onError={setError}/>
       {(worlds.length > 0 || worldsError) && <section className="panel">
         <header className="panel-heading compact">

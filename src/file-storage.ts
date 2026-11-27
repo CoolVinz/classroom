@@ -269,6 +269,11 @@ export async function cleanupUnusedLessonImages() {
             SELECT 1 FROM classroom.classroom_quizzes r CROSS JOIN LATERAL jsonb_array_elements(COALESCE(r.content_snapshot->'questions', '[]'::jsonb)) question
             WHERE r.quiz_id = i.quiz_id AND (question->>'imageId' = i.id::text OR EXISTS (
               SELECT 1 FROM jsonb_array_elements(COALESCE(question->'choices', '[]'::jsonb)) choice WHERE choice->>'imageId' = i.id::text))
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM classroom.live_activities l CROSS JOIN LATERAL jsonb_array_elements(l.content_snapshot->'questions') question
+            WHERE l.quiz_id=i.quiz_id AND (question->>'imageId'=i.id::text OR EXISTS (
+              SELECT 1 FROM jsonb_array_elements(question->'choices') choice WHERE choice->>'imageId'=i.id::text))
           ) FOR UPDATE OF i
       `;
       for (const image of [...unused, ...unusedQuiz]) {

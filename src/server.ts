@@ -20,6 +20,7 @@ import { aiImportRoutes } from "./routes/ai-imports";
 import { worksheetRoutes, studentWorksheetRoutes } from "./routes/worksheets";
 import { appFramePolicy } from "./content-security-policy";
 import { galleryRoutes } from "./routes/gallery";
+import { liveActivityRoutes } from "./routes/live-activities";
 import { gradebookRoutes } from "./routes/gradebook";
 import { groupSetRoutes } from "./routes/group-sets";
 
@@ -55,6 +56,7 @@ const app = new Elysia({ serve: { maxRequestBodySize: maxUploadBytes() + 1024 * 
   .use(worksheetRoutes)
   .use(studentWorksheetRoutes)
   .use(galleryRoutes)
+  .use(liveActivityRoutes)
   .use(gradebookRoutes)
   .use(groupSetRoutes)
   .use(lessonPageApiRoutes)

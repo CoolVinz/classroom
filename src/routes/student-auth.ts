@@ -10,7 +10,7 @@ import { googleWorkspaceDomain, normalizeEmail } from "../security";
 const google = new OAuth2Client();
 const appUrl = process.env.APP_URL ?? "http://localhost:3000";
 const clientId = () => process.env.GOOGLE_CLIENT_ID?.trim() ?? "";
-const contentPath = /^\/(?:(?:quizzes|worksheets)\/[0-9a-f-]{36}|lessons\/[0-9a-f-]{36}(?:\/classrooms\/[0-9a-f-]{36})?)\/?$/i;
+const contentPath = /^\/(?:(?:quizzes|worksheets|activities\/live)\/[0-9a-f-]{36}|lessons\/[0-9a-f-]{36}(?:\/classrooms\/[0-9a-f-]{36})?)\/?$/i;
 
 function studentDestination(path: string) {
   return contentPath.test(path) || classroomEntryPath.test(path) ? path : "/";

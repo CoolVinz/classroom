@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import type postgres from "postgres";
 import { sql } from "../db/client";
 import { HttpError } from "../http-error";
 
@@ -48,14 +49,14 @@ export async function createStudentSession(accountId: string) {
   return token;
 }
 
-export async function readActor(request: Request): Promise<Actor | null> {
+export async function readActor(request: Request, db: postgres.ISql = sql): Promise<Actor | null> {
   const cookie = request.headers.get("cookie")?.split(";")
     .map((part) => part.trim())
     .find((part) => part.startsWith("classroom_session="));
   const token = cookie?.slice("classroom_session=".length);
   if (!token || token.length > 128) return null;
 
-  const [row] = await sql<Actor[]>`
+  const [row] = await db<Actor[]>`
     SELECT t.id, t.username, t.display_name AS "displayName", t.role, t.active
     FROM classroom.sessions s
     JOIN classroom.teachers t ON t.id = s.teacher_id
@@ -66,14 +67,14 @@ export async function readActor(request: Request): Promise<Actor | null> {
   return row ?? null;
 }
 
-export async function readStudentActor(request: Request): Promise<StudentActor | null> {
+export async function readStudentActor(request: Request, db: postgres.ISql = sql): Promise<StudentActor | null> {
   const cookie = request.headers.get("cookie")?.split(";")
     .map((part) => part.trim())
     .find((part) => part.startsWith("classroom_session="));
   const token = cookie?.slice("classroom_session=".length);
   if (!token || token.length > 128) return null;
 
-  const [row] = await sql<StudentActor[]>`
+  const [row] = await db<StudentActor[]>`
     SELECT a.id, a.email AS username,
       COALESCE((SELECT s.display_name FROM classroom.students s
         JOIN classroom.classrooms c ON c.id = s.classroom_id
@@ -90,8 +91,8 @@ export async function readStudentActor(request: Request): Promise<StudentActor |
   return row ?? null;
 }
 
-export async function readSessionUser(request: Request): Promise<SessionUser | null> {
-  return await readActor(request) ?? await readStudentActor(request);
+export async function readSessionUser(request: Request, db: postgres.ISql = sql): Promise<SessionUser | null> {
+  return await readActor(request, db) ?? await readStudentActor(request, db);
 }
 
 export async function deleteSession(token: string) {
