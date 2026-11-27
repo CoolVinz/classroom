@@ -71,11 +71,11 @@ export const studentAuthRoutes = new Elysia({ prefix: "/api/auth/student" })
         for (const key of lockKeys) await tx`SELECT pg_advisory_xact_lock(hashtext(${key})::bigint)`;
         const [bySubject] = await tx<{ id: string; email: string; googleSubject: string | null }[]>`
           SELECT id, email, google_subject AS "googleSubject" FROM classroom.student_accounts
-          WHERE google_subject = ${payload!.sub} FOR UPDATE
+          WHERE google_subject = ${payload!.sub} AND test_classroom_id IS NULL FOR UPDATE
         `;
         const [byEmail] = await tx<{ id: string; email: string; googleSubject: string | null }[]>`
           SELECT id, email, google_subject AS "googleSubject" FROM classroom.student_accounts
-          WHERE email = ${email} FOR UPDATE
+          WHERE email = ${email} AND test_classroom_id IS NULL FOR UPDATE
         `;
         if (bySubject && byEmail && bySubject.id !== byEmail.id) throw new HttpError(409, "Google identity conflict");
         let account = bySubject ?? byEmail;
@@ -83,7 +83,7 @@ export const studentAuthRoutes = new Elysia({ prefix: "/api/auth/student" })
         const matches = await tx<{ id: string; accountId: string | null }[]>`
           SELECT s.id, s.account_id AS "accountId"
           FROM classroom.students s JOIN classroom.classrooms c ON c.id = s.classroom_id
-          WHERE s.email = ${email} AND s.archived_at IS NULL AND c.archived_at IS NULL
+          WHERE s.email = ${email} AND s.archived_at IS NULL AND c.archived_at IS NULL AND NOT c.is_test
           FOR UPDATE OF s
         `;
         if (matches.some((student) => student.accountId && student.accountId !== account?.id)) {
@@ -102,12 +102,12 @@ export const studentAuthRoutes = new Elysia({ prefix: "/api/auth/student" })
         await tx`
           UPDATE classroom.students SET account_id = ${account.id}
           WHERE email = ${email} AND account_id IS NULL AND archived_at IS NULL
-            AND classroom_id IN (SELECT id FROM classroom.classrooms WHERE archived_at IS NULL)
+            AND classroom_id IN (SELECT id FROM classroom.classrooms WHERE archived_at IS NULL AND NOT is_test)
         `;
         const [membership] = await tx<{ displayName: string }[]>`
           SELECT s.display_name AS "displayName" FROM classroom.students s
           JOIN classroom.classrooms c ON c.id = s.classroom_id
-          WHERE s.account_id = ${account.id} AND s.archived_at IS NULL AND c.archived_at IS NULL
+          WHERE s.account_id = ${account.id} AND s.archived_at IS NULL AND c.archived_at IS NULL AND NOT c.is_test
           ORDER BY s.created_at LIMIT 1
         `;
         if (!membership) throw new HttpError(403, "No active roster match");

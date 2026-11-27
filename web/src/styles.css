@@ -206,3 +206,7 @@
   .gallery-immersive .gallery-menu{top:calc(76px + env(safe-area-inset-top));max-height:calc(100dvh - 92px - env(safe-area-inset-top) - env(safe-area-inset-bottom))}
 }
 @media(max-width:380px){.gallery-toolbar-actions .button span{display:none}}
+
+.tester-access{margin-top:.45rem;white-space:normal}
+.tester-access label{display:block;text-align:left;font-size:.82rem}
+.tester-access .table-input{width:100%;min-width:0;margin-top:.25rem}

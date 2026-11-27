@@ -10,7 +10,7 @@ import { StudentLearning } from "./StudentLearning";
 
 import { StudentWioLab } from "./StudentWioLab";
 const ModelPreview = lazy(() => import("./ModelPreview"));
-export type StudentUser = { id: string; username: string; displayName: string; role: "student" };
+export type StudentUser = { id: string; username: string; displayName: string; role: "student"; isTester?: boolean };
 type ClassroomMembership = { classroomId: string; classroomName: string };
 type Assignment = { assignmentId: string; classroomId: string; classroomName: string; title: string; instructions: string; wioLab: WioLabId | null; submissionCount: number; publishedScore: number | string | null; publishedMaxScore: number | string | null; publishedFeedback: string | null; publishedAt: string | null; newWork: boolean };
 type StudentFile = { id: string; kind: "worksheet" | "model" | "submission" | "working"; originalName: string; mediaType: string; sizeBytes: number | string; createdAt: string; studentSubmission: boolean; thumbnailAvailable: boolean; materialAvailable: boolean };
@@ -215,8 +215,11 @@ export function StudentPortal({ user, logout, openWorld, initialClassroomId }: {
   if (!classroomAccessible) return <ClassroomEntryNotice loading={refreshingClassrooms} error={classroomError}
     retry={() => void refreshClassrooms()} />;
 
-  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark">ค</div><div><strong>ห้องเรียน</strong><span>พื้นที่นักเรียน</span></div></div><div className="sidebar-bottom"><div className="profile"><div className="avatar">{user.displayName.slice(0, 1)}</div><div className="profile-copy"><strong>{user.displayName}</strong><span>นักเรียน</span></div><button className="icon-button" onClick={logout} aria-label="ออกจากระบบ" title="ออกจากระบบ">↗</button></div></div></aside>
-    <main className="main-area"><header className="topbar"><div className="breadcrumb">ห้องเรียน <span>/</span> งานของฉัน</div></header><div className="page-content">
+  return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark">ค</div><div><strong>ห้องเรียน</strong><span>พื้นที่นักเรียน</span></div></div><div className="sidebar-bottom"><div className="profile"><div className="avatar">{user.displayName.slice(0, 1)}</div><div className="profile-copy"><strong>{user.displayName}</strong><span>{user.isTester ? "นักเรียนทดสอบ" : "นักเรียน"}</span></div><button className="icon-button" onClick={logout} aria-label="ออกจากระบบ" title="ออกจากระบบ">↗</button></div></div></aside>
+    <main className="main-area"><header className="topbar">
+      <div className="breadcrumb">ห้องเรียน <span>/</span> {user.isTester ? "นักเรียนทดสอบ" : "งานของฉัน"}</div>
+      {user.isTester && <button type="button" className="text-button" onClick={logout}>ออกจากบัญชีทดสอบ</button>}
+    </header><div className="page-content">
       {error && <div className="notice" role="alert">{error}<button onClick={() => setError("")} aria-label="ปิด">×</button></div>}
       <div className="page-heading"><div><p className="eyebrow">พื้นที่นักเรียน</p><h1>งานของฉัน</h1><p className="muted page-description">ดูคำชี้แจงและไฟล์ใบงาน แล้วส่งงานของคุณ</p></div></div>
       <section className="panel">

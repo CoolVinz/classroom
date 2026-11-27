@@ -3,13 +3,14 @@ import { rename, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { sql } from "../db/client";
 import { requireActor, type Actor } from "../auth/session";
+import { revokeClassroomTesters, revokeTestStudentAccess } from "../auth/test-students";
 import { HttpError } from "../http-error";
 import { bangkokToday, checkRequestOrigin, cleanText, normalizeEmail, studentEmailForCode, validCalendarDate } from "../security";
 import { uploadRoot, uploadThumbnailPath } from "../file-storage";
 
 async function ownedClass(actor: Actor, classroomId: string, includeArchived = false) {
-  const [room] = await sql<{ id: string; name: string; archived: boolean }[]>`
-    SELECT id, name, archived_at IS NOT NULL AS archived
+  const [room] = await sql<{ id: string; name: string; archived: boolean; isTest: boolean }[]>`
+    SELECT id, name, archived_at IS NOT NULL AS archived, is_test AS "isTest"
     FROM classroom.classrooms
     WHERE id = ${classroomId} AND owner_id = ${actor.id}
       AND (${includeArchived} OR archived_at IS NULL)
@@ -28,19 +29,19 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
     const today = bangkokToday();
     const [totals] = await sql<{ classrooms: number; students: number; present: number; absent: number; late: number; excused: number }[]>`
       SELECT
-        (SELECT COUNT(*)::int FROM classroom.classrooms c WHERE c.owner_id = ${actor.id} AND c.archived_at IS NULL) AS classrooms,
-        (SELECT COUNT(*)::int FROM classroom.students s JOIN classroom.classrooms c ON c.id = s.classroom_id WHERE c.owner_id = ${actor.id} AND c.archived_at IS NULL AND s.archived_at IS NULL) AS students,
-        (SELECT COUNT(*)::int FROM classroom.attendance a JOIN classroom.classrooms c ON c.id = a.classroom_id WHERE c.owner_id = ${actor.id} AND c.archived_at IS NULL AND a.attendance_date = ${today}::date AND a.status = 'present') AS present,
-        (SELECT COUNT(*)::int FROM classroom.attendance a JOIN classroom.classrooms c ON c.id = a.classroom_id WHERE c.owner_id = ${actor.id} AND c.archived_at IS NULL AND a.attendance_date = ${today}::date AND a.status = 'absent') AS absent,
-        (SELECT COUNT(*)::int FROM classroom.attendance a JOIN classroom.classrooms c ON c.id = a.classroom_id WHERE c.owner_id = ${actor.id} AND c.archived_at IS NULL AND a.attendance_date = ${today}::date AND a.status = 'late') AS late,
-        (SELECT COUNT(*)::int FROM classroom.attendance a JOIN classroom.classrooms c ON c.id = a.classroom_id WHERE c.owner_id = ${actor.id} AND c.archived_at IS NULL AND a.attendance_date = ${today}::date AND a.status = 'excused') AS excused
+        (SELECT COUNT(*)::int FROM classroom.classrooms c WHERE c.owner_id = ${actor.id} AND c.archived_at IS NULL AND NOT c.is_test) AS classrooms,
+        (SELECT COUNT(*)::int FROM classroom.students s JOIN classroom.classrooms c ON c.id = s.classroom_id WHERE c.owner_id = ${actor.id} AND c.archived_at IS NULL AND NOT c.is_test AND s.archived_at IS NULL) AS students,
+        (SELECT COUNT(*)::int FROM classroom.attendance a JOIN classroom.classrooms c ON c.id = a.classroom_id WHERE c.owner_id = ${actor.id} AND c.archived_at IS NULL AND NOT c.is_test AND a.attendance_date = ${today}::date AND a.status = 'present') AS present,
+        (SELECT COUNT(*)::int FROM classroom.attendance a JOIN classroom.classrooms c ON c.id = a.classroom_id WHERE c.owner_id = ${actor.id} AND c.archived_at IS NULL AND NOT c.is_test AND a.attendance_date = ${today}::date AND a.status = 'absent') AS absent,
+        (SELECT COUNT(*)::int FROM classroom.attendance a JOIN classroom.classrooms c ON c.id = a.classroom_id WHERE c.owner_id = ${actor.id} AND c.archived_at IS NULL AND NOT c.is_test AND a.attendance_date = ${today}::date AND a.status = 'late') AS late,
+        (SELECT COUNT(*)::int FROM classroom.attendance a JOIN classroom.classrooms c ON c.id = a.classroom_id WHERE c.owner_id = ${actor.id} AND c.archived_at IS NULL AND NOT c.is_test AND a.attendance_date = ${today}::date AND a.status = 'excused') AS excused
     `;
     return { today, ...totals };
   })
   .get("/classrooms", async ({ request }) => {
     const actor = await requireActor(request);
     return sql`
-      SELECT c.id, c.name, c.created_at AS "createdAt",
+      SELECT c.id, c.name, c.created_at AS "createdAt", c.is_test AS "isTest",
         COUNT(s.id) FILTER (WHERE s.archived_at IS NULL)::int AS "studentCount"
       FROM classroom.classrooms c
       LEFT JOIN classroom.students s ON s.classroom_id = c.id
@@ -51,17 +52,18 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
   .post("/classrooms", async ({ body, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
+    if (body.isTest && actor.role !== "owner") throw new HttpError(403, "เฉพาะผู้ดูแลบัญชีเท่านั้นที่สร้างห้องเรียนทดสอบได้");
     const name = cleanText(body.name, 100);
-    const [room] = await sql<{ id: string; name: string }[]>`
-      INSERT INTO classroom.classrooms (owner_id, name)
-      VALUES (${actor.id}, ${name}) RETURNING id, name
+    const [room] = await sql`
+      INSERT INTO classroom.classrooms (owner_id, name, is_test)
+      VALUES (${actor.id}, ${name}, ${body.isTest ?? false}) RETURNING id, name, is_test AS "isTest", 0 AS "studentCount"
     `;
     return room;
-  }, { body: t.Object({ name: t.String({ minLength: 1, maxLength: 120 }) }) })
+  }, { body: t.Object({ name: t.String({ minLength: 1, maxLength: 120 }), isTest: t.Optional(t.Boolean()) }) })
   .patch("/classrooms/:classroomId", async ({ params, body, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
-    await ownedClass(actor, params.classroomId, body.archived === true);
+    const room = await ownedClass(actor, params.classroomId, body.archived === true);
     if (body.name !== undefined) {
       const name = cleanText(body.name, 100);
       await sql`UPDATE classroom.classrooms SET name = ${name} WHERE id = ${params.classroomId} AND owner_id = ${actor.id}`;
@@ -69,7 +71,10 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
     if (body.archived !== undefined) {
       await sql.begin(async (tx) => {
         await tx`UPDATE classroom.classrooms SET archived_at = ${body.archived ? sql`NOW()` : sql`NULL`} WHERE id = ${params.classroomId} AND owner_id = ${actor.id}`;
-        if (body.archived) await tx`UPDATE classroom.attendance_presence SET active_view = NULL WHERE classroom_id = ${params.classroomId}`;
+        if (body.archived) {
+          await tx`UPDATE classroom.attendance_presence SET active_view = NULL WHERE classroom_id = ${params.classroomId}`;
+          if (room.isTest) await revokeClassroomTesters(tx, params.classroomId);
+        }
       });
     }
     return { ok: true };
@@ -90,7 +95,8 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
   .post("/classrooms/:classroomId/students", async ({ params, body, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
-    await ownedClass(actor, params.classroomId);
+    const room = await ownedClass(actor, params.classroomId);
+    if (room.isTest) throw new HttpError(422, "ใช้เมนูเพิ่มนักเรียนทดสอบในห้องนี้");
     const name = cleanText(body.displayName, 120);
     const code = body.studentCode?.trim() || null;
     const email = normalizeEmail(body.email) ?? studentEmailForCode(code);
@@ -115,11 +121,14 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
   .patch("/classrooms/:classroomId/students/:studentId", async ({ params, body, request }) => {
     checkRequestOrigin(request);
     const actor = await requireActor(request);
-    await ownedClass(actor, params.classroomId);
+    const room = await ownedClass(actor, params.classroomId);
+    if (room.isTest && (body.email !== undefined || body.studentCode !== undefined)) {
+      throw new HttpError(422, "นักเรียนทดสอบใช้เพียงชื่อและเลขที่");
+    }
     try {
       await sql.begin(async (tx) => {
-        const [student] = await tx<{ studentCode: string | null; displayName: string; email: string | null }[]>`
-          SELECT student_code AS "studentCode", display_name AS "displayName", email
+        const [student] = await tx<{ studentCode: string | null; displayName: string; email: string | null; accountId: string | null }[]>`
+          SELECT student_code AS "studentCode", display_name AS "displayName", email, account_id AS "accountId"
           FROM classroom.students WHERE id = ${params.studentId} AND classroom_id = ${params.classroomId} FOR UPDATE
         `;
         if (!student) throw new HttpError(404, "ไม่พบนักเรียนนี้");
@@ -141,6 +150,7 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
         if (body.archived) await tx`UPDATE classroom.attendance_presence SET active_view = NULL
           WHERE classroom_id = ${params.classroomId} AND student_id = ${params.studentId}`;
         if (body.archived) {
+          if (room.isTest && student.accountId) await revokeTestStudentAccess(tx, student.accountId);
           await tx`DELETE FROM classroom.group_memberships WHERE student_id = ${params.studentId}`;
           await tx`DELETE FROM classroom.student_groups g WHERE g.creator_student_id = ${params.studentId} AND NOT EXISTS (SELECT 1 FROM classroom.group_memberships m WHERE m.group_id = g.id)`;
         }
@@ -160,8 +170,9 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
     try {
       await sql.begin(async (tx) => {
         await tx`SELECT pg_advisory_xact_lock(870010022)`;
-        const [student] = await tx<{ id: string }[]>`
-          SELECT s.id FROM classroom.students s JOIN classroom.classrooms c ON c.id = s.classroom_id
+        const [student] = await tx<{ id: string; testerAccountId: string | null }[]>`
+          SELECT s.id, CASE WHEN c.is_test THEN s.account_id END AS "testerAccountId"
+          FROM classroom.students s JOIN classroom.classrooms c ON c.id = s.classroom_id
           WHERE s.id = ${params.studentId} AND s.classroom_id = ${params.classroomId} AND c.owner_id = ${actor.id}
           FOR UPDATE OF s
         `;
@@ -183,6 +194,8 @@ export const classroomRoutes = new Elysia({ prefix: "/api" })
         await tx`DELETE FROM classroom.gallery_tickets WHERE classroom_id = ${params.classroomId} AND student_id = ${params.studentId}`;
         await tx`DELETE FROM classroom.files WHERE classroom_id = ${params.classroomId} AND student_id = ${params.studentId}`;
         await tx`DELETE FROM classroom.students WHERE id = ${params.studentId} AND classroom_id = ${params.classroomId}`;
+        if (student.testerAccountId) await tx`DELETE FROM classroom.student_accounts
+          WHERE id = ${student.testerAccountId} AND test_classroom_id = ${params.classroomId}`;
       });
     } catch (error) {
       for (const file of staged) {

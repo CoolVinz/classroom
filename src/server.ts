@@ -11,6 +11,7 @@ import { handleAppError } from "./error-handler";
 import { cleanupUnusedLessonImages, ensureUploadRoot, maxUploadBytes } from "./file-storage";
 import { courseworkRoutes } from "./routes/coursework";
 import { studentAuthRoutes } from "./routes/student-auth";
+import { testStudentRoutes } from "./routes/test-students";
 import { studentCourseworkRoutes } from "./routes/student-coursework";
 import { attendanceScheduleRoutes } from "./routes/attendance-schedule";
 import { studentAttendanceRoutes } from "./routes/student-attendance";
@@ -45,6 +46,7 @@ const app = new Elysia({ serve: { maxRequestBodySize: maxUploadBytes() + 1024 * 
   })
   .use(authRoutes)
   .use(studentAuthRoutes)
+  .use(testStudentRoutes)
   .use(classroomRoutes)
   .use(attendanceScheduleRoutes)
   .use(courseworkRoutes)
@@ -62,6 +64,12 @@ const app = new Elysia({ serve: { maxRequestBodySize: maxUploadBytes() + 1024 * 
   .use(lessonPageApiRoutes)
   .use(teacherRoutes)
   .get("/student/*", () => new Response(null, { status: 302, headers: { Location: "/?role=student" } }))
+  .get("/tester", ({ set }) => {
+    set.headers["cache-control"] = "no-store";
+    set.headers["referrer-policy"] = "no-referrer";
+    set.headers["content-security-policy"] = appFramePolicy;
+    return file(indexFile);
+  })
   .get("/", ({ set }) => { set.headers["content-security-policy"] = appFramePolicy; return file(indexFile); })
   .get("/assets/*", ({ request }) => {
     let pathname: string;

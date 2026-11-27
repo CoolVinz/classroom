@@ -390,8 +390,9 @@ export const courseworkRoutes = new Elysia({ prefix: "/api" })
       return { studentCode, studentNumber: row.studentNumber ?? null, displayName: row.displayName === undefined ? null : cleanText(row.displayName, 120), email: row.email };
     });
     return sql.begin(async (tx) => {
-      const [room] = await tx<{ id: string }[]>`SELECT id FROM classroom.classrooms WHERE id = ${params.classroomId} AND owner_id = ${actor.id} AND archived_at IS NULL FOR UPDATE`;
+      const [room] = await tx<{ id: string; isTest: boolean }[]>`SELECT id, is_test AS "isTest" FROM classroom.classrooms WHERE id = ${params.classroomId} AND owner_id = ${actor.id} AND archived_at IS NULL FOR UPDATE`;
       if (!room) throw new HttpError(404, "ไม่พบห้องเรียนนี้");
+      if (room.isTest) throw new HttpError(422, "ใช้เมนูเพิ่มนักเรียนทดสอบในห้องนี้");
       const assignedNumbers = await tx<{ studentNumber: number }[]>`
         SELECT student_number AS "studentNumber" FROM classroom.students
         WHERE classroom_id = ${params.classroomId} AND archived_at IS NULL AND student_number IS NOT NULL

@@ -17,17 +17,20 @@ export type StudentActor = {
   displayName: string;
   role: "student";
   active: true;
+  isTester: boolean;
 };
 
 export type SessionUser = Actor | StudentActor;
 
-function hashToken(token: string) {
+export function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
 }
 
-export function sessionCookie(token: string, remove = false) {
+const standardSessionSeconds = 60 * 60 * 24 * 14;
+
+export function sessionCookie(token: string, remove = false, durationSeconds = standardSessionSeconds) {
   const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
-  const age = remove ? 0 : 60 * 60 * 24 * 14;
+  const age = remove ? 0 : durationSeconds;
   return `classroom_session=${remove ? "" : token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${age}${secure}`;
 }
 
@@ -40,11 +43,11 @@ export async function createSession(teacherId: string) {
   return token;
 }
 
-export async function createStudentSession(accountId: string) {
+export async function createStudentSession(accountId: string, db: postgres.ISql = sql, durationSeconds = standardSessionSeconds) {
   const token = randomBytes(32).toString("base64url");
-  await sql`
+  await db`
     INSERT INTO classroom.student_sessions (token_hash, account_id, expires_at)
-    VALUES (${hashToken(token)}, ${accountId}, NOW() + INTERVAL '14 days')
+    VALUES (${hashToken(token)}, ${accountId}, NOW() + ${durationSeconds} * INTERVAL '1 second')
   `;
   return token;
 }
@@ -75,12 +78,12 @@ export async function readStudentActor(request: Request, db: postgres.ISql = sql
   if (!token || token.length > 128) return null;
 
   const [row] = await db<StudentActor[]>`
-    SELECT a.id, a.email AS username,
+    SELECT a.id, COALESCE(a.email, 'นักเรียนทดสอบ') AS username,
       COALESCE((SELECT s.display_name FROM classroom.students s
         JOIN classroom.classrooms c ON c.id = s.classroom_id
         WHERE s.account_id = a.id AND s.archived_at IS NULL AND c.archived_at IS NULL
         ORDER BY s.created_at LIMIT 1), a.email) AS "displayName",
-      'student' AS role, TRUE AS active
+      'student' AS role, TRUE AS active, a.test_classroom_id IS NOT NULL AS "isTester"
     FROM classroom.student_sessions ss
     JOIN classroom.student_accounts a ON a.id = ss.account_id
     WHERE ss.token_hash = ${hashToken(token)} AND ss.expires_at > NOW()

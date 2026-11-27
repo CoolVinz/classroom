@@ -31,13 +31,13 @@ export const studentCourseworkRoutes = new Elysia({ prefix: "/api/student" })
       // Read the current Google identity under the same account lock used at sign-in.
       const [account] = await tx<{ email: string }[]>`
         SELECT email FROM classroom.student_accounts
-        WHERE id = ${actor.id} AND google_subject IS NOT NULL FOR NO KEY UPDATE
+        WHERE id = ${actor.id} AND google_subject IS NOT NULL AND test_classroom_id IS NULL FOR NO KEY UPDATE
       `;
       if (account?.email.endsWith(`@${googleWorkspaceDomain()}`)) {
         await tx`
           UPDATE classroom.students AS candidate SET account_id = ${actor.id}
           FROM classroom.classrooms AS c
-          WHERE candidate.classroom_id = c.id AND c.archived_at IS NULL
+          WHERE candidate.classroom_id = c.id AND c.archived_at IS NULL AND NOT c.is_test
             AND candidate.archived_at IS NULL AND candidate.account_id IS NULL
             AND candidate.email = ${account.email}
             AND NOT EXISTS (

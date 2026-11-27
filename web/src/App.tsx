@@ -5,6 +5,7 @@ import { ClassroomWork } from "./ClassroomWork";
 import { StudentRosterImport } from "./StudentRosterImport";
 import { classroomEntryPath } from "../../src/classroom-entry";
 import { ClassroomQrButton } from "./ClassroomQrButton";
+import { TestStudentAccess, TestStudentLogin } from "./TestStudentAccess";
 import { ClassroomEntryNotice, StudentPortal } from "./StudentPortal";
 import { ClassroomGroups } from "./ClassroomGroups";
 import { AttendanceTimetable } from "./AttendanceTimetable";
@@ -24,8 +25,8 @@ const LiveActivityPage = lazy(() => import("./LiveActivityPage"));
 const GalleryWorld = lazy(() => import("./GalleryWorld").then((module) => ({ default: module.GalleryWorld })));
 
 type TeacherUser = { id: string; username: string; displayName: string; role: "owner" | "teacher" };
-type User = TeacherUser | { id: string; username: string; displayName: string; role: "student" };
-type Classroom = { id: string; name: string; studentCount: number };
+type User = TeacherUser | { id: string; username: string; displayName: string; role: "student"; isTester?: boolean };
+type Classroom = { id: string; name: string; studentCount: number; isTest: boolean };
 type Status = "present" | "absent" | "late" | "excused";
 type Student = { id: string; studentCode: string | null; studentNumber: number | null; displayName: string; email?: string | null; googleLinked?: boolean; archived?: boolean; status?: Status | null; source?: "manual" | "automatic" | null; firstArrivalAt?: string | null; lastSeenAt?: string | null; visibleSeconds?: number | null; tracking?: boolean };
 type AttendanceStudent = Omit<Student, "id"> & { studentId: string };
@@ -86,9 +87,9 @@ function App() {
   useEffect(() => { api<{ user: User | null }>("/auth/me").then((result) => setUser(result.user)).catch(() => {}).finally(() => setReady(true)); }, []);
   useEffect(() => { const update = () => setPathname(window.location.pathname); window.addEventListener("popstate", update); return () => window.removeEventListener("popstate", update); }, []);
   useEffect(() => { if (user && user.role !== "student") void refresh(); }, [user, refresh]);
-  async function createRoom(name: string) {
+  async function createRoom(name: string, isTest = false) {
     setBusy(true); setError("");
-    try { const room = await api<Classroom>("/classrooms", { method: "POST", body: JSON.stringify({ name }) }); setView("classes"); setSelected(room); await refresh(); }
+    try { const room = await api<Classroom>("/classrooms", { method: "POST", body: JSON.stringify({ name, isTest }) }); setView("classes"); setSelected(room); await refresh(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "สร้างห้องเรียนไม่สำเร็จ"); throw reason; }
     finally { setBusy(false); }
   }
@@ -105,6 +106,7 @@ function App() {
   }
   async function logout() { if (!confirmLessonLeave()) return; try { await api("/auth/logout", { method: "POST" }); } catch { /* Clear the local view even when the network is unavailable. */ } setUser(null); setSelected(null); setView("home"); }
   if (!ready) return <div className="loading"><span className="spinner" />กำลังเปิดห้องเรียนของคุณ…</div>;
+  if (pathname === "/tester") return <TestStudentLogin signedIn={!!user}/>;
   const lessonMatch = pathname.match(/^\/lessons\/([0-9a-f-]{36})(?:\/classrooms\/([0-9a-f-]{36}))?\/?$/i);
   const worksheetMatch = pathname.match(/^\/worksheets\/([0-9a-f-]{36})\/?$/i);
   const studentLogin = user ? <main className="public-lesson-page"><section className="panel learning-panel"><h1>สำหรับนักเรียน</h1><p>กรุณาเข้าสู่ระบบด้วยบัญชี Google ของโรงเรียน</p><Button onClick={() => void logout()}>ออกจากระบบ</Button></section></main> : <Login studentOnly onLogin={setUser} />;
@@ -125,13 +127,14 @@ function App() {
   if (quizMatch) return user?.role === "student" ? <StudentQuizPage student={user} /> : user ? <main className="public-lesson-page"><section className="panel"><h1>แบบทดสอบสำหรับนักเรียน</h1><p>กรุณาออกจากบัญชีครูและเข้าสู่ระบบด้วย Google ของนักเรียน</p><Button onClick={() => void logout()}>ออกจากระบบ</Button></section></main> : <Login studentOnly onLogin={setUser} />;
   if (!user) return <Login onLogin={setUser} />;
   if (user.role === "student") return <StudentPortal user={user} logout={() => void logout()} openWorld={openWorld} />;
+  const regularRooms = rooms.filter((room) => !room.isTest);
   const pageNames: Record<View, string> = { home: "ภาพรวม", classes: "ห้องเรียน", summary: "สรุปการเข้าเรียน", teachers: "จัดการบัญชีครู", lessons: "บทเรียน", quizzes: "แบบทดสอบ", worksheets: "ใบงานกิจกรรม" };
   return <div className="app-shell"><aside className="sidebar"><div className="brand"><div className="brand-mark">ค</div><div><strong>ห้องเรียน</strong><span>พื้นที่ของคุณครู</span></div></div><p className="side-caption">เมนู</p>
     <nav className="side-nav" aria-label="เมนูหลัก"><button className={view === "home" && !selected ? "active" : ""} onClick={() => { if (view !== "home" && !confirmLessonLeave()) return; setView("home"); setSelected(null); }}><span>⌂</span>ภาพรวม</button><button className={view === "classes" ? "active" : ""} onClick={() => { if (view !== "classes" && !confirmLessonLeave()) return; setView("classes"); setSelected(null); }}><span>▦</span>ห้องเรียน</button><button className={view === "lessons" ? "active" : ""} onClick={() => { if (view !== "lessons" && !confirmLessonLeave()) return; setView("lessons"); setSelected(null); }}><span>▧</span>บทเรียน</button><button className={view === "quizzes" ? "active" : ""} onClick={() => { if (view !== "quizzes" && !confirmLessonLeave()) return; setView("quizzes"); setSelected(null); }}><span>✓</span>แบบทดสอบ</button><button className={view === "worksheets" ? "active" : ""} onClick={() => { if (view !== "worksheets" && !confirmLessonLeave()) return; setView("worksheets"); setSelected(null); }}><span>▤</span>ใบงานกิจกรรม</button><button className={view === "summary" ? "active" : ""} onClick={() => { if (view !== "summary" && !confirmLessonLeave()) return; setView("summary"); setSelected(null); }}><span>▤</span>สรุปการเข้าเรียน</button>{user.role === "owner" && <button className={view === "teachers" ? "active" : ""} onClick={() => { if (view !== "teachers" && !confirmLessonLeave()) return; setView("teachers"); setSelected(null); }}><span>♙</span>จัดการบัญชีครู</button>}</nav>
     <div className="sidebar-bottom"><div className="profile"><div className="avatar">{user.displayName.slice(0, 1)}</div><div className="profile-copy"><strong>{user.displayName}</strong><span>{user.role === "owner" ? "ผู้ดูแล" : "คุณครู"}</span></div><button className="icon-button" onClick={logout} aria-label="ออกจากระบบ" title="ออกจากระบบ">↗</button></div></div>
   </aside><main className="main-area"><header className="topbar"><div className="breadcrumb">ห้องเรียน <span>/</span> {selected?.name ?? pageNames[view]}</div><div className="date-pill"><i />{showDate(today)}</div></header><div className="page-content">{error && <div className="notice" role="alert">{error}<button onClick={() => setError("")} aria-label="ปิด">×</button></div>}
-    {selected ? <ClassDetail room={selected} user={user} refresh={refresh} back={() => setSelected(null)} onOpenWorld={requestGalleryFullscreen} logout={() => void logout()} onError={setError} /> : view === "home" ? <Dashboard user={user} rooms={rooms} stats={stats} create={createRoom} open={setSelected} browse={() => setView("classes")} busy={busy} /> : null}
-    {!selected && view === "classes" && <ClassList rooms={rooms} create={createRoom} open={setSelected} busy={busy} onError={setError} />}{!selected && view === "summary" && <SummaryPage rooms={rooms} />}{!selected && view === "teachers" && user.role === "owner" && <TeacherAdmin onError={setError} />}{!selected && view === "lessons" && <LessonLibrary teacherId={user.id} onError={setError} onDirtyChange={setLessonDirty} />}{!selected && view === "quizzes" && <QuizLibrary classrooms={rooms} onError={setError} onDirtyChange={setLessonDirty} />}{!selected && view === "worksheets" && <WorksheetLibrary classrooms={rooms} onError={setError} onDirtyChange={setLessonDirty} />}
+    {selected ? <ClassDetail room={selected} user={user} refresh={refresh} back={() => setSelected(null)} onOpenWorld={requestGalleryFullscreen} logout={() => void logout()} onError={setError} /> : view === "home" ? <Dashboard user={user} rooms={regularRooms} stats={stats} create={createRoom} open={setSelected} browse={() => setView("classes")} busy={busy} /> : null}
+    {!selected && view === "classes" && <ClassList rooms={rooms} allowTest={user.role === "owner"} create={createRoom} open={setSelected} busy={busy} onError={setError} />}{!selected && view === "summary" && <SummaryPage rooms={regularRooms} />}{!selected && view === "teachers" && user.role === "owner" && <TeacherAdmin onError={setError} />}{!selected && view === "lessons" && <LessonLibrary teacherId={user.id} onError={setError} onDirtyChange={setLessonDirty} />}{!selected && view === "quizzes" && <QuizLibrary classrooms={rooms} onError={setError} onDirtyChange={setLessonDirty} />}{!selected && view === "worksheets" && <WorksheetLibrary classrooms={rooms} onError={setError} onDirtyChange={setLessonDirty} />}
   </div></main></div>;
 }
 
@@ -145,12 +148,13 @@ function Stat({ title, value, note, icon, tone }: { title: string; value: number
   return <article className="stat"><span className={"stat-icon " + tone}>{icon}</span><p>{title}</p><strong>{value}</strong><small>{note}</small></article>;
 }
 function RoomCard({ room, index, open }: { room: Classroom; index: number; open: (room: Classroom) => void }) {
-  return <button className={"room-card room-tone-" + (index % 3)} onClick={() => open(room)}><span className="room-letter">{["ก", "ข", "ค"][index % 3]}</span><span><strong>{room.name}</strong><small>{room.studentCount} นักเรียน</small></span><b>↗</b></button>;
+  return <button className={"room-card room-tone-" + (index % 3)} onClick={() => open(room)}><span className="room-letter">{["ก", "ข", "ค"][index % 3]}</span><span><strong>{room.name}</strong><small>{room.isTest ? "ห้องเรียนทดสอบ · " : ""}{room.studentCount} นักเรียน</small></span><b>↗</b></button>;
 }
-function NewRoomModal({ close, create, busy, onError }: { close: () => void; create: (name: string) => Promise<void>; busy: boolean; onError: (message: string) => void }) {
+function NewRoomModal({ close, create, busy, onError, isTest = false }: { close: () => void; create: (name: string, isTest?: boolean) => Promise<void>; busy: boolean; onError: (message: string) => void; isTest?: boolean }) {
   const [name, setName] = useState("");
-  async function submit(event: FormEvent) { event.preventDefault(); try { await create(name); close(); } catch (reason) { onError(reason instanceof Error ? reason.message : "สร้างห้องเรียนไม่สำเร็จ"); } }
-  return <div className="modal-scrim" onMouseDown={(event) => event.target === event.currentTarget && close()}><section className="modal" role="dialog" aria-modal="true" aria-label="สร้างห้องเรียน"><header><h2>สร้างห้องเรียน</h2><button className="icon-button" onClick={close} aria-label="ปิด">×</button></header><form className="form-stack" onSubmit={submit}><label>ชื่อห้องเรียน<input autoFocus placeholder="เช่น ป.4/1" maxLength={120} value={name} onChange={(e) => setName(e.target.value)} required /></label><div className="modal-actions"><Button type="button" tone="quiet" onClick={close}>ยกเลิก</Button><Button disabled={busy || !name.trim()}>บันทึกห้องเรียน</Button></div></form></section></div>;
+  const title = isTest ? "สร้างห้องเรียนทดสอบ" : "สร้างห้องเรียน";
+  async function submit(event: FormEvent) { event.preventDefault(); try { await create(name, isTest); close(); } catch (reason) { onError(reason instanceof Error ? reason.message : "สร้างห้องเรียนไม่สำเร็จ"); } }
+  return <div className="modal-scrim" onMouseDown={(event) => event.target === event.currentTarget && close()}><section className="modal" role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button className="icon-button" onClick={close} aria-label="ปิด">×</button></header><form className="form-stack" onSubmit={submit}><label>ชื่อห้องเรียน<input autoFocus placeholder={isTest ? "เช่น ห้องทดสอบของฉัน" : "เช่น ป.4/1"} maxLength={100} value={name} onChange={(e) => setName(e.target.value)} required /></label><div className="modal-actions"><Button type="button" tone="quiet" onClick={close}>ยกเลิก</Button><Button disabled={busy || !name.trim()}>บันทึกห้องเรียน</Button></div></form></section></div>;
 }
 function Dashboard({ user, rooms, stats, create, open, browse, busy }: { user: User; rooms: Classroom[]; stats: Record<string, number | string> | null; create: (name: string) => Promise<void>; open: (room: Classroom) => void; browse: () => void; busy: boolean }) {
   const [showNew, setShowNew] = useState(false); const [error, setError] = useState("");
@@ -161,16 +165,29 @@ function Dashboard({ user, rooms, stats, create, open, browse, busy }: { user: U
   </>;
 }
 
-function ClassList({ rooms, create, open, busy, onError }: { rooms: Classroom[]; create: (name: string) => Promise<void>; open: (room: Classroom) => void; busy: boolean; onError: (message: string) => void }) {
-  const [showNew, setShowNew] = useState(false);
-  return <><PageHeading eyebrow="พื้นที่ดูแลของคุณ" title="ห้องเรียน" detail="จัดการรายชื่อและบันทึกการเข้าเรียนในแต่ละห้อง" action={<Button onClick={() => setShowNew(true)}>＋ สร้างห้องเรียน</Button>}/>{rooms.length ? <div className="room-grid room-grid-all">{rooms.map((room, index) => <RoomCard key={room.id} room={room} index={index} open={open}/>)}</div> : <Empty icon="▦" title="ยังไม่มีห้องเรียน" detail="สร้างห้องเรียนแรกของคุณเพื่อเริ่มต้นเพิ่มรายชื่อนักเรียน" action={<Button onClick={() => setShowNew(true)}>＋ สร้างห้องเรียน</Button>}/ >}{showNew && <NewRoomModal close={() => setShowNew(false)} create={create} busy={busy} onError={onError}/>}</>;
+function ClassList({ rooms, create, open, busy, onError, allowTest }: {
+  rooms: Classroom[]; create: (name: string, isTest?: boolean) => Promise<void>;
+  open: (room: Classroom) => void; busy: boolean; onError: (message: string) => void; allowTest: boolean;
+}) {
+  const [newRoom, setNewRoom] = useState<"regular" | "test" | null>(null);
+  return <>
+    <PageHeading eyebrow="พื้นที่ดูแลของคุณ" title="ห้องเรียน" detail="จัดการรายชื่อและบันทึกการเข้าเรียนในแต่ละห้อง"
+      action={<div className="room-detail-actions">
+        <Button onClick={() => setNewRoom("regular")}>＋ สร้างห้องเรียน</Button>
+        {allowTest && <Button tone="quiet" onClick={() => setNewRoom("test")}>สร้างห้องเรียนทดสอบ</Button>}
+      </div>}/>
+    {rooms.length ? <div className="room-grid room-grid-all">
+      {rooms.map((room, index) => <RoomCard key={room.id} room={room} index={index} open={open}/>)}
+    </div> : <Empty icon="▦" title="ยังไม่มีห้องเรียน" detail="สร้างห้องเรียนแรกของคุณเพื่อเริ่มต้นเพิ่มรายชื่อนักเรียน"/>}
+    {newRoom && <NewRoomModal close={() => setNewRoom(null)} create={create} busy={busy} onError={onError} isTest={newRoom === "test"}/>}
+  </>;
 }
 
 function ClassDetail({ room, user, refresh, back, onOpenWorld, logout, onError }: { room: Classroom; user: User; refresh: () => Promise<void>; back: () => void; onOpenWorld: () => void; logout: () => void; onError: (message: string) => void }) {
   const [tab, setTab] = useState<"attendance" | "students" | "groups" | "assignments" | "gradebook" | "summary" | "world" | "live">("attendance"); const [name, setName] = useState(room.name); const [editing, setEditing] = useState(false);
   async function archive() { if (!window.confirm("เก็บห้องเรียนนี้เข้าคลังหรือไม่? ประวัติและรายชื่อจะยังอยู่")) return; try { await api("/classrooms/" + room.id, { method: "PATCH", body: JSON.stringify({ archived: true }) }); await refresh(); back(); } catch (reason) { onError(reason instanceof Error ? reason.message : "เก็บห้องเรียนไม่สำเร็จ"); } }
   async function rename(event: FormEvent) { event.preventDefault(); try { await api("/classrooms/" + room.id, { method: "PATCH", body: JSON.stringify({ name }) }); setEditing(false); await refresh(); } catch (reason) { onError(reason instanceof Error ? reason.message : "เปลี่ยนชื่อไม่สำเร็จ"); } }
-  return <><button className="back-link" onClick={back}>‹ ห้องเรียนทั้งหมด</button><div className="room-detail-heading"><div className="room-emblem">{room.name.slice(0, 1)}</div><div className="room-detail-copy"><p className="eyebrow">พื้นที่ดูแลของคุณ</p>{editing ? <form className="rename-form" onSubmit={rename}><input value={name} onChange={(e) => setName(e.target.value)} autoFocus/><Button>บันทึก</Button><Button tone="quiet" type="button" onClick={() => setEditing(false)}>ยกเลิก</Button></form> : <><h1>{room.name}</h1><p className="muted">{room.studentCount} นักเรียน</p></>}</div><div className="room-detail-actions"><ClassroomQrButton classroomId={room.id} name={room.name} /><button className="text-button" onClick={() => setEditing(true)}>เปลี่ยนชื่อ</button><Button tone="quiet" onClick={archive}>เก็บห้องเรียน</Button></div></div>
+  return <><button className="back-link" onClick={back}>‹ ห้องเรียนทั้งหมด</button><div className="room-detail-heading"><div className="room-emblem">{room.name.slice(0, 1)}</div><div className="room-detail-copy"><p className="eyebrow">{room.isTest ? "ห้องเรียนทดสอบ" : "พื้นที่ดูแลของคุณ"}</p>{editing ? <form className="rename-form" onSubmit={rename}><input value={name} onChange={(e) => setName(e.target.value)} autoFocus/><Button>บันทึก</Button><Button tone="quiet" type="button" onClick={() => setEditing(false)}>ยกเลิก</Button></form> : <><h1>{room.name}</h1><p className="muted">{room.studentCount} นักเรียน</p></>}</div><div className="room-detail-actions">{!room.isTest && <ClassroomQrButton classroomId={room.id} name={room.name} />}<button className="text-button" onClick={() => setEditing(true)}>เปลี่ยนชื่อ</button><Button tone="quiet" onClick={archive}>เก็บห้องเรียน</Button></div></div>
     <div className="tabs" role="tablist"><button className={tab === "attendance" ? "selected" : ""} onClick={() => setTab("attendance")}>บันทึกการเข้าเรียน</button><button className={tab === "students" ? "selected" : ""} onClick={() => setTab("students")}>รายชื่อนักเรียน</button><button className={tab === "groups" ? "selected" : ""} onClick={() => setTab("groups")}>จัดกลุ่ม</button><button className={tab === "assignments" ? "selected" : ""} onClick={() => setTab("assignments")}>งานและไฟล์</button><button className={tab === "gradebook" ? "selected" : ""} onClick={() => setTab("gradebook")}>สมุดคะแนน</button><button className={tab === "summary" ? "selected" : ""} onClick={() => setTab("summary")}>สรุปผล</button><button className={tab === "live" ? "selected" : ""} onClick={() => setTab("live")}>กิจกรรมสด</button><button className={tab === "world" ? "selected" : ""} onClick={() => { onOpenWorld(); setTab("world"); }}>โลกเสมือน</button></div>{tab === "attendance" && <Attendance room={room} onError={onError}/ >}{tab === "students" && <Roster room={room} refresh={refresh} onError={onError}/ >}{tab === "groups" && <ClassroomGroups classroomId={room.id} onError={onError}/ >}{tab === "assignments" && <ClassroomWork teacherId={user.id} room={room} onError={onError}/ >}{tab === "gradebook" && <ClassGradebook classroomId={room.id} onError={onError}/ >}{tab === "summary" && <RoomSummary room={room}/ >}{tab === "live" && <TeacherLiveActivities key={room.id} classroomId={room.id}/ >}{tab === "world" && <Suspense fallback={<p className="inline-loading"><i className="spinner"/>กำลังเปิดโลกเสมือน…</p>}><GalleryWorld classroomId={room.id} user={user} close={() => setTab("attendance")} logout={logout}/></Suspense>}</>;
 }
 
@@ -202,7 +219,9 @@ function Roster({ room, refresh, onError }: { room: Classroom; refresh: () => Pr
   useEffect(() => { void load(); }, [load]);
   async function add(event: FormEvent) {
     event.preventDefault(); setSaving(true);
-    try { await api("/classrooms/" + room.id + "/students", { method: "POST", body: JSON.stringify({ displayName: name, studentCode: code, studentNumber: number ? Number(number) : null, email }) }); setName(""); setCode(""); setNumber(""); setEmail(""); await load(); await refresh(); }
+    const studentNumber = number ? Number(number) : null;
+    const body = room.isTest ? { displayName: name, studentNumber } : { displayName: name, studentCode: code, studentNumber, email };
+    try { await api("/classrooms/" + room.id + (room.isTest ? "/testers" : "/students"), { method: "POST", body: JSON.stringify(body) }); setName(""); setCode(""); setNumber(""); setEmail(""); await load(); await refresh(); }
     catch (reason) { onError(reason instanceof Error ? reason.message : "เพิ่มรายชื่อไม่สำเร็จ"); } finally { setSaving(false); }
   }
   async function update(student: Student, body: Record<string, unknown>) {
@@ -218,9 +237,57 @@ function Roster({ room, refresh, onError }: { room: Classroom; refresh: () => Pr
       if (result.cleanupPending) window.alert("ลบข้อมูลนักเรียนแล้ว แต่ไฟล์บางส่วนยังลบไม่สำเร็จ ระบบจะตรวจเก็บไฟล์ค้างเมื่อเริ่มแอปอีกครั้งหลังผ่านไป 24 ชั่วโมง");
     } catch (reason) { onError(reason instanceof Error ? reason.message : "ลบนักเรียนไม่สำเร็จ"); }
   }
-  return <><section className="panel"><header className="panel-heading compact"><div><p className="eyebrow">รายชื่อห้องเรียน</p><h2>นักเรียน <span className="small-count">{students.filter((s) => !s.archived).length} คน</span></h2></div></header>
-    <form className="add-student" onSubmit={add}><label>ชื่อนักเรียน<input placeholder="ชื่อและนามสกุล" value={name} onChange={(e) => setName(e.target.value)} required maxLength={120}/></label><label>เลขที่ <small>(ไม่บังคับ)</small><input type="number" min={1} max={2147483647} step={1} value={number} onChange={(e) => setNumber(e.target.value)}/></label><label>รหัสนักเรียน <small>(ไม่บังคับ)</small><input placeholder="เช่น 64001" value={code} onChange={(e) => setCode(e.target.value)} maxLength={50}/></label><label>อีเมล <small>(ถ้าว่างและรหัสเป็นตัวเลข ระบบจะสร้าง @banjan.ac.th)</small><input type="email" value={email} onChange={(e) => setEmail(e.target.value)}/></label><Button disabled={saving || !name.trim()}>＋ เพิ่มรายชื่อ</Button></form>
-    {students.length ? <div className="table-scroll"><table className="data-table"><thead><tr><th>เลขที่</th><th>นักเรียน</th><th>รหัสนักเรียน</th><th>อีเมล</th><th>สถานะ</th><th></th></tr></thead><tbody>{students.map((student) => <tr key={student.id} className={student.archived ? "archived-row" : ""}>{editId === student.id ? <><td><input className="table-input" type="number" min={1} max={2147483647} step={1} value={editNumber} onChange={(e) => setEditNumber(e.target.value)}/></td><td><input className="table-input" value={editName} onChange={(e) => setEditName(e.target.value)}/></td><td><input className="table-input" value={editCode} onChange={(e) => setEditCode(e.target.value)}/></td><td><input className="table-input" type="email" value={editEmail} onChange={(e) => setEditEmail(e.target.value)}/></td><td>{student.archived ? "เก็บแล้ว" : "กำลังเรียน"}</td><td className="row-actions"><button className="text-button" onClick={() => void update(student, { displayName: editName, studentCode: editCode, studentNumber: editNumber ? Number(editNumber) : null, email: editEmail })}>บันทึก</button><button className="text-button subdued" onClick={() => setEditId("")}>ยกเลิก</button></td></> : <><td>{student.studentNumber ?? "—"}</td><td><strong>{student.displayName}</strong></td><td>{student.studentCode || "—"}</td><td>{student.email || "—"}</td><td><span className={"student-state " + (student.archived ? "inactive" : "")}>{student.archived ? "เก็บแล้ว" : student.googleLinked ? "Google เชื่อมแล้ว" : student.email ? "ยังไม่เคยเข้าสู่ระบบ" : "ต้องเพิ่มอีเมล"}</span></td><td className="row-actions"><button className="text-button" onClick={() => { setEditId(student.id); setEditName(student.displayName); setEditCode(student.studentCode ?? ""); setEditNumber(student.studentNumber === null ? "" : String(student.studentNumber)); setEditEmail(student.email ?? ""); }}>แก้ไข</button><button className="text-button subdued" onClick={() => void update(student, { archived: !student.archived })}>{student.archived ? "นำกลับมา" : "เก็บรายชื่อ"}</button><button className="text-button danger" onClick={() => void remove(student)}>ลบนักเรียนถาวร</button></td></>}</tr>)}</tbody></table></div> : <Empty icon="♙" title="ยังไม่มีรายชื่อนักเรียน" detail="เพิ่มชื่อและรหัสนักเรียนจากแบบฟอร์มด้านบน"/>}</section><StudentRosterImport classroomId={room.id} students={students} onImported={async () => { await load(); await refresh(); }} onError={onError}/></>;
+  return <>
+    <section className="panel">
+      <header className="panel-heading compact"><div>
+        <p className="eyebrow">รายชื่อห้องเรียน</p>
+        <h2>{room.isTest ? "นักเรียนทดสอบ" : "นักเรียน"} <span className="small-count">{students.filter((student) => !student.archived).length} คน</span></h2>
+        {room.isTest && <p className="muted">เปิดลิงก์ทดสอบในหน้าต่างไม่ระบุตัวตนเพื่อเก็บหน้าครูไว้ในหน้าต่างเดิม</p>}
+      </div></header>
+      <form className="add-student" onSubmit={add}>
+        <label>ชื่อนักเรียน<input placeholder="ชื่อและนามสกุล" value={name} onChange={(e) => setName(e.target.value)} required maxLength={120}/></label>
+        <label>เลขที่ <small>(ไม่บังคับ)</small><input type="number" min={1} max={2147483647} step={1} value={number} onChange={(e) => setNumber(e.target.value)}/></label>
+        {!room.isTest && <>
+          <label>รหัสนักเรียน <small>(ไม่บังคับ)</small><input placeholder="เช่น 64001" value={code} onChange={(e) => setCode(e.target.value)} maxLength={50}/></label>
+          <label>อีเมล <small>(ถ้าว่างและรหัสเป็นตัวเลข ระบบจะสร้าง @banjan.ac.th)</small><input type="email" value={email} onChange={(e) => setEmail(e.target.value)}/></label>
+        </>}
+        <Button disabled={saving || !name.trim()}>{room.isTest ? "＋ เพิ่มนักเรียนทดสอบ" : "＋ เพิ่มรายชื่อ"}</Button>
+      </form>
+      {students.length ? <div className="table-scroll"><table className="data-table">
+        <thead><tr><th>เลขที่</th><th>นักเรียน</th>{!room.isTest && <><th>รหัสนักเรียน</th><th>อีเมล</th></>}<th>สถานะ</th><th></th></tr></thead>
+        <tbody>{students.map((student) => <tr key={student.id} className={student.archived ? "archived-row" : ""}>{editId === student.id ? <>
+          <td><input className="table-input" type="number" min={1} max={2147483647} step={1} value={editNumber} onChange={(e) => setEditNumber(e.target.value)}/></td>
+          <td><input className="table-input" value={editName} onChange={(e) => setEditName(e.target.value)}/></td>
+          {!room.isTest && <>
+            <td><input className="table-input" value={editCode} onChange={(e) => setEditCode(e.target.value)}/></td>
+            <td><input className="table-input" type="email" value={editEmail} onChange={(e) => setEditEmail(e.target.value)}/></td>
+          </>}
+          <td>{student.archived ? "เก็บแล้ว" : "กำลังเรียน"}</td>
+          <td className="row-actions">
+            <button className="text-button" onClick={() => void update(student, {
+              displayName: editName, studentNumber: editNumber ? Number(editNumber) : null,
+              ...(!room.isTest && { studentCode: editCode, email: editEmail }),
+            })}>บันทึก</button>
+            <button className="text-button subdued" onClick={() => setEditId("")}>ยกเลิก</button>
+          </td>
+        </> : <>
+          <td>{student.studentNumber ?? "—"}</td><td><strong>{student.displayName}</strong></td>
+          {!room.isTest && <><td>{student.studentCode || "—"}</td><td>{student.email || "—"}</td></>}
+          <td><span className={"student-state " + (student.archived ? "inactive" : "")}>
+            {student.archived ? "เก็บแล้ว" : room.isTest ? "บัญชีทดสอบ" : student.googleLinked ? "Google เชื่อมแล้ว" : student.email ? "ยังไม่เคยเข้าสู่ระบบ" : "ต้องเพิ่มอีเมล"}
+          </span></td>
+          <td className="row-actions">
+            <button className="text-button" onClick={() => { setEditId(student.id); setEditName(student.displayName); setEditCode(student.studentCode ?? ""); setEditNumber(student.studentNumber === null ? "" : String(student.studentNumber)); setEditEmail(student.email ?? ""); }}>แก้ไข</button>
+            <button className="text-button subdued" onClick={() => void update(student, { archived: !student.archived })}>{student.archived ? "นำกลับมา" : "เก็บรายชื่อ"}</button>
+            <button className="text-button danger" onClick={() => void remove(student)}>ลบนักเรียนถาวร</button>
+            {room.isTest && !student.archived && <TestStudentAccess classroomId={room.id} studentId={student.id} name={student.displayName} onError={onError}/>}
+          </td>
+        </>}</tr>)}</tbody>
+      </table></div> : <Empty icon="♙" title="ยังไม่มีรายชื่อนักเรียน"
+        detail={room.isTest ? "เพิ่มนักเรียนทดสอบจากแบบฟอร์มด้านบน" : "เพิ่มชื่อและรหัสนักเรียนจากแบบฟอร์มด้านบน"}/>}
+    </section>
+    {!room.isTest && <StudentRosterImport classroomId={room.id} students={students} onImported={async () => { await load(); await refresh(); }} onError={onError}/>}
+  </>;
 }
 
 function SummaryPage({ rooms }: { rooms: Classroom[] }) {

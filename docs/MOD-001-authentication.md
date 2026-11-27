@@ -19,13 +19,14 @@ Authenticate owner and teacher accounts with passwords and students with verifie
 - The student home calls `POST /api/student/classrooms/refresh` on entry and on request. A valid student session can link new active roster entries using its Google account's verified school email. The transaction skips existing or conflicting links and returns every active linked classroom, including classrooms without assignments.
 - Teacher and student sessions are stored in separate tables; a student session cannot authorize teacher APIs. The one-time migration clears existing student sessions and invitation/reset tokens while preserving teacher sessions and historical password hashes.
 - Student password and invitation endpoints return HTTP 410; old `/student/activate`, `/student/forgot`, and `/student/reset` links redirect to Google sign-in.
+- The Owner can issue a single-use sign-in link to a dummy student in an explicitly marked test classroom. A link expires in ten minutes and creates a two-hour `student_sessions` row. Opening `/tester` displays a confirmation button before redeeming the token. Active browser sessions must sign out or use a separate profile. Generating a link supersedes the previous unused link, and redeeming it invalidates the tester's previous session. Revocation and archival invalidate unused links and sessions.
 
 ## Business rules
 
 - Username is normalized to lowercase; owner provisioning and teacher creation require a 3–40 character username using lowercase letters, digits, dot, dash, or underscore.
 - Teacher passwords require at least 12 characters and are hashed with Argon2id. Students have no password login; historical student password hashes are retained but unused.
 - The database permits at most one owner account. Only an owner can manage teacher accounts.
-- Sessions are random 32-byte tokens in HttpOnly, SameSite=Lax cookies. Only SHA-256 token hashes are stored, with a 14-day expiry; production cookies use Secure.
+- Sessions are random 32-byte tokens in HttpOnly, SameSite=Lax cookies. Standard sessions expire in 14 days and test student sessions expire in two hours. Production cookies use Secure. PostgreSQL stores SHA-256 hashes of session tokens and tester links.
 - Google's double-submit `g_csrf_token` cookie/body pair is checked on the cross-site redirect callback. The callback does not use the app's same-origin check because Google posts directly to it.
 - Teacher login throttling uses process-local memory keyed by username.
 - Student access is limited to active classroom roster rows linked to the account. Archiving a student or classroom removes that membership from student APIs and clears its active attendance-tracking lease.
@@ -45,6 +46,7 @@ API: src/routes/auth.ts, src/routes/student-auth.ts, src/routes/teachers.ts
 Session/access checks: src/auth/session.ts, src/routes/student-coursework.ts
 Input and origin checks: src/security.ts
 Database: src/db/migrations/001_initial.sql (teachers, sessions), 003_student_submissions.sql (student accounts, sessions, tokens), 004_google_student_auth.sql (Google subject, passwordless accounts, email backfill, session/token invalidation)
+Test classroom sign-in: src/routes/test-students.ts, web/src/TestStudentAccess.tsx, migration 036_test_classrooms.sql, src/test-students.integration.ts
 Tests: src/student-workflow.test.ts (optional PostgreSQL integration; set CLASSROOM_TEST_DATABASE_URL)
 ```
 
