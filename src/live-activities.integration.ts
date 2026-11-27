@@ -11,7 +11,7 @@ import { Elysia } from "elysia";
 import { activitySpawn, choiceZones, zoneCenter, zoneChoice } from "../gallery-server/src/live-activity-layout.mjs";
 
 const database = process.env.CLASSROOM_TEST_DATABASE_URL;
-test.skipIf(!database)("hosts a 50-student live quiz and moderated discussion", async () => {
+test.skipIf(!database)("hosts live quizzes, discussions, private and walking polls, and moderated word clouds", async () => {
   process.env.DATABASE_URL = database!;
   process.env.DATABASE_SSL = "disable";
   process.env.APP_URL = "http://localhost:3000";
@@ -51,6 +51,7 @@ test.skipIf(!database)("hosts a 50-student live quiz and moderated discussion", 
     throw new Error("Timed out waiting for activity state");
   }
   const teacher = randomUUID(), outsider = randomUUID(), classroom = randomUUID(), quiz = randomUUID(), lesson = randomUUID(), image = randomUUID();
+  const otherClassroom = randomUUID();
   const first = { id: randomUUID(), text: "ถูก", imageId: image };
   const second = { id: randomUUID(), text: "ผิด", imageId: null };
   const content = { description: "", questions: [
@@ -192,6 +193,89 @@ test.skipIf(!database)("hosts a 50-student live quiz and moderated discussion", 
     await command("finish", "สรุปภาษาไทย", discussionPath);
     expect(await read(secondToken, discussionPath)).toMatchObject({ phase: "finished", recap: "สรุปภาษาไทย" });
     expect(await read(secondToken, `/student/live-activities?lessonId=${lesson}`)).toContainEqual(expect.objectContaining({ id: discussion.id }));
+
+    const pollBody = { kind: "poll", title: "Synthetic poll", prompt: "ชอบหัวข้อไหน?", lessonId: lesson, pollChoices: ["ภาพ", "เสียง"] };
+    expect((await request(hostToken, createPath, "POST", { ...pollBody, pollChoices: ["Sketch", " sketch "] })).status).toBe(422);
+    const privatePoll = await read(hostToken, createPath, "POST", pollBody);
+    const privatePath = "/live-activities/" + privatePoll.id;
+    const vote = (token: string, choiceIndex: number | null, target = privatePath) => request(token, target + "/vote", "PUT", { choiceIndex });
+    const { room: privateVoter } = await connect(firstToken, privatePoll.id);
+    const { room: observer } = await connect(secondToken, privatePoll.id);
+    await command("open", undefined, privatePath);
+    await waitFor(() => privateVoter.state?.phase === "answering" && observer.state?.players?.size === 2);
+    expect((await vote(studentTokens[50], 0)).status).toBe(403);
+    await sql`INSERT INTO classroom.classrooms(id,owner_id,name) VALUES(${otherClassroom},${outsider},'Other test class')`;
+    await sql`INSERT INTO classroom.students(account_id,classroom_id,display_name)
+      VALUES(${studentRows[50].account_id},${otherClassroom},'Outside student')`;
+    await sql`UPDATE classroom.students SET archived_at=NOW() WHERE id=${studentRows[50].id}`;
+    expect((await vote(studentTokens[50], 0)).status).toBe(404);
+    expect((await request(studentTokens[50], privatePath)).status).toBe(404);
+    await sql`UPDATE classroom.students SET archived_at=NULL WHERE id=${studentRows[50].id}`;
+    expect((await vote(firstToken, 7)).status).toBe(422);
+    privateVoter.send("area", { questionIndex: privateVoter.state.questionIndex, choice: 0 });
+    await Bun.sleep(135);
+    expect((await read(firstToken, privatePath)).selected).toBeNull();
+    expect((await vote(firstToken, 0)).status).toBe(200);
+    expect((await vote(firstToken, 0)).status).toBe(200);
+    expect(await read(hostToken, privatePath)).toMatchObject({ selected: null, poll: { mode: "private", voted: 1, counts: null } });
+    expect(await read(secondToken, privatePath)).toMatchObject({ selected: null, poll: { voted: null, counts: null } });
+    await privateVoter.leave();
+    await waitFor(() => observer.state.players.size === 1);
+    const { room: privateReturn } = await connect(firstToken, privatePoll.id);
+    await waitFor(() => observer.state.players.has(privateReturn.sessionId));
+    expect(observer.state.players.get(privateReturn.sessionId).selected).toBe(-1);
+    expect((await read(firstToken, privatePath)).selected).toBe(0);
+    expect((await vote(secondToken, 0)).status).toBe(200);
+    expect((await vote(secondToken, null)).status).toBe(200);
+    expect((await vote(firstToken, 1)).status).toBe(200);
+    await command("lock", undefined, privatePath);
+    expect(await read(secondToken, privatePath)).toMatchObject({ phase: "finished", score: null, poll: { counts: [0, 1] } });
+    expect((await vote(firstToken, 0)).status).toBe(409);
+    expect((await request(hostToken, privatePath + "/gradebook", "PUT", { include: true })).status).toBe(409);
+    await sql`DELETE FROM classroom.live_activity_choices WHERE activity_id=${privatePoll.id}`;
+    expect((await read(firstToken, privatePath)).poll.counts).toEqual([0, 1]);
+    expect(await read(studentTokens[50], `/student/live-activities?lessonId=${lesson}`)).toContainEqual(expect.objectContaining({ id: privatePoll.id }));
+
+    const walkPoll = await read(hostToken, createPath, "POST", { ...pollBody, pollMode: "walk" });
+    const walkPath = "/live-activities/" + walkPoll.id;
+    const { room: walker } = await connect(firstToken, walkPoll.id);
+    await command("open", undefined, walkPath);
+    await waitFor(() => walker.state?.phase === "answering");
+    expect((await vote(firstToken, 0, walkPath)).status).toBe(409);
+    const pick = (choice: number | null) => walker.send("area", { questionIndex: 0, choice });
+    const ownPlayer = () => walker.state.players.get(walker.sessionId);
+    pick(0);
+    await waitFor(() => ownPlayer()?.selected === 0);
+    pick(null);
+    await waitFor(() => ownPlayer().selected === -1);
+    expect((await read(hostToken, walkPath)).poll.voted).toBe(0);
+    pick(1);
+    await waitFor(() => ownPlayer().selected === 1);
+    await sql`UPDATE classroom.live_activities SET deadline=clock_timestamp()-INTERVAL '1 second' WHERE id=${walkPoll.id}`;
+    pick(0);
+    expect(await read(secondToken, walkPath)).toMatchObject({ phase: "finished", poll: { counts: [0, 1] } });
+
+    const cloud = await read(hostToken, createPath, "POST", { kind: "word-cloud", title: "Synthetic cloud", prompt: "คำสำคัญ", lessonId: lesson });
+    const cloudPath = "/live-activities/" + cloud.id;
+    await connect(firstToken, cloud.id);
+    await connect(secondToken, cloud.id);
+    await command("open", undefined, cloudPath);
+    const firstWord = await read(firstToken, cloudPath + "/ideas", "POST", { text: "  การเขียน   โค้ด  " });
+    expect((await request(firstToken, cloudPath + "/ideas", "POST", { text: "การเขียน โค้ด" })).status).toBe(409);
+    expect((await request(firstToken, cloudPath + "/ideas", "POST", { text: "น".repeat(41) })).status).toBe(422);
+    const otherWord = await read(secondToken, cloudPath + "/ideas", "POST", { text: "การเขียน\tโค้ด" });
+    const accent = await read(firstToken, cloudPath + "/ideas", "POST", { text: "Café" });
+    expect((await request(firstToken, cloudPath + "/ideas", "POST", { text: "CAFE\u0301" })).status).toBe(409);
+    expect((await read(studentTokens[50], cloudPath)).terms).toEqual([]);
+    expect((await read(studentTokens[50], cloudPath)).ideas).toEqual([]);
+    for (const word of [firstWord, otherWord, accent]) await read(hostToken, cloudPath + "/ideas/" + word.id, "PUT", { approved: true });
+    expect(await read(secondToken, cloudPath)).toMatchObject({ terms: [{ text: "การเขียน โค้ด", count: 2 }, { text: "Café", count: 1 }] });
+    expect((await read(studentTokens[50], cloudPath)).ideas.every((idea: { author: string | null }) => idea.author === null)).toBe(true);
+    await command("finish", undefined, cloudPath);
+    await read(hostToken, cloudPath + "/ideas/" + accent.id, "PUT", { approved: false });
+    expect(await read(firstToken, cloudPath)).toMatchObject({ phase: "finished", recap: null, terms: [{ text: "การเขียน โค้ด", count: 2 }] });
+    expect(await read(studentTokens[50], `/student/live-activities?lessonId=${lesson}`)).toContainEqual(expect.objectContaining({ id: cloud.id }));
+
     await deleteSession(firstToken);
     expect((await request(firstToken, discussionPath)).status).toBe(401);
     if (contributor.connection.isOpen) await contributor.leave().catch(() => {});
@@ -212,9 +296,9 @@ test.skipIf(!database)("hosts a 50-student live quiz and moderated discussion", 
     await sql`DELETE FROM classroom.classroom_lessons WHERE classroom_id=${classroom}`;
     await sql`DELETE FROM classroom.lesson_pages WHERE id=${lesson}`;
     await sql`DELETE FROM classroom.quizzes WHERE id=${quiz}`;
-    await sql`DELETE FROM classroom.students WHERE classroom_id=${classroom}`;
+    await sql`DELETE FROM classroom.students WHERE classroom_id IN (${classroom}, ${otherClassroom})`;
     await sql`DELETE FROM classroom.student_accounts WHERE id=ANY(${studentRows.map((row) => row.account_id)}::uuid[])`;
-    await sql`DELETE FROM classroom.classrooms WHERE id=${classroom}`;
+    await sql`DELETE FROM classroom.classrooms WHERE id IN (${classroom}, ${otherClassroom})`;
     await sql`DELETE FROM classroom.teachers WHERE id=ANY(${[teacher, outsider]}::uuid[])`;
     await sql.end();
     await rm(root, { recursive: true, force: true });

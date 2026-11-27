@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import type { ActivityKind, PollMode } from "../../src/live-activity-content";
 import { api } from "./api";
 import "./live-activity.css";
 
@@ -7,7 +8,11 @@ const labels: Record<string, string> = {
   lobby: "รอเริ่ม", answering: "กำลังตอบ", revealed: "เฉลยแล้ว", discussion: "กำลังระดมความคิด", finished: "เสร็จแล้ว", cancelled: "ยกเลิก",
 };
 export const livePhaseLabel = (phase: string) => labels[phase] ?? phase;
-type ActivityLink = { id: string; title: string; kind: "quiz" | "discussion"; phase: string; classroomName?: string; includeInGradebook?: boolean };
+type ActivityLink = { id: string; title: string; kind: ActivityKind; phase: string; classroomName?: string; includeInGradebook?: boolean };
+const kindLabels: Record<ActivityKind, string> = {
+  quiz: "เดินตอบแบบทดสอบ", discussion: "ระดมความคิดและสรุปบทเรียน", poll: "โหวตสด", "word-cloud": "กลุ่มคำสด",
+};
+const historyActions: Record<ActivityKind, string> = { quiz: "ดูคะแนน", discussion: "อ่านสรุป", poll: "ดูผลโหวต", "word-cloud": "ดูกลุ่มคำ" };
 type Named = { id: string; title: string };
 type ActivityList = { activities: ActivityLink[]; quizzes: Named[]; lessons: Named[] };
 const message = (reason: unknown) => reason instanceof Error ? reason.message : "โหลดกิจกรรมสดไม่สำเร็จ";
@@ -43,7 +48,7 @@ export function LiveActivityLinks({ classroomId, lessonId }: { classroomId?: str
     {error && <p className="notice" role="alert">{error}</p>}
     <div>{items.map((activity) => <a key={activity.id} className="live-link" href={liveActivityPath(activity.id)}>
       <strong>{activity.title}</strong><small>{activity.classroomName} · {livePhaseLabel(activity.phase)}</small>
-      <span>{activity.phase === "finished" ? activity.kind === "discussion" ? "อ่านสรุป" : "ดูคะแนน" : "เข้าร่วม"} ↗</span>
+      <span>{activity.phase === "finished" ? historyActions[activity.kind] : "เข้าร่วม"} ↗</span>
     </a>)}</div>
   </section>;
 }
@@ -51,12 +56,14 @@ export function LiveActivityLinks({ classroomId, lessonId }: { classroomId?: str
 export function TeacherLiveActivities({ classroomId }: { classroomId: string }) {
   const path = "/classrooms/" + classroomId + "/live-activities";
   const [data, setData] = useState<ActivityList | null>(null);
-  const [kind, setKind] = useState<"quiz" | "discussion">("quiz");
+  const [kind, setKind] = useState<ActivityKind>("quiz");
   const [quizId, setQuizId] = useState("");
   const [lessonId, setLessonId] = useState("");
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
   const [seconds, setSeconds] = useState("30");
+  const [pollMode, setPollMode] = useState<PollMode>("private");
+  const [pollChoices, setPollChoices] = useState(["", ""]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [retry, setRetry] = useState(0);
@@ -74,8 +81,9 @@ export function TeacherLiveActivities({ classroomId }: { classroomId: string }) 
     setError(""); setBusy(true);
     try {
       const { id } = await api<{ id: string }>(path, { method: "POST", body: JSON.stringify({
-        kind, title, quizId: kind === "quiz" ? quizId : undefined, prompt: kind === "discussion" ? prompt : undefined,
-        lessonId: lessonId || undefined, questionSeconds: kind === "quiz" ? Number(seconds) : undefined,
+        kind, title, quizId: kind === "quiz" ? quizId : undefined, prompt: kind === "quiz" ? undefined : prompt,
+        lessonId: lessonId || undefined, questionSeconds: kind === "quiz" || kind === "poll" ? Number(seconds) : undefined,
+        ...(kind === "poll" && { pollMode, pollChoices }),
       }) });
       window.location.assign(liveActivityPath(id));
     } catch (reason) { setError(message(reason)); }
@@ -84,22 +92,38 @@ export function TeacherLiveActivities({ classroomId }: { classroomId: string }) 
 
   const active = data?.activities.find((activity) => activity.phase !== "finished" && activity.phase !== "cancelled");
   return <section className="panel live-links">
-    <header className="panel-heading"><div><h2>กิจกรรมสด</h2><p className="muted">เปิดห้องให้ผู้เรียนใช้ตัวละครเดินตอบคำถามหรือร่วมกันระดมความคิด</p></div></header>
+    <header className="panel-heading"><div><h2>กิจกรรมสด</h2></div></header>
     {error && <p className="notice" role="alert">{error} <button className="text-button" onClick={() => setRetry((value) => value + 1)}>โหลดรายการอีกครั้ง</button></p>}
     {!data ? !error && <p>กำลังโหลดกิจกรรม…</p> : active
       ? <a className="button button-primary" href={liveActivityPath(active.id)}>กลับเข้ากิจกรรม {active.title} ↗</a>
       : <form className="form-stack live-create" onSubmit={create}>
-        <label>ประเภทกิจกรรม<select value={kind} onChange={(event) => setKind(event.target.value === "discussion" ? "discussion" : "quiz")}>
-          <option value="quiz">เดินตอบแบบทดสอบ</option><option value="discussion">ระดมความคิดและสรุปบทเรียน</option>
+        <label>ประเภทกิจกรรม<select value={kind} onChange={(event) => setKind(event.target.value as ActivityKind)}>
+          {Object.entries(kindLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </select></label>
         {kind === "quiz" && <label>แบบทดสอบที่เผยแพร่แล้ว<select required value={quizId} onChange={(event) => setQuizId(event.target.value)}>
           <option value="">{data.quizzes.length ? "เลือกแบบทดสอบ" : "ยังไม่มีแบบทดสอบที่เผยแพร่แล้ว"}</option>
           {data.quizzes.map((quiz) => <option key={quiz.id} value={quiz.id}>{quiz.title}</option>)}
         </select></label>}
         <label>{kind === "quiz" ? "ชื่อกิจกรรม (ไม่บังคับ)" : "ชื่อกิจกรรม"}
-          <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={120} required={kind === "discussion"}/></label>
-        {kind === "quiz" ? <label>เวลาต่อข้อ (วินาที)<input value={seconds} type="number" min={10} max={120} required onChange={(event) => setSeconds(event.target.value)}/></label>
-          : <label>คำถามชวนคิด<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={1000} required/></label>}
+          <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={120} required={kind !== "quiz"}/></label>
+        {kind !== "quiz" && <label>{kind === "poll" ? "คำถามโหวต" : "คำถามชวนคิด"}<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={1000} required/></label>}
+        {(kind === "quiz" || kind === "poll") && <label>{kind === "poll" ? "เวลาโหวต (วินาที)" : "เวลาต่อข้อ (วินาที)"}
+          <input value={seconds} type="number" min={10} max={120} required onChange={(event) => setSeconds(event.target.value)}/></label>}
+        {kind === "poll" && <>
+          <label>วิธีโหวต<select value={pollMode} onChange={(event) => setPollMode(event.target.value as PollMode)}>
+            <option value="private">กดปุ่มส่วนตัว</option><option value="walk">เดินเข้าพื้นที่โหวต</option>
+          </select></label>
+          <p className="muted">{pollMode === "private" ? "ทุกคนเห็นผลรวมเมื่อปิดโหวต" : "ทุกคนเห็นตัวละครที่เดินเข้าพื้นที่แต่ละตัวเลือก"}</p>
+          <fieldset className="live-poll-setup"><legend>ตัวเลือกโหวต</legend>
+            {pollChoices.map((choice, index) => <div className="live-poll-input" key={index}>
+              <label>ตัวเลือก {index + 1}<input value={choice} maxLength={120} required
+                onChange={(event) => setPollChoices((choices) => choices.map((value, position) => position === index ? event.target.value : value))}/></label>
+              {pollChoices.length > 2 && <button type="button" className="text-button" aria-label={`ลบตัวเลือก ${index + 1}`}
+                onClick={() => setPollChoices((choices) => choices.filter((_, position) => position !== index))}>ลบ</button>}
+            </div>)}
+            {pollChoices.length < 8 && <button type="button" className="text-button" onClick={() => setPollChoices((choices) => [...choices, ""])}>＋ เพิ่มตัวเลือก</button>}
+          </fieldset>
+        </>}
         <label>เชื่อมกับบทเรียน<select value={lessonId} onChange={(event) => setLessonId(event.target.value)}>
           <option value="">ไม่เชื่อมบทเรียน</option>{data.lessons.map((lesson) => <option key={lesson.id} value={lesson.id}>{lesson.title}</option>)}
         </select></label>

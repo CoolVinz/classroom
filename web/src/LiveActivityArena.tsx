@@ -22,9 +22,9 @@ function Avatar({ player, own }: { player: Player; own: boolean }) {
   </div>;
 }
 
-export function LiveActivityArena({ id, path, questionIndex, answering, teacher, choices, correctChoiceId, selected }: {
+export function LiveActivityArena({ id, path, questionIndex, answering, teacher, choices, correctChoiceId, selected, walkPoll = false }: {
   id: string; path: string; questionIndex: number; answering: boolean; teacher: boolean; choices: ArenaChoice[];
-  correctChoiceId?: string | null; selected: number | null;
+  correctChoiceId?: string | null; selected: number | null; walkPoll?: boolean;
 }) {
   const connection = useRef<Room<ArenaState> | null>(null);
   const currentQuestion = useRef(questionIndex);
@@ -140,7 +140,7 @@ export function LiveActivityArena({ id, path, questionIndex, answering, teacher,
     setThumb(axis.current);
   }
 
-  function enter(choice: number) {
+  function enter(choice: number | null) {
     const room = connection.current;
     if (room?.connection.isOpen && room.state.phase === "answering" && room.state.questionIndex === questionIndex) {
       setError("");
@@ -174,6 +174,7 @@ export function LiveActivityArena({ id, path, questionIndex, answering, teacher,
       {correctChoiceId === choice.id && <span className="live-correct-label">✓ คำตอบที่ถูก</span>}
     </button>)}</div>}
     {!teacher && answering && <p className="muted" role="status">{currentPick === null ? "เดินหรือเลือกปุ่มเพื่อเข้าพื้นที่คำตอบ" : `อยู่ในพื้นที่ ${String.fromCharCode(65 + currentPick)} · เปลี่ยนได้จนกว่าจะล็อก`}</p>}
+    {walkPoll && !teacher && answering && ownId && currentPick !== null && <button type="button" className="text-button" onClick={() => enter(null)}>ล้างโหวต</button>}
     {error && <p className="notice" role="alert">{error}{!ownId && <> <button className="text-button" onClick={() => setRetry((value) => value + 1)}>ลองเชื่อมต่ออีกครั้ง</button></>}</p>}
   </section>;
 }

@@ -27,7 +27,10 @@ const accessQuery = `
 const activeQuery = `
   SELECT l.classroom_id AS "classroomId", l.question_index AS "questionIndex", l.revision,
     CASE WHEN l.phase='answering' AND l.deadline <= clock_timestamp() THEN 'revealed' ELSE l.phase END AS phase,
-    CASE WHEN l.question_index < 0 THEN 0 ELSE COALESCE(jsonb_array_length(l.content_snapshot->'questions'->l.question_index->'choices'),0) END AS "choiceCount"
+    CASE WHEN l.question_index < 0 THEN 0
+      WHEN l.kind='poll' AND l.poll_snapshot->>'mode'='walk' THEN jsonb_array_length(l.poll_snapshot->'choices')
+      WHEN l.kind='quiz' THEN jsonb_array_length(l.content_snapshot->'questions'->l.question_index->'choices')
+      ELSE 0 END AS "choiceCount"
   FROM classroom.live_activities l JOIN classroom.classrooms c ON c.id=l.classroom_id
   LEFT JOIN classroom.quizzes q ON q.id=l.quiz_id
   WHERE l.id=$1 AND c.archived_at IS NULL AND q.trashed_at IS NULL AND l.phase NOT IN ('finished','cancelled')`;
@@ -85,7 +88,7 @@ export function liveActivityRoom(pool) {
         if (member.studentId) {
           await db.query(`INSERT INTO classroom.live_activity_participants (activity_id,classroom_id,student_id)
             VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, [this.activityId, activity.classroomId, member.studentId]);
-          if (activity.questionIndex >= 0) {
+          if (activity.choiceCount > 0) {
             const { rows: [choice] } = await db.query(`SELECT choice_index AS choice FROM classroom.live_activity_choices
               WHERE activity_id=$1 AND student_id=$2 AND question_index=$3`, [this.activityId, member.studentId, activity.questionIndex]);
             member.selected = choice?.choice ?? -1;
@@ -108,7 +111,7 @@ export function liveActivityRoom(pool) {
       player.displayName = member.displayName;
       player.role = member.role;
       applyAppearance(player, member.appearance ?? defaultAppearance);
-      player.selected = member.questionIndex === this.state.questionIndex ? member.selected ?? -1 : -1;
+      player.selected = this.choiceCount > 0 && member.questionIndex === this.state.questionIndex ? member.selected ?? -1 : -1;
       Object.assign(player, player.selected >= 0 ? this.choiceSpot(player.selected, member.seat) : this.spawn(member.seat));
       this.state.players.set(client.sessionId, player);
     }
@@ -165,18 +168,29 @@ export function liveActivityRoom(pool) {
       const player = this.state.players.get(client.sessionId);
       const now = performance.now();
       const index = this.state.questionIndex;
-      if (!member || !player || !message || message.questionIndex !== index || member.moving) return;
-      if (direct ? now - (member.lastArea ?? -Infinity) < 100 : now - (member.lastStep ?? -Infinity) < 65) return;
+      if (!member || !player || !message || message.questionIndex !== index) return;
       const phase = this.state.phase;
-      if (direct && (member.role !== "student" || phase !== "answering" || !Number.isInteger(message.choice)
-        || message.choice < 0 || message.choice >= this.choiceCount)) return;
+      if (direct && (member.role !== "student" || phase !== "answering" || this.choiceCount === 0
+        || (message.choice !== null && (!Number.isInteger(message.choice) || message.choice < 0 || message.choice >= this.choiceCount)))) return;
+      if (direct) {
+        const wait = 100 - (now - (member.lastArea ?? -Infinity));
+        if (member.moving || wait > 0) {
+          member.pendingArea = message;
+          member.areaTimer ??= setTimeout(() => {
+            member.areaTimer = undefined;
+            if (member.pendingArea) this.move(client, member.pendingArea, true);
+          }, Math.max(25, Math.ceil(wait)));
+          return;
+        }
+        member.pendingArea = undefined;
+      } else if (member.moving || now - (member.lastStep ?? -Infinity) < 65) return;
       const { dx, dy } = message;
       if (!direct && (![dx, dy].every(Number.isFinite) || Math.abs(dx) > 1 || Math.abs(dy) > 1)) return;
       const dt = Math.min(0.12, (now - (member.lastStep ?? now - 85)) / 1000);
       if (direct) member.lastArea = now;
       else member.lastStep = now;
       const scale = 32 * dt / Math.max(1, Math.hypot(dx, dy));
-      const point = direct ? this.choiceSpot(message.choice, member.seat) : {
+      const point = direct ? (message.choice === null ? this.spawn(member.seat) : this.choiceSpot(message.choice, member.seat)) : {
         x: Math.min(activityWidth - 2, Math.max(2, player.x + dx * scale)),
         y: Math.min(activityHeight - 3, Math.max(3, player.y + dy * scale)),
       };
@@ -200,8 +214,9 @@ export function liveActivityRoom(pool) {
           SELECT l.id, l.deadline FROM classroom.live_activities l JOIN classroom.classrooms c ON c.id=l.classroom_id
           JOIN classroom.students s ON s.classroom_id=c.id AND s.id=$3
           JOIN classroom.student_sessions ss ON ss.account_id=s.account_id AND ss.token_hash=$5
-          JOIN classroom.quizzes q ON q.id=l.quiz_id
+          LEFT JOIN classroom.quizzes q ON q.id=l.quiz_id
           WHERE l.id=$1 AND l.question_index=$2 AND l.phase='answering' AND c.archived_at IS NULL
+            AND (l.kind='quiz' OR (l.kind='poll' AND l.poll_snapshot->>'mode'='walk'))
             AND s.archived_at IS NULL AND q.trashed_at IS NULL AND ss.expires_at > clock_timestamp() FOR SHARE OF l,c,s
         )
         INSERT INTO classroom.live_activity_choices(activity_id, student_id, question_index, choice_index)
@@ -212,6 +227,7 @@ export function liveActivityRoom(pool) {
     }
 
     onLeave(client) {
+      clearTimeout(this.members.get(client.sessionId)?.areaTimer);
       this.members.delete(client.sessionId);
       this.state.players.delete(client.sessionId);
     }

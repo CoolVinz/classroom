@@ -5,18 +5,21 @@ import { readSessionUser, requireActor, requireStudent } from "../auth/session";
 import { sql } from "../db/client";
 import { storedFilePath } from "../file-storage";
 import { HttpError } from "../http-error";
+import { termKey, wordCloud, type ActivityKind, type PollSnapshot } from "../live-activity-content";
 import { gradeQuiz, referencedQuizImages, studentQuizQuestions, type QuizAnswers, type QuizContent } from "../quiz-core";
 import { checkRequestOrigin, cleanText } from "../security";
 
 type Phase = "lobby" | "answering" | "revealed" | "discussion" | "finished" | "cancelled";
 type Activity = {
   id: string; classroomId: string; classroomName: string; quizId: string | null; ownerId: string;
-  title: string; kind: "quiz" | "discussion"; phase: Phase; questionIndex: number; questionSeconds: number;
+  title: string; kind: ActivityKind; phase: Phase; questionIndex: number; questionSeconds: number;
   revision: number; deadline: Date | null; prompt: string | null; recap: string | null;
   includeInGradebook: boolean; content: QuizContent | null; serverNow: number;
+  poll: PollSnapshot | null; pollCounts: number[] | null;
 };
 type Viewer = { activity: Activity; teacher: boolean; studentId: string | null; accountId: string };
 type Pick = { studentId: string; questionIndex: number; choiceIndex: number | null };
+type Idea = { id: string; text: string; approved: boolean; mine: boolean | null; author: string | null };
 const uuid = t.String({ format: "uuid" });
 const idParams = t.Object({ id: uuid });
 const classParams = t.Object({ classroomId: uuid });
@@ -37,6 +40,7 @@ async function getViewer(request: Request, id: string, db: postgres.ISql = sql, 
       c.owner_id AS "ownerId", l.quiz_id AS "quizId", l.title, l.kind, l.phase, l.question_index AS "questionIndex",
       l.question_seconds AS "questionSeconds", l.deadline, l.prompt, l.recap, l.revision,
       l.include_in_gradebook AS "includeInGradebook", l.content_snapshot AS content,
+      l.poll_snapshot AS poll, l.poll_counts AS "pollCounts",
       (extract(epoch FROM clock_timestamp()) * 1000)::float8 AS "serverNow"
     FROM classroom.live_activities l JOIN classroom.classrooms c ON c.id=l.classroom_id AND c.archived_at IS NULL
     LEFT JOIN classroom.quizzes q ON q.id=l.quiz_id
@@ -53,9 +57,22 @@ async function getViewer(request: Request, id: string, db: postgres.ISql = sql, 
   return { activity, teacher: false, studentId: student.id, accountId: actor.id };
 }
 
+async function closePoll(activity: Activity, poll: PollSnapshot, db: postgres.ISql, expiredOnly = false) {
+  const picks = await db<{ index: number; count: number }[]>`SELECT choice_index AS index, COUNT(*)::int AS count
+    FROM classroom.live_activity_choices WHERE activity_id=${activity.id} AND question_index=0
+      AND choice_index IS NOT NULL GROUP BY choice_index`;
+  const counts = poll.choices.map((_, index) => picks.find((pick) => pick.index === index)?.count ?? 0);
+  const [closed] = await db<{ revision: number }[]>`UPDATE classroom.live_activities
+    SET phase='finished', deadline=NULL, poll_counts=${counts}::integer[], revision=revision+1
+    WHERE id=${activity.id} AND phase='answering' AND revision=${activity.revision}
+      AND (NOT ${expiredOnly} OR deadline <= clock_timestamp()) RETURNING revision`;
+  if (closed) Object.assign(activity, { phase: "finished", deadline: null, revision: closed.revision, pollCounts: counts });
+}
+
 async function expireQuestion(viewer: Viewer, db: postgres.ISql) {
   const { activity } = viewer;
   if (activity.phase !== "answering") return;
+  if (activity.poll) return closePoll(activity, activity.poll, db, true);
   const [expired] = await db<{ revision: number }[]>`UPDATE classroom.live_activities
     SET phase='revealed', deadline=NULL, revision=revision+1
     WHERE id=${activity.id} AND phase='answering' AND revision=${activity.revision}
@@ -74,21 +91,23 @@ function answersFor(content: QuizContent, picks: Pick[]): QuizAnswers {
   }));
 }
 
-async function activityView({ activity: { content, ownerId: _owner, quizId: _quiz, ...activity }, teacher, studentId }: Viewer) {
+async function activityView({ activity: { content, poll, pollCounts, ownerId: _owner, quizId: _quiz, ...activity }, teacher, studentId }: Viewer) {
   const { id, phase, questionIndex } = activity;
-  const [picks, ideas, joined] = await Promise.all([
-    content && questionIndex >= 0 ? sql<Pick[]>`SELECT student_id AS "studentId", question_index AS "questionIndex", choice_index AS "choiceIndex"
+  const [picks, ideas, joined, turnout] = await Promise.all([
+    (poll || content && questionIndex >= 0) ? sql<Pick[]>`SELECT student_id AS "studentId", question_index AS "questionIndex", choice_index AS "choiceIndex"
       FROM classroom.live_activity_choices WHERE activity_id=${id}
-        AND (${teacher} OR student_id=${studentId} OR (question_index=${questionIndex} AND ${phase === "revealed"}))` : [],
-    activity.kind === "discussion" ? sql`SELECT i.id, i.text, i.approved, i.student_id=${studentId} AS "mine",
+        AND (student_id=${studentId} OR (${!!content} AND (${teacher} OR (question_index=${questionIndex} AND ${phase === "revealed"}))))` : [],
+    (activity.kind === "discussion" || activity.kind === "word-cloud") ? sql<Idea[]>`SELECT i.id, i.text, i.approved, i.student_id=${studentId} AS "mine",
         CASE WHEN ${teacher} THEN s.display_name END AS "author"
       FROM classroom.live_activity_ideas i JOIN classroom.students s ON s.id=i.student_id
       WHERE i.activity_id=${id} AND (${teacher} OR i.approved OR i.student_id=${studentId})
       ORDER BY i.created_at, i.id` : [],
     studentId ? sql`SELECT student_id FROM classroom.live_activity_participants WHERE activity_id=${id} AND student_id=${studentId}` : [],
+    poll && teacher && phase === "answering" ? sql<{ count: number }[]>`SELECT COUNT(*)::int AS count
+      FROM classroom.live_activity_choices WHERE activity_id=${id} AND question_index=0 AND choice_index IS NOT NULL` : [],
   ]);
   const question = content?.questions[questionIndex];
-  const selected = picks.find((pick) => pick.studentId === studentId && pick.questionIndex === questionIndex)?.choiceIndex ?? null;
+  const selected = picks.find((pick) => pick.studentId === studentId && pick.questionIndex === (poll ? 0 : questionIndex))?.choiceIndex ?? null;
   const ownLockedPicks = picks.filter((pick) => pick.studentId === studentId
     && (pick.questionIndex < questionIndex || (phase === "revealed" || phase === "finished") && pick.questionIndex === questionIndex));
   const score = content && studentId && joined.length && phase !== "cancelled"
@@ -96,6 +115,8 @@ async function activityView({ activity: { content, ownerId: _owner, quizId: _qui
   const remainingQuestion = question && !ended(phase);
   return {
     ...activity, teacher, joined: Boolean(joined.length), selected,
+    poll: poll && phase !== "lobby" && phase !== "cancelled" ? { ...poll, counts: pollCounts, voted: turnout[0]?.count ?? null } : null,
+    terms: activity.kind === "word-cloud" ? wordCloud(ideas) : [],
     questionCount: content?.questions.length ?? 0,
     maxScore: content?.questions.reduce((total, item) => total + item.points, 0) ?? 0, score, ideas,
     question: remainingQuestion ? studentQuizQuestions({ description: "", questions: [question] }, {}, false)[0] : null,
@@ -144,19 +165,29 @@ export const liveActivityRoutes = new Elysia({ prefix: "/api" })
       }
       await ownedClassroom(classroomId, actor.id, tx);
       const title = cleanText(body.title?.trim() || quiz?.title || "", 120);
-      const prompt = body.kind === "discussion" ? cleanText(body.prompt ?? "", 1000) : null;
+      const prompt = body.kind !== "quiz" ? cleanText(body.prompt ?? "", 1000) : null;
+      let poll: PollSnapshot | null = null;
+      if (body.kind === "poll") {
+        const choices = body.pollChoices?.map((choice) => cleanText(choice, 120));
+        if (!choices || new Set(choices.map(termKey)).size !== choices.length) {
+          throw new HttpError(422, "ระบุตัวเลือกที่แตกต่างกัน 2–8 ข้อ");
+        }
+        poll = { mode: body.pollMode ?? "private", choices };
+      }
       const [activity] = await tx`INSERT INTO classroom.live_activities
-        (classroom_id, quiz_id, lesson_id, title, kind, content_snapshot, prompt, question_seconds)
+        (classroom_id, quiz_id, lesson_id, title, kind, content_snapshot, prompt, question_seconds, poll_snapshot)
         VALUES (${classroomId}, ${quiz ? body.quizId! : null}, ${body.lessonId ?? null}, ${title}, ${body.kind},
-          ${quiz ? tx.json(quiz.content) : null}, ${prompt}, ${body.questionSeconds ?? 30})
+          ${quiz ? tx.json(quiz.content) : null}, ${prompt}, ${body.questionSeconds ?? 30}, ${poll ? tx.json(poll) : null})
         ON CONFLICT (classroom_id) WHERE phase NOT IN ('finished','cancelled') DO NOTHING RETURNING id`;
       if (!activity) throw new HttpError(409, "ห้องเรียนนี้มีกิจกรรมสดอยู่แล้ว");
       return activity;
     });
   }, { params: classParams, body: t.Object({
-    kind: t.Union([t.Literal("quiz"), t.Literal("discussion")]), title: t.Optional(t.String({ maxLength: 120 })),
+    kind: t.Union([t.Literal("quiz"), t.Literal("discussion"), t.Literal("poll"), t.Literal("word-cloud")]), title: t.Optional(t.String({ maxLength: 120 })),
     quizId: t.Optional(uuid), lessonId: t.Optional(uuid), prompt: t.Optional(t.String({ maxLength: 1000 })),
     questionSeconds: t.Optional(t.Integer({ minimum: 10, maximum: 120 })),
+    pollMode: t.Optional(t.Union([t.Literal("private"), t.Literal("walk")])),
+    pollChoices: t.Optional(t.Array(t.String({ minLength: 1, maxLength: 120 }), { minItems: 2, maxItems: 8 })),
   }) })
   .get("/student/live-activities", async ({ request, query }) => {
     const actor = await requireStudent(request);
@@ -165,7 +196,7 @@ export const liveActivityRoutes = new Elysia({ prefix: "/api" })
       JOIN classroom.students s ON s.classroom_id=c.id AND s.archived_at IS NULL AND s.account_id=${actor.id}
       LEFT JOIN classroom.quizzes q ON q.id=l.quiz_id
       WHERE q.trashed_at IS NULL AND l.phase <> 'cancelled'
-        AND (l.phase <> 'finished' OR l.kind='discussion' OR EXISTS (
+        AND (l.phase <> 'finished' OR l.kind<>'quiz' OR EXISTS (
           SELECT 1 FROM classroom.live_activity_participants p WHERE p.activity_id=l.id AND p.student_id=s.id))
         AND (${query.classroomId ?? null}::uuid IS NULL OR l.classroom_id=${query.classroomId ?? null})
         AND (${query.lessonId ?? null}::uuid IS NULL OR (l.lesson_id=${query.lessonId ?? null} AND EXISTS (
@@ -212,13 +243,18 @@ export const liveActivityRoutes = new Elysia({ prefix: "/api" })
       const { id, phase, content, questionIndex } = activity;
       if (body.action === "cancel") {
         await tx`UPDATE classroom.live_activities SET phase='cancelled', deadline=NULL, revision=revision+1 WHERE id=${id}`;
-      } else if (body.action === "open" && phase === "lobby" && activity.kind === "discussion") {
+      } else if (body.action === "open" && phase === "lobby" && activity.poll) {
+        // The room index stays at the lobby for private ballots, even during a mixed-version rollout.
+        await tx`UPDATE classroom.live_activities SET phase='answering', question_index=${activity.poll.mode === "walk" ? 0 : -1},
+          deadline=clock_timestamp() + question_seconds * INTERVAL '1 second', revision=revision+1 WHERE id=${id}`;
+      } else if (body.action === "open" && phase === "lobby" && (activity.kind === "discussion" || activity.kind === "word-cloud")) {
         await tx`UPDATE classroom.live_activities SET phase='discussion', revision=revision+1 WHERE id=${id}`;
       } else if (body.action === "next" && (phase === "lobby" || phase === "revealed") && content && questionIndex + 1 < content.questions.length) {
         await tx`UPDATE classroom.live_activities SET phase='answering', question_index=question_index+1,
           deadline=clock_timestamp() + question_seconds * INTERVAL '1 second', revision=revision+1 WHERE id=${id}`;
       } else if (body.action === "lock" && phase === "answering") {
-        await tx`UPDATE classroom.live_activities SET phase='revealed', deadline=NULL, revision=revision+1 WHERE id=${id}`;
+        if (activity.poll) await closePoll(activity, activity.poll, tx);
+        else await tx`UPDATE classroom.live_activities SET phase='revealed', deadline=NULL, revision=revision+1 WHERE id=${id}`;
       } else if (body.action === "finish" && phase === "revealed" && content && questionIndex === content.questions.length - 1) {
         const participants = await tx<{ studentId: string }[]>`SELECT student_id AS "studentId" FROM classroom.live_activity_participants WHERE activity_id=${id}`;
         const picks = await tx<Pick[]>`SELECT student_id AS "studentId", question_index AS "questionIndex", choice_index AS "choiceIndex"
@@ -234,8 +270,8 @@ export const liveActivityRoutes = new Elysia({ prefix: "/api" })
         await tx`UPDATE classroom.live_activities SET phase='finished', revision=revision+1 WHERE id=${id}`;
       } else if (body.action === "finish" && phase === "discussion") {
         const recap = body.recap?.trim();
-        if (!recap) throw new HttpError(422, "เขียนสรุปบทเรียนก่อนเผยแพร่");
-        await tx`UPDATE classroom.live_activities SET phase='finished', recap=${recap}, revision=revision+1 WHERE id=${id}`;
+        if (!recap && activity.kind === "discussion") throw new HttpError(422, "เขียนสรุปบทเรียนก่อนเผยแพร่");
+        await tx`UPDATE classroom.live_activities SET phase='finished', recap=${recap || null}, revision=revision+1 WHERE id=${id}`;
       } else {
         throw conflict();
       }
@@ -245,6 +281,25 @@ export const liveActivityRoutes = new Elysia({ prefix: "/api" })
     action: t.Union([t.Literal("open"), t.Literal("next"), t.Literal("lock"), t.Literal("finish"), t.Literal("cancel")]),
     revision: t.Integer({ minimum: 0 }), recap: t.Optional(t.String({ maxLength: 4000 })),
   }) })
+  .put("/live-activities/:id/vote", async ({ params, body, request }) => {
+    checkRequestOrigin(request);
+    return sql.begin(async (tx) => {
+      const { activity, studentId } = await getViewer(request, params.id, tx, true);
+      if (!studentId || activity.poll?.mode !== "private" || activity.phase !== "answering") throw conflict();
+      if (body.choiceIndex !== null && body.choiceIndex >= activity.poll.choices.length) {
+        throw new HttpError(422, "ไม่พบตัวเลือกนี้");
+      }
+      const [joined] = await tx`SELECT 1 FROM classroom.live_activity_participants WHERE activity_id=${activity.id} AND student_id=${studentId}`;
+      if (!joined) throw new HttpError(403, "เข้าห้องกิจกรรมก่อนโหวต");
+      const [saved] = await tx`INSERT INTO classroom.live_activity_choices (activity_id, student_id, question_index, choice_index)
+        SELECT id, ${studentId}::uuid, 0, ${body.choiceIndex}::integer FROM classroom.live_activities
+        WHERE id=${activity.id} AND deadline > clock_timestamp()
+        ON CONFLICT (activity_id, student_id, question_index) DO UPDATE SET choice_index=EXCLUDED.choice_index
+        RETURNING choice_index`;
+      if (!saved) throw conflict();
+      return { selected: body.choiceIndex };
+    });
+  }, { params: idParams, body: t.Object({ choiceIndex: t.Nullable(t.Integer({ minimum: 0, maximum: 7 })) }) })
   .post("/live-activities/:id/ideas", async ({ params, body, request }) => {
     checkRequestOrigin(request);
     return sql.begin(async (tx) => {
@@ -252,10 +307,13 @@ export const liveActivityRoutes = new Elysia({ prefix: "/api" })
       if (!studentId || activity.phase !== "discussion") throw conflict();
       const [joined] = await tx`SELECT student_id FROM classroom.live_activity_participants WHERE activity_id=${activity.id} AND student_id=${studentId}`;
       if (!joined) throw new HttpError(403, "เข้าห้องกิจกรรมก่อนส่งความคิด");
-      const [usage] = await tx<{ count: number }[]>`SELECT count(*)::int AS count FROM classroom.live_activity_ideas WHERE activity_id=${activity.id} AND student_id=${studentId}`;
-      if (usage.count >= 3) throw new HttpError(409, "ส่งได้ไม่เกิน 3 ความคิด");
+      const entries = await tx<{ text: string }[]>`SELECT text FROM classroom.live_activity_ideas WHERE activity_id=${activity.id} AND student_id=${studentId}`;
+      if (entries.length >= 3) throw new HttpError(409, "ส่งได้ไม่เกิน 3 รายการ");
+      const cloud = activity.kind === "word-cloud";
+      const text = cleanText(body.text, cloud ? 40 : 500);
+      if (cloud && entries.some((entry) => termKey(entry.text) === termKey(text))) throw new HttpError(409, "ส่งคำหรือวลีนี้แล้ว");
       const [idea] = await tx`INSERT INTO classroom.live_activity_ideas (activity_id, student_id, text)
-        VALUES (${activity.id}, ${studentId}, ${cleanText(body.text, 500)}) RETURNING id`;
+        VALUES (${activity.id}, ${studentId}, ${text}) RETURNING id`;
       return idea;
     });
   }, { params: idParams, body: t.Object({ text: t.String({ maxLength: 500 }) }) })
@@ -264,7 +322,8 @@ export const liveActivityRoutes = new Elysia({ prefix: "/api" })
     await requireActor(request);
     return sql.begin(async (tx) => {
       const { activity, teacher } = await getViewer(request, params.id, tx, true);
-      if (!teacher || !["discussion", "finished"].includes(activity.phase) || activity.kind !== "discussion") throw conflict();
+      if (!teacher || !["discussion", "finished"].includes(activity.phase)
+        || (activity.kind !== "discussion" && activity.kind !== "word-cloud")) throw conflict();
       const [idea] = await tx`UPDATE classroom.live_activity_ideas SET approved=${body.approved}
         WHERE id=${params.ideaId} AND activity_id=${activity.id} RETURNING id`;
       if (!idea) throw unavailable();

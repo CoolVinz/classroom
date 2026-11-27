@@ -1000,7 +1000,7 @@ class ClassroomGallery extends Room {
 const gameServer = new Server({
   express: (app) => {
     app.get("/__gallery_protocol", (_request, response) => response.type("text").send("patrol-v2"));
-    app.get("/__live_activity_protocol", (_request, response) => response.type("text").send("live-activity-v1"));
+    app.get("/__live_activity_protocol", (_request, response) => response.type("text").send("live-activity-v2"));
   },
 });
 gameServer.define("classroom", ClassroomGallery).filterBy(["classroomId"]);
