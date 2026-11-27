@@ -312,11 +312,16 @@ test.skipIf(!database)("checks gallery admission, rides, and patrol in a live ro
         (${other},${otherAssignment},${otherMember},'submission','other.pdf',${randomUUID()},'application/pdf',12,${student})`;
     expect((await request(teacherToken, "/access/" + peerMember, "PUT", { assignmentId: assignment, approved: true })).status).toBe(200);
     expect((await request(teacherToken, "", "PUT", { enabled: true }, other)).status).toBe(200);
+    const peerWork = randomUUID();
+    await sql`INSERT INTO classroom.files(id,classroom_id,assignment_id,student_id,kind,original_name,storage_name,media_type,size_bytes,submitted_by_account_id)
+      VALUES(${peerWork},${classroom},${assignment},${peerMember},'model','peer.stl',${randomUUID()},'model/stl',12,${peer})`;
+    const votePath = "/files/" + peerWork + "/like";
+    expect(await (await request(studentToken, votePath, "PUT")).json()).toMatchObject({ pointsDelta: 2 });
     const peerToken = await createStudentSession(peer);
     const otherRoom = await join(studentToken, other), peerRoom = await join(peerToken);
     const issued = await sql<{ count: number }[]>`SELECT COUNT(*)::int AS count FROM classroom.gallery_point_claims WHERE account_id=${student}`;
     await sql`INSERT INTO classroom.gallery_point_claims(gift_id,account_id,classroom_id)
-      SELECT gen_random_uuid(), ${student}::uuid, ${classroom}::uuid FROM generate_series(1,16-${issued[0]!.count})
+      SELECT gen_random_uuid(), ${student}::uuid, ${classroom}::uuid FROM generate_series(1,14-${issued[0]!.count})
       UNION ALL SELECT gen_random_uuid(), ${peer}::uuid, ${classroom}::uuid FROM generate_series(1,10)`;
     await Promise.all([moveTo(studentRoomAgain, shop.x, shop.z), moveTo(peerRoom, shop.x, shop.z), moveTo(otherRoom, shop.x, shop.z)]);
     const openShop = (room: Room) => command(room, "shop-open", "shop-result");
@@ -342,6 +347,11 @@ test.skipIf(!database)("checks gallery admission, rides, and patrol in a live ro
     }
     expect(await buy(peerRoom, "license", 10)).toMatchObject({ ok: true, wallet: { balance: 0, license: true } });
     expect(await command(otherRoom, "wallet-read", "wallet")).toMatchObject({ wallet: { spells: 0, balance: 0 } });
+    expect(await (await request(studentToken, votePath, "DELETE")).json()).toMatchObject({ pointsDelta: -2, balance: -2 });
+    expect(await command(studentRoomAgain, "wallet-read", "wallet")).toMatchObject({ wallet: { balance: -2, spells: 15, license: true } });
+    await Bun.sleep(220);
+    expect(await buy(otherRoom, "wand", 5)).toMatchObject({ ok: false, message: "แต้มโลกเสมือนไม่พอ", wallet: { balance: -2 } });
+    expect(await (await request(studentToken, votePath, "PUT")).json()).toMatchObject({ pointsDelta: 2, balance: 0 });
     await otherRoom.leave();
     const startRide = (room: Room, requestId = randomUUID()) => command(room, "ride-start", "vehicle-result", { kind: "broom", requestId });
     expect((await startRide(studentRoomAgain)).ok).toBe(false);

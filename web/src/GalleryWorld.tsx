@@ -90,6 +90,9 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
   const drivingRef = useRef("");
   const drivingKindRef = useRef<VehicleKind | "">("");
   const [wallet, setWallet] = useState<Wallet | null>(null);
+  const [votePending, setVotePending] = useState(false);
+  const [voteNotice, setVoteNotice] = useState<{ fileId: string; text: string } | null>(null);
+  const voteInFlight = useRef<AbortController | null>(null);
   const [activity, setActivity] = useState<Activity>("");
   const [activityPanel, setActivityPanel] = useState<"" | "shop" | "depot">("");
   const activityPanelRef = useRef(false);
@@ -225,6 +228,8 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     setWanted(null); setActiveMenu(null);
     window.clearTimeout(activityTimeout.current);
     setWallet(null); setShopPrices(null); setQuote(null); setActivityPanel(""); setActivity(""); setActivityMessage(""); setActivityPending(false);
+    setVotePending(false); setVoteNotice(null);
+    return () => { voteInFlight.current?.abort(); voteInFlight.current = null; };
   }, [classroomId]);
   customizerOpenRef.current = customizerOpen;
   menuOpenRef.current = menuOpen;
@@ -1304,13 +1309,28 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
     catch (reason) { setError(reason instanceof Error ? reason.message : "เปลี่ยนการแสดงโมเดลไม่สำเร็จ"); }
   }
   async function toggleVote(fileId: string, undo: boolean) {
+    if (voteInFlight.current) return;
+    const controller = new AbortController();
+    voteInFlight.current = controller;
+    const { signal } = controller;
+    setVotePending(true); setVoteNotice(null); setError("");
     try {
-      const result = await api<{ likes: number; likedByMe: boolean }>(apiPath(classroomId, `/files/${fileId}/like`), { method: undo ? "DELETE" : "PUT" });
+      const result = await api<{ likes: number; likedByMe: boolean; pointsDelta?: number; balance?: number }>(apiPath(classroomId, `/files/${fileId}/like`), { method: undo ? "DELETE" : "PUT", signal });
+      if (signal.aborted) return;
       setModels((all) => all.map((item) => item.id === fileId ? { ...item, likes: result.likes, likedByMe: result.likedByMe } : item));
       setSelected((item) => item?.id === fileId ? { ...item, likes: result.likes, likedByMe: result.likedByMe } : item);
-      try { setVoteSummary(await api<VoteSummary>(apiPath(classroomId, "/votes"))); }
-      catch { setError("บันทึกโหวตแล้ว แต่โหลดยอดล่าสุดไม่สำเร็จ"); }
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "บันทึกการถูกใจไม่สำเร็จ"); }
+      const { balance, pointsDelta } = result;
+      if (typeof balance === "number") setWallet((wallet) => ({ spells: 0, license: false, ...wallet, balance }));
+      const message = undo ? "ยกเลิกโหวตแล้ว" : "บันทึกโหวตแล้ว";
+      setVoteNotice({ fileId, text: pointsDelta ? `${message} · ${pointsDelta > 0 ? "+" : "−"}${Math.abs(pointsDelta)} แต้มโลกเสมือน` : message });
+      try {
+        const summary = await api<VoteSummary>(apiPath(classroomId, "/votes"), { signal });
+        if (!signal.aborted) setVoteSummary(summary);
+      } catch { if (!signal.aborted) setError("บันทึกโหวตแล้ว แต่โหลดยอดล่าสุดไม่สำเร็จ"); }
+    } catch (reason) { if (!signal.aborted) setError(reason instanceof Error ? reason.message : "บันทึกการถูกใจไม่สำเร็จ"); }
+    finally {
+      if (voteInFlight.current === controller) { voteInFlight.current = null; setVotePending(false); }
+    }
   }
 
   function like(model: GalleryModel) { return toggleVote(model.id, model.likedByMe); }
@@ -1374,10 +1394,12 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         <div className="gallery-menu-room"><strong>{manifest?.classroomName ?? "โลกเสมือน"}</strong><small>{online} คนออนไลน์ · WASD/ลูกศร เดิน · Space กระโดด · ลากเพื่อหมุนมุมมอง</small></div>
         {user.role === "student" && <div className="gallery-attendance"><StudentAttendance /></div>}
         {user.role === "student" && <section className="gallery-management gallery-vote-list"><strong>โหวตผลงานของเพื่อน · ไม่เกิน 10 ครั้งต่องาน</strong>
+          <small>โหวตใหม่ได้ 2 แต้ม สูงสุด 20 แต้มต่องาน · ยกเลิกโหวตจะหักแต้มที่ได้รับจากโหวตนั้น</small>
+          {voteNotice && <p className="muted" role="status">{voteNotice.text}</p>}
           {voteSummary?.usage.map((item) => <small key={item.assignmentId}>{item.assignmentTitle}: ใช้แล้ว {item.used}/{voteSummary.limit} · เหลือ {Math.max(0, voteSummary.limit - item.used)}</small>)}
           {voteSummary?.myVotes.length ? voteSummary.myVotes.map((vote) => <div className="gallery-vote-entry" key={vote.fileId}>
             <span><strong>{vote.studentNumber ?? "—"}. {vote.displayName}</strong><small>{vote.assignmentTitle} · {vote.originalName}{vote.hidden ? " · ครูซ่อนผลงาน" : vote.unavailable ? " · งาน/พื้นที่นี้ไม่แสดงแล้ว" : ""}</small></span>
-            <button className="text-button" onClick={() => void toggleVote(vote.fileId, true)}>ยกเลิก</button>
+            <button className="text-button" disabled={votePending} onClick={() => void toggleVote(vote.fileId, true)}>ยกเลิก</button>
           </div>) : <small>{voteSummary ? "ยังไม่ได้โหวต · ยกเลิกโหวตแล้วจะได้สิทธิ์คืน" : "กำลังโหลดโหวต…"}</small>}
         </section>}
         {manifest?.nextOffset != null && <button className="button button-quiet" onClick={() => void load(manifest.nextOffset!)}>โหลดผลงานเพิ่ม</button>}
@@ -1390,6 +1412,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
         <section className="gallery-management gallery-point-balance">
           <strong>อุปกรณ์และตัวละคร</strong>
           {!teacher && <><span>{wallet ? `${wallet.balance} แต้ม` : "กำลังโหลดแต้ม…"}</span>
+            {wallet && wallet.balance < 0 && <small>แต้มติดลบจากการยกเลิกโหวต สะสมแต้มเพิ่มเพื่อซื้ออุปกรณ์ใหม่</small>}
             {wallet && <small>เหลือ {wallet.spells} คาถา · {wallet.license ? "มีใบขับขี่สำหรับ 1 เที่ยว" : "ไม่มีใบขับขี่"}</small>}</>}
           <div className="gallery-management-actions">
             <button className="button button-quiet" onClick={toggleWand} aria-pressed={wandMode}
@@ -1547,7 +1570,7 @@ export function GalleryWorld({ classroomId, user, close, logout }: { classroomId
       </div>}
       {!menuOpen && !activityPanel && !customizerOpen && !knockSeconds && <div className="gallery-touch" role="group" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); moveTouchJoystick(event, touchKnobRef.current, touchRef.current); }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) moveTouchJoystick(event, touchKnobRef.current, touchRef.current); }} onPointerUp={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} onPointerCancel={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} onLostPointerCapture={() => resetTouchJoystick(touchKnobRef.current, touchRef.current)} aria-label="ลากจอยสติ๊กเพื่อเดิน"><span ref={touchKnobRef} className="gallery-touch-knob" aria-hidden="true" /></div>}
       {!menuOpen && !activityPanel && !driving && <button className="gallery-jump button button-quiet" disabled={customizerOpen || knockSeconds > 0} onPointerDown={(event) => { event.preventDefault(); jumpRef.current = true; }} onClick={(event) => { if (event.detail === 0) jumpRef.current = true; }}>กระโดด ↑</button>}
-      {selected && <aside className="gallery-inspect"><button className="icon-button" onClick={() => setSelected(null)} aria-label="ปิด">×</button><p className="eyebrow">{selected.displayName} · เลขที่ {selected.studentNumber ?? "—"}</p><h3>{selected.originalName}</h3><p className="muted">{selected.assignmentTitle}</p><p>{selected.likes} ถูกใจ{selected.likes >= 6 ? " · ระดับทอง" : selected.likes >= 3 ? " · ระดับเงิน" : selected.likes > 0 ? " · ระดับทองแดง" : ""}</p>{selectedPageCount > 1 && <div className="gallery-display-pages"><span>ผลงานในพื้นที่ {selectedPage * 40 + 1}–{Math.min(selectedPage * 40 + 40, selectedStudentWork.length)} จาก {selectedStudentWork.length}</span><button className="text-button" disabled={selectedPage === 0} onClick={() => { const next = selectedStudentWork[(selectedPage - 1) * 40]; setDisplayPages((pages) => ({ ...pages, [selected.studentId]: selectedPage - 1 })); if (next) setSelected(next); }}>ก่อนหน้า</button><button className="text-button" disabled={selectedPage + 1 >= selectedPageCount} onClick={() => { const next = selectedStudentWork[(selectedPage + 1) * 40]; setDisplayPages((pages) => ({ ...pages, [selected.studentId]: selectedPage + 1 })); if (next) setSelected(next); }}>ถัดไป</button></div>}{user.role === "student" && selected.studentId !== manifest?.viewerStudentId && <><small>เหลือ {selectedVotesRemaining}/{voteSummary?.limit ?? 10} โหวตสำหรับงานนี้</small><button className="button button-quiet" disabled={!selected.likedByMe && selectedVotesRemaining <= 0} onClick={() => void like(selected)}>{selected.likedByMe ? "ยกเลิกโหวต · ได้สิทธิ์คืน" : selectedVotesRemaining <= 0 ? "โหวตครบแล้ว" : "โหวตผลงานนี้"}</button></>}{teacher && <button className="button button-quiet" onClick={() => void setHidden(selected)}>{selected.hidden ? "แสดงผลงาน" : "ซ่อนผลงาน"}</button>}<button className="button button-primary" onClick={() => setPreview(selected)}>เปิดดูโมเดล</button></aside>}
+      {selected && <aside className="gallery-inspect"><button className="icon-button" onClick={() => setSelected(null)} aria-label="ปิด">×</button><p className="eyebrow">{selected.displayName} · เลขที่ {selected.studentNumber ?? "—"}</p><h3>{selected.originalName}</h3><p className="muted">{selected.assignmentTitle}</p><p>{selected.likes} ถูกใจ{selected.likes >= 6 ? " · ระดับทอง" : selected.likes >= 3 ? " · ระดับเงิน" : selected.likes > 0 ? " · ระดับทองแดง" : ""}</p>{selectedPageCount > 1 && <div className="gallery-display-pages"><span>ผลงานในพื้นที่ {selectedPage * 40 + 1}–{Math.min(selectedPage * 40 + 40, selectedStudentWork.length)} จาก {selectedStudentWork.length}</span><button className="text-button" disabled={selectedPage === 0} onClick={() => { const next = selectedStudentWork[(selectedPage - 1) * 40]; setDisplayPages((pages) => ({ ...pages, [selected.studentId]: selectedPage - 1 })); if (next) setSelected(next); }}>ก่อนหน้า</button><button className="text-button" disabled={selectedPage + 1 >= selectedPageCount} onClick={() => { const next = selectedStudentWork[(selectedPage + 1) * 40]; setDisplayPages((pages) => ({ ...pages, [selected.studentId]: selectedPage + 1 })); if (next) setSelected(next); }}>ถัดไป</button></div>}{user.role === "student" && selected.studentId !== manifest?.viewerStudentId && <><small>เหลือ {selectedVotesRemaining}/{voteSummary?.limit ?? 10} โหวตสำหรับงานนี้</small><button className="button button-quiet" disabled={votePending || (!selected.likedByMe && selectedVotesRemaining <= 0)} onClick={() => void like(selected)}>{selected.likedByMe ? "ยกเลิกโหวต · ได้สิทธิ์คืน" : selectedVotesRemaining <= 0 ? "โหวตครบแล้ว" : "โหวตผลงานนี้"}</button>{voteNotice?.fileId === selected.id && <p className="muted" role="status">{voteNotice.text}</p>}</>}{teacher && <button className="button button-quiet" onClick={() => void setHidden(selected)}>{selected.hidden ? "แสดงผลงาน" : "ซ่อนผลงาน"}</button>}<button className="button button-primary" onClick={() => setPreview(selected)}>เปิดดูโมเดล</button></aside>}
       {customizerOpen && <CharacterCustomizer appearance={draftAppearance} onChange={setDraftAppearance} onCancel={() => setCustomizerOpen(false)} onSave={() => void saveAppearance()} saving={loading} error={error} />}
     </section>
     {preview && <ModelPreview file={preview} contentPath={galleryFileUrl(classroomId, preview.id, "content")} materialPath={preview.materialAvailable ? galleryFileUrl(classroomId, preview.id, "material") : undefined} close={() => setPreview(null)} />}

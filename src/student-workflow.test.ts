@@ -1352,17 +1352,22 @@ describe("student submission API", () => {
       const voteSummary = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery/votes`, { headers: studentHeaders }));
       expect(voteSummary.status).toBe(200);
       expect(await voteSummary.json()).toMatchObject({ limit: 10, blockTotals: [], usage: [], myVotes: [] });
+      await sql`INSERT INTO classroom.gallery_likes(classroom_id,file_id,student_id) VALUES(${roomA},${earlierAssignmentModelId},${studentA})`;
+      expect(await (await voteRequest(earlierAssignmentModelId)).json()).toMatchObject({ pointsDelta: 0, balance: 2 });
+      expect(await (await voteRequest(earlierAssignmentModelId, "DELETE")).json()).toMatchObject({ pointsDelta: 0, balance: 2 });
       const concurrentVotes = await Promise.all(voteFileIds.map((id) => voteRequest(id)));
       expect(concurrentVotes.map((response) => response.status).sort()).toEqual([...Array(10).fill(200), 409].sort());
+      for (const response of concurrentVotes.filter((response) => response.ok)) expect(await response.json()).toMatchObject({ pointsDelta: 2 });
+      expect(await (await pointBalance(studentHeaders)).json()).toEqual({ balance: 22 });
       const acceptedIds = voteFileIds.filter((_id, index) => concurrentVotes[index]?.status === 200);
       const rejectedId = voteFileIds.find((_id, index) => concurrentVotes[index]?.status === 409)!;
       const fullVoteSummary = await (await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery/votes`, { headers: studentHeaders }))).json() as GalleryVoteSummaryTest;
       expect(fullVoteSummary).toMatchObject({ limit: 10, usage: [{ assignmentId: assignmentA, used: 10 }] });
       expect(fullVoteSummary.myVotes).toHaveLength(10);
       expect(fullVoteSummary.blockTotals).toContainEqual({ studentId: studentB, votes: 10 });
-      expect((await voteRequest(acceptedIds[0]!, "PUT")).status).toBe(200); // Retries do not spend another slot.
+      expect(await (await voteRequest(acceptedIds[0]!, "PUT")).json()).toMatchObject({ pointsDelta: 0, balance: 22 });
       expect((await voteRequest(rejectedId)).status).toBe(409);
-      expect(await (await voteRequest(earlierAssignmentModelId)).json()).toMatchObject({ likedByMe: true, remaining: 9 });
+      expect(await (await voteRequest(earlierAssignmentModelId)).json()).toMatchObject({ likedByMe: true, remaining: 9, pointsDelta: 2, balance: 24 });
       expect((await (await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery/votes`, { headers: studentHeaders }))).json() as GalleryVoteSummaryTest).usage).toEqual(expect.arrayContaining([
         { assignmentId: assignmentA, assignmentTitle: "Build", used: 10 }, { assignmentId: earlierAssignmentId, assignmentTitle: "Earlier project", used: 1 },
       ]));
@@ -1374,20 +1379,32 @@ describe("student submission API", () => {
       expect(hiddenVotes.myVotes.find((vote) => vote.fileId === acceptedIds[0])).toMatchObject({ hidden: true });
       const visibleManifest = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery`, { headers: studentHeaders }));
       expect((await visibleManifest.json() as { models: { id: string }[] }).models.some((model) => model.id === acceptedIds[0])).toBe(false);
-      const undoHiddenVote = await voteRequest(acceptedIds[0]!, "DELETE");
-      expect(await undoHiddenVote.json()).toMatchObject({ likedByMe: false, remaining: 1 });
+      expect((await voteRequest(acceptedIds[0]!)).status).toBe(404);
+      const undos = await Promise.all([voteRequest(acceptedIds[0]!, "DELETE"), voteRequest(acceptedIds[0]!, "DELETE")]);
+      const undone = await Promise.all(undos.map((response) => response.json()));
+      expect(undone).toEqual(expect.arrayContaining([
+        expect.objectContaining({ likedByMe: false, remaining: 1, pointsDelta: -2, balance: 22 }),
+        expect.objectContaining({ likedByMe: false, remaining: 1, pointsDelta: 0, balance: 22 }),
+      ]));
       expect((await (await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery/votes`, { headers: studentHeaders }))).json() as GalleryVoteSummaryTest).myVotes).toHaveLength(10);
-      expect((await voteRequest(rejectedId)).status).toBe(200);
+      expect(await (await voteRequest(rejectedId)).json()).toMatchObject({ pointsDelta: 2, balance: 24 });
       expect((await voteRequest(peerFile)).status).toBe(409);
       expect((await voteRequest(uploadedModel.id)).status).toBe(404); // Self-likes stay forbidden.
+      expect((await voteRequest(peerFile, "PUT", teacherHeaders)).status).toBe(401);
+      expect(await (await pointBalance(studentHeaders)).json()).toEqual({ balance: 24 });
       const teacherVotes = await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery/votes`, { headers: teacherHeaders }));
       expect(teacherVotes.status).toBe(200);
       expect(await teacherVotes.json()).toMatchObject({ limit: 10, usage: [], myVotes: [] });
       expect((await app.handle(new Request(`http://localhost/api/classrooms/${roomA}/gallery/votes`, { headers: { cookie: `classroom_session=${otherTeacherToken}` } }))).status).toBe(404);
+      await sql`DELETE FROM classroom.files WHERE id=${rejectedId}`;
+      expect(await (await voteRequest(rejectedId, "DELETE")).json()).toMatchObject({ pointsDelta: 0, balance: 24 });
+      expect(await (await voteRequest(peerFile)).json()).toMatchObject({ likedByMe: true, remaining: 0, pointsDelta: 0, balance: 24 });
+      expect(await (await voteRequest(peerFile, "DELETE")).json()).toMatchObject({ pointsDelta: 0, balance: 24 });
       await sql.begin(async (tx) => {
         await tx`DELETE FROM classroom.files WHERE id = ANY(${[...voteFileIds, earlierAssignmentModelId]}::uuid[])`;
         await tx`DELETE FROM classroom.assignments WHERE id = ${earlierAssignmentId}`;
       });
+      expect(await (await pointBalance(studentHeaders)).json()).toEqual({ balance: 24 });
       const worldContent = `http://localhost/api/classrooms/${roomA}/gallery/files/${glbFile.id}/content`;
       const glbRead = await app.handle(new Request(worldContent, { headers: studentHeaders }));
       expect(glbRead.status).toBe(200); expect(new Uint8Array(await glbRead.arrayBuffer())).toEqual(new Uint8Array(glbBytes));
